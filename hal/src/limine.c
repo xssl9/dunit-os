@@ -15,6 +15,12 @@ static volatile struct limine_terminal_request terminal_request = {
     .revision = 0
 };
 
+__attribute__((used, section(".limine_requests")))
+static volatile struct limine_kernel_file_request kernel_file_request = {
+    .id = LIMINE_KERNEL_FILE_REQUEST,
+    .revision = 0
+};
+
 __attribute__((used, section(".limine_requests_start_marker")))
 static volatile LIMINE_REQUESTS_START_MARKER;
 
@@ -27,4 +33,8 @@ struct limine_framebuffer_response *get_framebuffer_response(void) {
 
 struct limine_terminal_response *get_terminal_response(void) {
     return terminal_request.response;
+}
+
+struct limine_kernel_file_response *get_kernel_file_response(void) {
+    return kernel_file_request.response;
 }

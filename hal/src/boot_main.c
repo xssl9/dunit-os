@@ -45,8 +45,31 @@ struct limine_terminal_response {
     limine_terminal_write write;
 };
 
+struct limine_kernel_file {
+    uint64_t revision;
+    void *address;
+    uint64_t size;
+    char *path;
+    char *cmdline;
+    uint32_t media_type;
+    uint32_t unused;
+    uint32_t tftp_ip;
+    uint32_t tftp_port;
+    uint32_t partition_index;
+    uint32_t mbr_disk_id;
+    void *gpt_disk_uuid;
+    void *gpt_part_uuid;
+    void *part_uuid;
+};
+
+struct limine_kernel_file_response {
+    uint64_t revision;
+    struct limine_kernel_file *kernel_file;
+};
+
 extern struct limine_framebuffer_response *get_framebuffer_response(void);
 extern struct limine_terminal_response *get_terminal_response(void);
+extern struct limine_kernel_file_response *get_kernel_file_response(void);
 
 void serial_init() {
     __asm__ volatile("outb %0, %1" : : "a"((uint8_t)0x00), "Nd"((uint16_t)0x3F8 + 1));
@@ -75,7 +98,33 @@ static int strlen(const char *str) {
     return len;
 }
 
-extern void kernel_main(struct limine_framebuffer *fb, struct limine_terminal_response *term);
+static int strcmp(const char *s1, const char *s2) {
+    while (*s1 && (*s1 == *s2)) {
+        s1++;
+        s2++;
+    }
+    return *(unsigned char *)s1 - *(unsigned char *)s2;
+}
+
+static int strstr_contains(const char *haystack, const char *needle) {
+    if (!haystack || !needle) return 0;
+    
+    while (*haystack) {
+        const char *h = haystack;
+        const char *n = needle;
+        
+        while (*h && *n && (*h == *n)) {
+            h++;
+            n++;
+        }
+        
+        if (!*n) return 1;
+        haystack++;
+    }
+    return 0;
+}
+
+extern void kernel_main(struct limine_framebuffer *fb, struct limine_terminal_response *term, int terminal_mode);
 
 void boot_main(void) {
     serial_init();
@@ -83,17 +132,30 @@ void boot_main(void) {
     
     struct limine_framebuffer_response *fb_resp = get_framebuffer_response();
     struct limine_terminal_response *term_resp = get_terminal_response();
+    struct limine_kernel_file_response *kf_resp = get_kernel_file_response();
+    
+    int terminal_mode = 0;
+    if (kf_resp && kf_resp->kernel_file && kf_resp->kernel_file->cmdline) {
+        serial_write("[BOOT] Cmdline: ");
+        serial_write(kf_resp->kernel_file->cmdline);
+        serial_write("\r\n");
+        
+        if (strstr_contains(kf_resp->kernel_file->cmdline, "mode=terminal")) {
+            terminal_mode = 1;
+            serial_write("[BOOT] Terminal mode requested\r\n");
+        }
+    }
     
     struct limine_framebuffer *fb = NULL;
-    if (fb_resp && fb_resp->framebuffer_count > 0) {
+    if (fb_resp && fb_resp->framebuffer_count > 0 && !terminal_mode) {
         fb = fb_resp->framebuffers[0];
         serial_write("[BOOT] Framebuffer available\r\n");
     } else {
-        serial_write("[BOOT] No framebuffer available\r\n");
+        serial_write("[BOOT] No framebuffer (terminal mode)\r\n");
     }
     
     serial_write("[BOOT] Calling kernel_main...\r\n");
-    kernel_main(fb, term_resp);
+    kernel_main(fb, term_resp, terminal_mode);
     
     serial_write("[BOOT] kernel_main returned (should not happen)\r\n");
     

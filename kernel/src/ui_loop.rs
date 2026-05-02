@@ -1,6 +1,5 @@
 use crate::drivers::mouse;
 use crate::window_manager::{self, AppType};
-use crate::terminal;
 
 fn get_pixel_color(x: usize, y: usize, width: usize, height: usize) -> u32 {
     let bg_color = 0x002b36u32;
@@ -27,6 +26,8 @@ fn get_pixel_color(x: usize, y: usize, width: usize, height: usize) -> u32 {
                     return 0x268bd2;
                 } else if dx == 0 || dx == window.width - 1 || dy == 0 || dy == window.height - 1 {
                     return 0x586e75;
+                } else if window.app_type == AppType::Terminal {
+                    return 0x002b36;
                 } else {
                     return 0xfdf6e3;
                 }
@@ -98,6 +99,103 @@ fn get_pixel_color(x: usize, y: usize, width: usize, height: usize) -> u32 {
     bg_color
 }
 
+fn draw_char(fb: *mut u32, width: usize, x: usize, y: usize, ch: u8, color: u32) {
+    let font: &[u8] = match ch {
+        b'A' => &[0x7C, 0x12, 0x11, 0x12, 0x7C],
+        b'B' => &[0x7F, 0x49, 0x49, 0x49, 0x36],
+        b'C' => &[0x3E, 0x41, 0x41, 0x41, 0x22],
+        b'D' => &[0x7F, 0x41, 0x41, 0x22, 0x1C],
+        b'E' => &[0x7F, 0x49, 0x49, 0x49, 0x41],
+        b'F' => &[0x7F, 0x09, 0x09, 0x09, 0x01],
+        b'G' => &[0x3E, 0x41, 0x49, 0x49, 0x7A],
+        b'H' => &[0x7F, 0x08, 0x08, 0x08, 0x7F],
+        b'I' => &[0x00, 0x41, 0x7F, 0x41, 0x00],
+        b'J' => &[0x20, 0x40, 0x41, 0x3F, 0x01],
+        b'K' => &[0x7F, 0x08, 0x14, 0x22, 0x41],
+        b'L' => &[0x7F, 0x40, 0x40, 0x40, 0x40],
+        b'M' => &[0x7F, 0x02, 0x0C, 0x02, 0x7F],
+        b'N' => &[0x7F, 0x04, 0x08, 0x10, 0x7F],
+        b'O' => &[0x3E, 0x41, 0x41, 0x41, 0x3E],
+        b'P' => &[0x7F, 0x09, 0x09, 0x09, 0x06],
+        b'Q' => &[0x3E, 0x41, 0x51, 0x21, 0x5E],
+        b'R' => &[0x7F, 0x09, 0x19, 0x29, 0x46],
+        b'S' => &[0x46, 0x49, 0x49, 0x49, 0x31],
+        b'T' => &[0x01, 0x01, 0x7F, 0x01, 0x01],
+        b'U' => &[0x3F, 0x40, 0x40, 0x40, 0x3F],
+        b'V' => &[0x1F, 0x20, 0x40, 0x20, 0x1F],
+        b'W' => &[0x3F, 0x40, 0x38, 0x40, 0x3F],
+        b'X' => &[0x63, 0x14, 0x08, 0x14, 0x63],
+        b'Y' => &[0x07, 0x08, 0x70, 0x08, 0x07],
+        b'Z' => &[0x61, 0x51, 0x49, 0x45, 0x43],
+        b'a' => &[0x20, 0x54, 0x54, 0x54, 0x78],
+        b'b' => &[0x7F, 0x48, 0x44, 0x44, 0x38],
+        b'c' => &[0x38, 0x44, 0x44, 0x44, 0x20],
+        b'd' => &[0x38, 0x44, 0x44, 0x48, 0x7F],
+        b'e' => &[0x38, 0x54, 0x54, 0x54, 0x18],
+        b'f' => &[0x08, 0x7E, 0x09, 0x01, 0x02],
+        b'g' => &[0x0C, 0x52, 0x52, 0x52, 0x3E],
+        b'h' => &[0x7F, 0x08, 0x04, 0x04, 0x78],
+        b'i' => &[0x00, 0x44, 0x7D, 0x40, 0x00],
+        b'j' => &[0x20, 0x40, 0x44, 0x3D, 0x00],
+        b'k' => &[0x7F, 0x10, 0x28, 0x44, 0x00],
+        b'l' => &[0x00, 0x41, 0x7F, 0x40, 0x00],
+        b'm' => &[0x7C, 0x04, 0x18, 0x04, 0x78],
+        b'n' => &[0x7C, 0x08, 0x04, 0x04, 0x78],
+        b'o' => &[0x38, 0x44, 0x44, 0x44, 0x38],
+        b'p' => &[0x7C, 0x14, 0x14, 0x14, 0x08],
+        b'q' => &[0x08, 0x14, 0x14, 0x18, 0x7C],
+        b'r' => &[0x7C, 0x08, 0x04, 0x04, 0x08],
+        b's' => &[0x48, 0x54, 0x54, 0x54, 0x20],
+        b't' => &[0x04, 0x3F, 0x44, 0x40, 0x20],
+        b'u' => &[0x3C, 0x40, 0x40, 0x20, 0x7C],
+        b'v' => &[0x1C, 0x20, 0x40, 0x20, 0x1C],
+        b'w' => &[0x3C, 0x40, 0x30, 0x40, 0x3C],
+        b'x' => &[0x44, 0x28, 0x10, 0x28, 0x44],
+        b'y' => &[0x0C, 0x50, 0x50, 0x50, 0x3C],
+        b'z' => &[0x44, 0x64, 0x54, 0x4C, 0x44],
+        b'0' => &[0x3E, 0x51, 0x49, 0x45, 0x3E],
+        b'1' => &[0x00, 0x42, 0x7F, 0x40, 0x00],
+        b'2' => &[0x42, 0x61, 0x51, 0x49, 0x46],
+        b'3' => &[0x21, 0x41, 0x45, 0x4B, 0x31],
+        b'4' => &[0x18, 0x14, 0x12, 0x7F, 0x10],
+        b'5' => &[0x27, 0x45, 0x45, 0x45, 0x39],
+        b'6' => &[0x3C, 0x4A, 0x49, 0x49, 0x30],
+        b'7' => &[0x01, 0x71, 0x09, 0x05, 0x03],
+        b'8' => &[0x36, 0x49, 0x49, 0x49, 0x36],
+        b'9' => &[0x06, 0x49, 0x49, 0x29, 0x1E],
+        b' ' => &[0x00, 0x00, 0x00, 0x00, 0x00],
+        b'.' => &[0x00, 0x60, 0x60, 0x00, 0x00],
+        b':' => &[0x00, 0x36, 0x36, 0x00, 0x00],
+        b'$' => &[0x24, 0x2A, 0x7F, 0x2A, 0x12],
+        b'-' => &[0x08, 0x08, 0x08, 0x08, 0x08],
+        b'/' => &[0x20, 0x10, 0x08, 0x04, 0x02],
+        b'(' => &[0x00, 0x1C, 0x22, 0x41, 0x00],
+        b')' => &[0x00, 0x41, 0x22, 0x1C, 0x00],
+        _ => &[0x00, 0x00, 0x00, 0x00, 0x00],
+    };
+    
+    unsafe {
+        for dx in 0..5 {
+            let col = font[dx];
+            for dy in 0..8 {
+                if (col >> dy) & 1 == 1 {
+                    let px = x + dx;
+                    let py = y + dy;
+                    if px < width {
+                        *fb.add(py * width + px) = color;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn draw_text(fb: *mut u32, width: usize, x: usize, y: usize, text: &str, color: u32) {
+    for (i, ch) in text.bytes().enumerate() {
+        draw_char(fb, width, x + i * 6, y, ch, color);
+    }
+}
+
 fn draw_window(fb_addr: *mut u32, width: usize, height: usize, x: usize, y: usize, w: usize, h: usize, title: &str, app_type: AppType) {
     unsafe {
         for dy in 0..h {
@@ -120,68 +218,134 @@ fn draw_window(fb_addr: *mut u32, width: usize, height: usize, x: usize, y: usiz
             }
         }
         
-        let simple_font = [
-            [0,1,1,1,0],
-            [1,0,0,0,1],
-            [1,0,0,0,1],
-            [1,0,0,0,1],
-            [0,1,1,1,0],
-        ];
+        draw_text(fb_addr, width, x + 10, y + 10, title, 0xfdf6e3);
+    }
+}
+
+fn redraw_full_screen(fb_addr: *mut u32, width: usize, height: usize) {
+    let bg_color = 0x002b36u32;
+    let panel_color = 0x073642u32;
+    let plank_color = 0x1c1c1cu32;
+    
+    unsafe {
+        for y in 0..height {
+            for x in 0..width {
+                let color = if y < 40 {
+                    panel_color
+                } else if y >= height - 64 {
+                    bg_color
+                } else {
+                    bg_color
+                };
+                *fb_addr.add(y * width + x) = color;
+            }
+        }
         
-        for (i, _ch) in title.chars().enumerate() {
-            for dy in 0..5 {
-                for dx in 0..5 {
-                    if simple_font[dy][dx] == 1 {
-                        let px = x + 10 + i * 6 + dx;
-                        let py = y + 10 + dy;
-                        if px < width && py < height {
-                            *fb_addr.add(py * width + px) = 0xfdf6e3;
-                        }
-                    }
+        draw_text(fb_addr, width, 10, 15, "Workspace 1", 0x93a1a1);
+        draw_text(fb_addr, width, width - 60, 15, "13:37", 0x93a1a1);
+        
+        let plank_height = 64;
+        let plank_y = height - plank_height;
+        let icon_size = 48;
+        let icon_spacing = 8;
+        let plank_start_x = (width - (5 * (icon_size + icon_spacing))) / 2;
+        
+        for y in plank_y..height {
+            for x in (plank_start_x - 20)..(plank_start_x + 5 * (icon_size + icon_spacing) + 20) {
+                if x < width {
+                    *fb_addr.add(y * width + x) = plank_color;
                 }
             }
         }
         
-        if app_type == AppType::Terminal {
-            if let Some(term) = terminal::get_terminal() {
-                let text_color = 0x859900u32;
-                let mut line_y = y + 40;
-                
-                for line in term.get_visible_lines() {
-                    if line_y + 10 > y + h {
-                        break;
+        let icon_colors = [0x268bd2u32, 0x859900u32, 0xb58900u32, 0xdc322fu32, 0x6c71c4u32];
+        for i in 0..5 {
+            let icon_x = plank_start_x + i * (icon_size + icon_spacing);
+            let icon_y = plank_y + 8;
+            
+            for dy in 0..icon_size {
+                for dx in 0..icon_size {
+                    let px = icon_x + dx;
+                    let py = icon_y + dy;
+                    if px < width && py < height {
+                        let is_border = dx < 2 || dx >= icon_size - 2 || dy < 2 || dy >= icon_size - 2;
+                        let color = if is_border { 0x2c2c2cu32 } else { icon_colors[i] };
+                        *fb_addr.add(py * width + px) = color;
                     }
-                    
-                    for (i, _ch) in line.chars().enumerate().take(50) {
-                        for dy in 0..5 {
-                            for dx in 0..5 {
-                                if simple_font[dy][dx] == 1 {
-                                    let px = x + 10 + i * 6 + dx;
-                                    let py = line_y + dy;
-                                    if px < x + w && py < y + h {
-                                        *fb_addr.add(py * width + px) = text_color;
-                                    }
-                                }
+                }
+            }
+            
+            let cx = icon_x + icon_size / 2;
+            let cy = icon_y + icon_size / 2;
+            let icon_color = 0xffffffu32;
+            
+            match i {
+                0 => {
+                    for j in 0..3 {
+                        for k in 0..20 {
+                            *fb_addr.add((cy - 8 + j * 8) * width + cx - 10 + k) = icon_color;
+                        }
+                    }
+                    for j in 0..16 {
+                        *fb_addr.add((cy - 8 + j) * width + cx - 10) = icon_color;
+                        *fb_addr.add((cy - 8 + j) * width + cx + 9) = icon_color;
+                    }
+                },
+                1 => {
+                    for j in 0..16 {
+                        for k in 0..3 {
+                            *fb_addr.add((cy - 8 + j) * width + cx - 8 + k) = icon_color;
+                        }
+                    }
+                    for j in 0..12 {
+                        for k in 0..3 {
+                            *fb_addr.add((cy - 4 + j) * width + cx + 2 + k) = icon_color;
+                        }
+                    }
+                    for k in 0..10 {
+                        for j in 0..3 {
+                            *fb_addr.add((cy - 8 + j) * width + cx - 8 + k) = icon_color;
+                        }
+                    }
+                },
+                2 => {
+                    for j in 0..8 {
+                        for k in 0..8 {
+                            let dx = j as i32 - 4;
+                            let dy = k as i32 - 4;
+                            if dx * dx + dy * dy >= 9 && dx * dx + dy * dy <= 25 {
+                                *fb_addr.add((cy - 4 + k) * width + cx - 4 + j) = icon_color;
                             }
                         }
                     }
-                    line_y += 10;
-                }
-                
-                let prompt = term.get_prompt();
-                for (i, _ch) in prompt.chars().enumerate().take(50) {
-                    for dy in 0..5 {
-                        for dx in 0..5 {
-                            if simple_font[dy][dx] == 1 {
-                                let px = x + 10 + i * 6 + dx;
-                                let py = line_y + dy;
-                                if px < x + w && py < y + h {
-                                    *fb_addr.add(py * width + px) = 0xfdf6e3;
-                                }
+                },
+                3 => {
+                    for j in 0..20 {
+                        for k in 0..3 {
+                            *fb_addr.add((cy - 10 + j) * width + cx - 1 + k) = icon_color;
+                        }
+                    }
+                    for j in 0..3 {
+                        for k in 0..16 {
+                            *fb_addr.add((cy - 1 + j) * width + cx - 8 + k) = icon_color;
+                        }
+                    }
+                },
+                4 => {
+                    for j in 0..16 {
+                        for k in 0..12 {
+                            if j < 3 || k < 3 || k >= 9 {
+                                *fb_addr.add((cy - 8 + j) * width + cx - 6 + k) = icon_color;
                             }
                         }
                     }
-                }
+                    for j in 0..6 {
+                        for k in 0..3 {
+                            *fb_addr.add((cy - 2 + j) * width + cx - 2 + k) = icon_color;
+                        }
+                    }
+                },
+                _ => {}
             }
         }
     }

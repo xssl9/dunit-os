@@ -89,13 +89,19 @@ fn serial_write(s: &str) {
 }
 
 #[no_mangle]
-pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *const LimineTerminalResponse) -> ! {
+pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, term_ptr: *const LimineTerminalResponse, terminal_mode: i32) -> ! {
     serial_write("\r\n\r\n");
     serial_write("================================================================================\r\n");
     serial_write("                    Dunit OS (Green Tea) - Microkernel                         \r\n");
     serial_write("                              Version 1.0.0                                     \r\n");
     serial_write("================================================================================\r\n");
     serial_write("\r\n");
+    
+    if terminal_mode != 0 {
+        serial_write("[MODE] Terminal Mode\r\n\r\n");
+    } else {
+        serial_write("[MODE] GUI Mode\r\n\r\n");
+    }
     
     serial_write("[BOOT] Starting system initialization...\r\n\r\n");
     
@@ -114,42 +120,40 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
     serial_write("      [OK] Heap allocator initialized\r\n");
     serial_write("      [OK] Memory subsystem ready\r\n\r\n");
     
-    serial_write("[3/6] Initializing Process Scheduler...\r\n");
-    process::scheduler::init();
-    serial_write("      [OK] Scheduler initialized\r\n");
-    serial_write("      [OK] Ready queue created\r\n");
-    serial_write("      [OK] Context switching enabled\r\n\r\n");
-    
-    serial_write("[4/6] Initializing Inter-Process Communication (IPC)...\r\n");
-    ipc::init();
-    serial_write("      [OK] Message passing initialized\r\n");
-    serial_write("      [OK] Shared memory initialized\r\n");
-    serial_write("      [OK] IPC subsystem ready\r\n\r\n");
-    
-    serial_write("[5/6] Initializing Virtual File System (VFS)...\r\n");
-    fs::vfs::init();
-    serial_write("      [OK] VFS core initialized\r\n");
-    serial_write("      [OK] MemFS mounted at /\r\n");
-    serial_write("      [OK] DevFS mounted at /dev\r\n");
-    serial_write("      [OK] ProcFS mounted at /proc\r\n");
-    serial_write("\r\n");
-    
-    serial_write("[5.5/6] Initializing Initial Ramdisk (initrd)...\r\n");
-    initrd::init();
-    serial_write("      [OK] Initrd initialized\r\n\r\n");
-    
-    serial_write("[5.7/6] Initializing Input Drivers...\r\n");
-    drivers::init();
-    serial_write("      [OK] Keyboard driver initialized\r\n");
-    serial_write("      [OK] Mouse driver initialized\r\n\r\n");
-    
-    serial_write("[5.8/6] Initializing Window Manager...\r\n");
-    window_manager::init();
-    serial_write("      [OK] Window manager initialized\r\n\r\n");
-    
-    serial_write("[5.9/6] Initializing Terminal...\r\n");
-    terminal::init();
-    serial_write("      [OK] Terminal initialized\r\n\r\n");
+    if terminal_mode == 0 {
+        serial_write("[3/6] Initializing Process Scheduler...\r\n");
+        process::scheduler::init();
+        serial_write("      [OK] Scheduler initialized\r\n");
+        serial_write("      [OK] Ready queue created\r\n");
+        serial_write("      [OK] Context switching enabled\r\n\r\n");
+        
+        serial_write("[4/6] Initializing Inter-Process Communication (IPC)...\r\n");
+        ipc::init();
+        serial_write("      [OK] Message passing initialized\r\n");
+        serial_write("      [OK] Shared memory initialized\r\n");
+        serial_write("      [OK] IPC subsystem ready\r\n\r\n");
+        
+        serial_write("[5/6] Initializing Virtual File System (VFS)...\r\n");
+        fs::vfs::init();
+        serial_write("      [OK] VFS core initialized\r\n");
+        serial_write("      [OK] MemFS mounted at /\r\n");
+        serial_write("      [OK] DevFS mounted at /dev\r\n");
+        serial_write("      [OK] ProcFS mounted at /proc\r\n");
+        serial_write("\r\n");
+        
+        serial_write("[5.5/6] Initializing Initial Ramdisk (initrd)...\r\n");
+        initrd::init();
+        serial_write("      [OK] Initrd initialized\r\n\r\n");
+        
+        serial_write("[5.7/6] Initializing Input Drivers...\r\n");
+        drivers::init();
+        serial_write("      [OK] Keyboard driver initialized\r\n");
+        serial_write("      [OK] Mouse driver initialized\r\n\r\n");
+        
+        serial_write("[5.8/6] Initializing Window Manager...\r\n");
+        window_manager::init();
+        serial_write("      [OK] Window manager initialized\r\n\r\n");
+    }
     
     serial_write("[6/6] Enabling hardware interrupts...\r\n");
     unsafe { hal::hal_enable_interrupts(); }
@@ -159,6 +163,60 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
     serial_write("                    KERNEL INITIALIZATION COMPLETE                             \r\n");
     serial_write("================================================================================\r\n");
     serial_write("\r\n");
+    
+    if terminal_mode != 0 {
+        serial_write("[TERMINAL] Starting terminal mode...\r\n");
+        
+        let vga_buffer = 0xB8000 as *mut u16;
+        let mut row = 0;
+        let mut col = 0;
+        
+        unsafe {
+            for i in 0..(80 * 25) {
+                *vga_buffer.add(i) = 0x0F20;
+            }
+            
+            let banner = "Dunit OS (Green Tea) - Terminal Mode";
+            for (i, ch) in banner.bytes().enumerate() {
+                *vga_buffer.add(i) = 0x0F00 | (ch as u16);
+            }
+            row = 1;
+            
+            let line = "================================================================================";
+            for (i, ch) in line.bytes().enumerate() {
+                *vga_buffer.add(row * 80 + i) = 0x0F00 | (ch as u16);
+            }
+            row = 2;
+            
+            let welcome = "Welcome to Dunit OS!";
+            for (i, ch) in welcome.bytes().enumerate() {
+                *vga_buffer.add(row * 80 + i) = 0x0A00 | (ch as u16);
+            }
+            row = 3;
+            
+            let help = "Type 'help' for available commands";
+            for (i, ch) in help.bytes().enumerate() {
+                *vga_buffer.add(row * 80 + i) = 0x0700 | (ch as u16);
+            }
+            row = 5;
+            
+            let prompt = "/$ ";
+            for (i, ch) in prompt.bytes().enumerate() {
+                *vga_buffer.add(row * 80 + i) = 0x0F00 | (ch as u16);
+            }
+            col = 3;
+            
+            let cursor_pos = (row * 80 + col) as u16;
+            core::arch::asm!("out dx, al", in("dx") 0x3D4u16, in("al") 0x0Fu8);
+            core::arch::asm!("out dx, al", in("dx") 0x3D5u16, in("al") (cursor_pos & 0xFF) as u8);
+            core::arch::asm!("out dx, al", in("dx") 0x3D4u16, in("al") 0x0Eu8);
+            core::arch::asm!("out dx, al", in("dx") 0x3D5u16, in("al") ((cursor_pos >> 8) & 0xFF) as u8);
+        }
+        
+        loop {
+            unsafe { core::arch::asm!("hlt"); }
+        }
+    }
     
     let fb = unsafe { fb_ptr.as_ref() };
     if let Some(fb) = fb {
