@@ -1,0 +1,26 @@
+[package]
+name = "video_driver"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "video_driver"
+path = "src/lib.rs"
+
+[[bin]]
+name = "video_driver"
+path = "src/main.rs"
+required-features = ["binary"]
+
+[features]
+binary = []
+default = []
+
+[dependencies]
+
+[dev-dependencies]
+proptest = "1.0"
+
+[profile.release]
+panic = "abort"
+lto = true

@@ -1,0 +1,68 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib"]
+
+[[bin]]
+name = "kernel"
+path = "src/main.rs"
+
+[[test]]
+name = "scheduler_properties"
+harness = true
+
+[[test]]
+name = "interrupt_properties"
+harness = true
+
+[[test]]
+name = "process_isolation_properties"
+harness = true
+
+[[test]]
+name = "pmm_properties"
+harness = true
+
+[[test]]
+name = "vmm_properties"
+harness = true
+
+[[test]]
+name = "allocator_properties"
+harness = true
+
+[[test]]
+name = "syscall_properties"
+harness = true
+
+[[test]]
+name = "ipc_message_properties"
+harness = true
+
+[[test]]
+name = "ipc_shared_memory_properties"
+harness = true
+
+[[test]]
+name = "elf_properties"
+harness = true
+
+[[test]]
+name = "vfs_properties"
+harness = true
+
+[dependencies]
+bootloader = "0.9"
+bitflags = "2.11"
+
+[dev-dependencies]
+proptest = "1.4"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

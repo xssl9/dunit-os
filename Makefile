@@ -1,0 +1,113 @@
+.PHONY: all clean hal kernel iso run
+
+CC = gcc
+AS = nasm
+CARGO = cargo
+QEMU = qemu-system-x86_64
+
+HAL_DIR = hal
+KERNEL_DIR = kernel
+BUILD_DIR = build
+ISO_DIR = $(BUILD_DIR)/iso
+
+HAL_OBJS = $(BUILD_DIR)/boot.o $(BUILD_DIR)/boot_main.o $(BUILD_DIR)/limine.o $(BUILD_DIR)/hal.o $(BUILD_DIR)/ports.o \
+           $(BUILD_DIR)/gdt.o $(BUILD_DIR)/gdt_asm.o \
+           $(BUILD_DIR)/idt.o $(BUILD_DIR)/idt_asm.o $(BUILD_DIR)/interrupts.o \
+           $(BUILD_DIR)/context_switch.o $(BUILD_DIR)/syscall.o \
+           $(BUILD_DIR)/hal_test.o
+
+CFLAGS = -ffreestanding -fno-stack-protector -fno-pic -mno-red-zone \
+         -mcmodel=kernel -mno-sse -mno-sse2 -O2 -Wall -Wextra
+ASFLAGS = -f elf64
+
+all: $(BUILD_DIR)/kernel.elf
+
+$(BUILD_DIR):
+	mkdir -p $(BUILD_DIR)
+
+$(BUILD_DIR)/boot.o: $(HAL_DIR)/src/boot32.asm | $(BUILD_DIR)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD_DIR)/boot_main.o: $(HAL_DIR)/src/boot_main.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/limine.o: $(HAL_DIR)/src/limine.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/hal.o: $(HAL_DIR)/src/hal.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/ports.o: $(HAL_DIR)/src/ports.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/gdt.o: $(HAL_DIR)/src/gdt.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/gdt_asm.o: $(HAL_DIR)/src/gdt.asm | $(BUILD_DIR)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD_DIR)/idt.o: $(HAL_DIR)/src/idt.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/idt_asm.o: $(HAL_DIR)/src/idt.asm | $(BUILD_DIR)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD_DIR)/interrupts.o: $(HAL_DIR)/src/interrupts.asm | $(BUILD_DIR)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD_DIR)/context_switch.o: $(HAL_DIR)/src/context_switch.asm | $(BUILD_DIR)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD_DIR)/syscall.o: $(HAL_DIR)/src/syscall.asm | $(BUILD_DIR)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD_DIR)/hal_test.o: $(HAL_DIR)/src/hal_test.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+hal: $(HAL_OBJS)
+
+$(BUILD_DIR)/kernel.o: hal
+	cd $(KERNEL_DIR) && $(CARGO) build --release -Z build-std=core,alloc,compiler_builtins -Z build-std-features=compiler-builtins-mem -Z json-target-spec
+	cp $(KERNEL_DIR)/target/x86_64-unknown-none/release/libkernel.a $(BUILD_DIR)/kernel.o
+
+kernel: $(BUILD_DIR)/kernel.o
+
+$(BUILD_DIR)/kernel.elf: kernel
+	/usr/bin/ld.lld-19 -T $(KERNEL_DIR)/linker.ld -o $@ $(HAL_OBJS) $(BUILD_DIR)/kernel.o
+
+iso: $(BUILD_DIR)/kernel.elf
+	mkdir -p $(ISO_DIR)/boot/limine
+	cp $(BUILD_DIR)/kernel.elf $(ISO_DIR)/boot/
+	cp limine.conf $(ISO_DIR)/boot/limine/
+	cp limine/limine-bios.sys $(ISO_DIR)/boot/limine/
+	cp limine/limine-bios-cd.bin $(ISO_DIR)/boot/limine/
+	cp limine/limine-uefi-cd.bin $(ISO_DIR)/boot/limine/
+	mkdir -p $(ISO_DIR)/EFI/BOOT
+	cp limine/BOOTX64.EFI $(ISO_DIR)/EFI/BOOT/
+	xorriso -as mkisofs -b boot/limine/limine-bios-cd.bin \
+		-no-emul-boot -boot-load-size 4 -boot-info-table \
+		--efi-boot boot/limine/limine-uefi-cd.bin \
+		-efi-boot-part --efi-boot-image --protective-msdos-label \
+		$(ISO_DIR) -o $(BUILD_DIR)/microkernel.iso 2>/dev/null || \
+	xorriso -as mkisofs -b boot/limine/limine-bios-cd.bin \
+		-no-emul-boot -boot-load-size 4 -boot-info-table \
+		--efi-boot boot/limine/limine-uefi-cd.bin \
+		-efi-boot-part --efi-boot-image --protective-msdos-label \
+		"$$(pwd)/$(ISO_DIR)" -o "$$(pwd)/$(BUILD_DIR)/microkernel.iso"
+	./limine/limine bios-install $(BUILD_DIR)/microkernel.iso
+	@echo "ISO created at $(BUILD_DIR)/microkernel.iso"
+
+grub-iso: $(BUILD_DIR)/kernel.elf
+	rm -rf $(BUILD_DIR)/iso_grub
+	mkdir -p $(BUILD_DIR)/iso_grub/boot/grub
+	cp $(BUILD_DIR)/kernel.elf $(BUILD_DIR)/iso_grub/boot/
+	cp grub.cfg $(BUILD_DIR)/iso_grub/boot/grub/
+	grub-mkrescue -o $(BUILD_DIR)/os.iso $(BUILD_DIR)/iso_grub
+	@echo "GRUB ISO created at $(BUILD_DIR)/os.iso"
+
+run: iso
+	$(QEMU) -boot d -cdrom $(BUILD_DIR)/microkernel.iso -m 512M -serial stdio
+
+clean:
+	rm -rf $(BUILD_DIR)
+	cd $(KERNEL_DIR) && $(CARGO) clean

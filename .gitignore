@@ -1,0 +1,11 @@
+build/
+*.o
+*.elf
+*.iso
+*.log
+target/
+*.a
+*.bin
+*.sys
+.DS_Store
+limine/

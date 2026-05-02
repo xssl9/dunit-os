@@ -1,0 +1,13 @@
+[package]
+name = "plank"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib"]
+
+[[bin]]
+name = "plank"
+path = "src/main.rs"
+
+[dependencies]

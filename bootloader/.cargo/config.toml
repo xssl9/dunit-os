@@ -1,0 +1,5 @@
+[build]
+target = "x86_64-bootloader.json"
+
+[target.x86_64-bootloader]
+rustflags = ["-C", "link-arg=-Tlinker.ld"]
