@@ -36,8 +36,9 @@ pub fn handle_keyboard(_frame: &InterruptFrame) {
         core::arch::asm!("in al, dx", out("al") status, in("dx") 0x64u16, options(nomem, nostack));
         
         if (status & 0x01) != 0 && (status & 0x20) == 0 {
-            let _scancode: u8;
-            core::arch::asm!("in al, dx", out("al") _scancode, in("dx") 0x60u16, options(nomem, nostack));
+            let scancode: u8;
+            core::arch::asm!("in al, dx", out("al") scancode, in("dx") 0x60u16, options(nomem, nostack));
+            crate::drivers::keyboard::push_scancode(scancode);
         }
         
         core::arch::asm!("out dx, al", in("dx") 0x20u16, in("al") 0x20u8, options(nomem, nostack));

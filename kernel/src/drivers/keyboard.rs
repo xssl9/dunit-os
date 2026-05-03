@@ -1,22 +1,31 @@
 use crate::hal;
 
 static mut LAST_SCANCODE: u8 = 0;
+static mut SCANCODE_BUFFER: [u8; 16] = [0; 16];
+static mut BUFFER_READ: usize = 0;
+static mut BUFFER_WRITE: usize = 0;
 
 pub fn init() {
 }
 
 pub fn read_scancode() -> Option<u8> {
     unsafe {
-        let status: u8;
-        core::arch::asm!("in al, dx", out("al") status, in("dx") 0x64u16, options(nomem, nostack));
-        
-        if (status & 0x01) != 0 {
-            let scancode: u8;
-            core::arch::asm!("in al, dx", out("al") scancode, in("dx") 0x60u16, options(nomem, nostack));
-            LAST_SCANCODE = scancode;
+        if BUFFER_READ != BUFFER_WRITE {
+            let scancode = SCANCODE_BUFFER[BUFFER_READ];
+            BUFFER_READ = (BUFFER_READ + 1) % 16;
             Some(scancode)
         } else {
             None
+        }
+    }
+}
+
+pub fn push_scancode(scancode: u8) {
+    unsafe {
+        let next_write = (BUFFER_WRITE + 1) % 16;
+        if next_write != BUFFER_READ {
+            SCANCODE_BUFFER[BUFFER_WRITE] = scancode;
+            BUFFER_WRITE = next_write;
         }
     }
 }

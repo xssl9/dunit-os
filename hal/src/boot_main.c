@@ -147,11 +147,11 @@ void boot_main(void) {
     }
     
     struct limine_framebuffer *fb = NULL;
-    if (fb_resp && fb_resp->framebuffer_count > 0 && !terminal_mode) {
+    if (fb_resp && fb_resp->framebuffer_count > 0) {
         fb = fb_resp->framebuffers[0];
         serial_write("[BOOT] Framebuffer available\r\n");
     } else {
-        serial_write("[BOOT] No framebuffer (terminal mode)\r\n");
+        serial_write("[BOOT] No framebuffer\r\n");
     }
     
     serial_write("[BOOT] Calling kernel_main...\r\n");
