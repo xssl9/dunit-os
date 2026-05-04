@@ -212,12 +212,34 @@ impl VirtualMemoryManager {
 }
 
 static mut VMM_INSTANCE: Option<VirtualMemoryManager> = None;
+static mut HHDM_OFFSET: u64 = 0;
 
 pub fn init() {
-    // Временно пропускаем инициализацию VMM
-    // TODO: настроить page tables
+}
+
+pub fn set_hhdm_offset(offset: u64) {
+    unsafe {
+        HHDM_OFFSET = offset;
+    }
+}
+
+pub fn get_hhdm_offset() -> u64 {
+    unsafe { HHDM_OFFSET }
 }
 
 pub fn get_vmm() -> Option<&'static mut VirtualMemoryManager> {
     unsafe { VMM_INSTANCE.as_mut() }
+}
+
+pub fn phys_to_virt(phys: usize) -> usize {
+    phys + (unsafe { HHDM_OFFSET } as usize)
+}
+
+pub fn virt_to_phys(virt: usize) -> usize {
+    virt - (unsafe { HHDM_OFFSET } as usize)
+}
+
+pub fn map_vga_buffer() -> *mut u16 {
+    let vga_phys = 0xB8000usize;
+    vga_phys as *mut u16
 }

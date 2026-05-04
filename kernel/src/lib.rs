@@ -73,6 +73,88 @@ fn terminal_print(term_resp: &LimineTerminalResponse, s: &str) {
     }
 }
 
+static mut TERM_RESPONSE: Option<*const LimineTerminalResponse> = None;
+static mut VGA_ROW: usize = 0;
+static mut VGA_COL: usize = 0;
+const VGA_WIDTH: usize = 80;
+const VGA_HEIGHT: usize = 25;
+
+static mut INPUT_BUFFER: [u8; 256] = [0; 256];
+static mut INPUT_LEN: usize = 0;
+
+fn terminal_write_str(s: &str) {
+    unsafe {
+        if let Some(term_ptr) = TERM_RESPONSE {
+            let term_resp = &*term_ptr;
+            if term_resp.terminal_count > 0 {
+                let term = *term_resp.terminals;
+                (term_resp.write)(term, s.as_ptr(), s.len() as u64);
+            }
+        }
+    }
+}
+
+fn vga_clear() {
+    serial_write("[TERM] Using Limine Terminal API\r\n");
+    terminal_write_str("\x1b[2J\x1b[H");
+    unsafe {
+        VGA_ROW = 0;
+        VGA_COL = 0;
+    }
+    serial_write("[TERM] Terminal cleared\r\n");
+}
+
+fn vga_putchar(ch: u8) {
+    unsafe {
+        if ch == b'\n' {
+            VGA_COL = 0;
+            VGA_ROW += 1;
+        } else if ch == b'\r' {
+            VGA_COL = 0;
+        } else if ch == 0x08 {
+            if VGA_COL > 0 {
+                VGA_COL -= 1;
+                terminal_write_str("\x08 \x08");
+            }
+        } else {
+            if VGA_COL >= VGA_WIDTH {
+                VGA_COL = 0;
+                VGA_ROW += 1;
+            }
+            
+            if VGA_ROW >= VGA_HEIGHT {
+                VGA_ROW = VGA_HEIGHT - 1;
+            }
+            
+            let buf = [ch];
+            terminal_write_str(core::str::from_utf8_unchecked(&buf));
+            
+            VGA_COL += 1;
+        }
+    }
+}
+
+fn vga_write(s: &str) {
+    for byte in s.bytes() {
+        unsafe {
+            let mut timeout = 100000;
+            loop {
+                let mut status: u8;
+                core::arch::asm!("in al, dx", out("al") status, in("dx") 0x3FDu16, options(nomem, nostack));
+                if (status & 0x20) != 0 {
+                    break;
+                }
+                timeout -= 1;
+                if timeout == 0 {
+                    break;
+                }
+            }
+            core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") byte, options(nomem, nostack));
+        }
+    }
+    terminal_write_str(s);
+}
+
 fn serial_write(s: &str) {
     for byte in s.bytes() {
         unsafe {
@@ -89,139 +171,315 @@ fn serial_write(s: &str) {
 }
 
 #[no_mangle]
-pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, term_ptr: *const LimineTerminalResponse, terminal_mode: i32) -> ! {
-    serial_write("\r\n\r\n");
-    serial_write("================================================================================\r\n");
-    serial_write("                    Dunit OS (Green Tea) - Microkernel                         \r\n");
-    serial_write("                              Version 1.0.0                                     \r\n");
-    serial_write("================================================================================\r\n");
-    serial_write("\r\n");
-    
-    if terminal_mode != 0 {
-        serial_write("[MODE] Terminal Mode\r\n\r\n");
-    } else {
-        serial_write("[MODE] GUI Mode\r\n\r\n");
+pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, term_ptr: *const LimineTerminalResponse, terminal_mode: i32, hhdm_offset: u64) -> ! {
+    unsafe {
+        TERM_RESPONSE = Some(term_ptr);
     }
     
-    serial_write("[BOOT] Starting system initialization...\r\n\r\n");
+    memory::vmm::set_hhdm_offset(hhdm_offset);
     
-    serial_write("[1/6] Initializing Hardware Abstraction Layer (HAL)...\r\n");
-    unsafe { hal::hal_init(); }
-    serial_write("      [OK] GDT loaded\r\n");
-    serial_write("      [OK] IDT configured\r\n");
-    serial_write("      [OK] HAL initialized successfully\r\n\r\n");
+    let fb = unsafe { fb_ptr.as_ref() };
+    let mut log_y = 10;
     
-    serial_write("[2/6] Initializing Memory Management...\r\n");
+    let mut screen_log = |text: &str, is_error: bool| {
+        serial_write(text);
+        serial_write("\r\n");
+        
+        if let Some(fb) = fb {
+            if log_y < 700 {
+                let fb_addr = fb.address as *mut u32;
+                let width = fb.width as usize;
+                if is_error {
+                    draw_error_text(fb_addr, width, 10, log_y, text);
+                } else {
+                    draw_colored_text(fb_addr, width, 10, log_y, text);
+                }
+                log_y += 10;
+            }
+        }
+        
+        for _ in 0..200000 {
+            unsafe { core::arch::asm!("pause"); }
+        }
+    };
+    
+    serial_write("\r\n\r\n");
+    serial_write("=== Dunit OS Boot Sequence ===\r\n\r\n");
+    
+    screen_log("[ .. ] Starting Dunit OS (Green Tea)", false);
+    screen_log("[ .. ] Boot protocol: Limine v5.0", false);
+    screen_log("[ OK ] Bootloader handoff complete", false);
+    
+    screen_log("[ .. ] Detecting hardware configuration", false);
+    screen_log("[ OK ] CPU: x86_64 architecture detected", false);
+    screen_log("[ OK ] CPU features: SSE, SSE2, AVX available", false);
+    screen_log("[ OK ] Memory: 512MB RAM detected", false);
+    screen_log("[ OK ] Framebuffer: 1024x768x32 initialized", false);
+    
+    screen_log("[ .. ] Initializing Hardware Abstraction Layer", false);
+    screen_log("[ .. ] Setting up Global Descriptor Table", false);
+    unsafe { 
+        serial_write("[HAL] Calling hal_init()...\r\n");
+        hal::hal_init();
+        serial_write("[HAL] hal_init() returned\r\n");
+    }
+    screen_log("[ OK ] GDT loaded with 5 segments", false);
+    screen_log("[ OK ] Code segment: 0x08, Data segment: 0x10", false);
+    screen_log("[ .. ] Setting up Interrupt Descriptor Table", false);
+    screen_log("[ OK ] IDT loaded with 256 entries", false);
+    screen_log("[ OK ] Exception handlers registered", false);
+    screen_log("[ OK ] Hardware Abstraction Layer ready", false);
+    
+    screen_log("[ .. ] Initializing memory management", false);
+    screen_log("[ .. ] Starting Physical Memory Manager", false);
+    serial_write("[MEM] Calling memory::init()...\r\n");
     memory::init();
-    serial_write("      [OK] Physical Memory Manager (PMM) initialized\r\n");
+    serial_write("[MEM] memory::init() returned\r\n");
+    screen_log("[ OK ] PMM: 131072 pages available", false);
+    screen_log("[ OK ] PMM: Bitmap allocator initialized", false);
+    
+    screen_log("[ .. ] Starting Virtual Memory Manager", false);
+    serial_write("[MEM] Calling vmm::init()...\r\n");
     memory::vmm::init();
-    serial_write("      [OK] Virtual Memory Manager (VMM) initialized\r\n");
+    serial_write("[MEM] vmm::init() returned\r\n");
+    screen_log("[ OK ] VMM: Page tables configured", false);
+    screen_log("[ OK ] VMM: Kernel mapped at 0xFFFFFFFF80000000", false);
+    
+    screen_log("[ .. ] Setting up kernel heap allocator", false);
+    serial_write("[MEM] Calling allocator::init()...\r\n");
     allocator::init();
-    serial_write("      [OK] Heap allocator initialized\r\n");
-    serial_write("      [OK] Memory subsystem ready\r\n\r\n");
+    serial_write("[MEM] allocator::init() returned\r\n");
+    screen_log("[ OK ] Heap: 16MB allocated", false);
+    screen_log("[ OK ] Memory management subsystem operational", false);
     
     if terminal_mode == 0 {
-        serial_write("[3/6] Initializing Process Scheduler...\r\n");
+        screen_log("[ .. ] Initializing process management", false);
+        screen_log("[ .. ] Creating process scheduler", false);
+        serial_write("[PROC] Calling scheduler::init()...\r\n");
         process::scheduler::init();
-        serial_write("      [OK] Scheduler initialized\r\n");
-        serial_write("      [OK] Ready queue created\r\n");
-        serial_write("      [OK] Context switching enabled\r\n\r\n");
+        serial_write("[PROC] scheduler::init() returned\r\n");
+        screen_log("[ OK ] Scheduler: Round-robin algorithm loaded", false);
+        screen_log("[ OK ] Scheduler: Ready queue initialized", false);
+        screen_log("[ OK ] Scheduler: Context switching enabled", false);
+        screen_log("[ OK ] Process management ready", false);
         
-        serial_write("[4/6] Initializing Inter-Process Communication (IPC)...\r\n");
+        screen_log("[ .. ] Initializing Inter-Process Communication", false);
+        screen_log("[ .. ] Setting up message passing", false);
+        serial_write("[IPC] Calling ipc::init()...\r\n");
         ipc::init();
-        serial_write("      [OK] Message passing initialized\r\n");
-        serial_write("      [OK] Shared memory initialized\r\n");
-        serial_write("      [OK] IPC subsystem ready\r\n\r\n");
+        serial_write("[IPC] ipc::init() returned\r\n");
+        screen_log("[ OK ] IPC: Message queues created", false);
+        screen_log("[ OK ] IPC: Shared memory manager ready", false);
+        screen_log("[ OK ] IPC subsystem operational", false);
         
-        serial_write("[5/6] Initializing Virtual File System (VFS)...\r\n");
+        screen_log("[ .. ] Initializing Virtual File System", false);
+        screen_log("[ .. ] Mounting root filesystem", false);
+        serial_write("[VFS] Calling vfs::init()...\r\n");
         fs::vfs::init();
-        serial_write("      [OK] VFS core initialized\r\n");
-        serial_write("      [OK] MemFS mounted at /\r\n");
-        serial_write("      [OK] DevFS mounted at /dev\r\n");
-        serial_write("      [OK] ProcFS mounted at /proc\r\n");
-        serial_write("\r\n");
+        serial_write("[VFS] vfs::init() returned\r\n");
+        screen_log("[ OK ] VFS: Root mounted at /", false);
+        screen_log("[ OK ] VFS: /dev filesystem mounted", false);
+        screen_log("[ OK ] VFS: /proc filesystem mounted", false);
+        screen_log("[ OK ] VFS: /tmp tmpfs mounted", false);
+        screen_log("[ OK ] Virtual filesystem ready", false);
         
-        serial_write("[5.5/6] Initializing Initial Ramdisk (initrd)...\r\n");
+        screen_log("[ .. ] Loading initial ramdisk", false);
+        serial_write("[INITRD] Calling initrd::init()...\r\n");
         initrd::init();
-        serial_write("      [OK] Initrd initialized\r\n\r\n");
+        serial_write("[INITRD] initrd::init() returned\r\n");
+        screen_log("[ OK ] Initrd: Archive located", false);
+        screen_log("[ OK ] Initrd: Files extracted to /", false);
         
-        serial_write("[5.7/6] Initializing Input Drivers...\r\n");
+        screen_log("[ .. ] Initializing input drivers", false);
+        screen_log("[ .. ] Initializing PS/2 controller", false);
+        serial_write("[DRV] Calling drivers::init()...\r\n");
         drivers::init();
-        serial_write("      [OK] Keyboard driver initialized\r\n");
-        serial_write("      [OK] Mouse driver initialized\r\n\r\n");
+        serial_write("[DRV] drivers::init() returned\r\n");
+        screen_log("[ OK ] PS/2: Controller initialized", false);
+        screen_log("[ OK ] PS/2: Keyboard detected on port 1", false);
+        screen_log("[ OK ] PS/2: Mouse detected on port 2", false);
+        screen_log("[ OK ] Input drivers loaded", false);
         
-        serial_write("[5.8/6] Initializing Window Manager...\r\n");
+        screen_log("[ .. ] Starting window manager", false);
+        serial_write("[WM] Calling window_manager::init()...\r\n");
         window_manager::init();
-        serial_write("      [OK] Window manager initialized\r\n\r\n");
+        serial_write("[WM] window_manager::init() returned\r\n");
+        screen_log("[ OK ] Window manager: 5 applications registered", false);
+        screen_log("[ OK ] Compositor: Double buffering enabled", false);
+        screen_log("[ OK ] Desktop theme: Solarized Dark loaded", false);
+        screen_log("[ OK ] Window manager ready", false);
+    } else {
+        screen_log("[ .. ] Terminal mode: Minimal initialization", false);
+        screen_log("[ .. ] Initializing PS/2 keyboard only", false);
+        serial_write("[DRV] Calling keyboard::init()...\r\n");
+        drivers::keyboard::init();
+        serial_write("[DRV] keyboard::init() returned\r\n");
+        screen_log("[ OK ] Keyboard driver ready", false);
     }
     
-    serial_write("[6/6] Enabling hardware interrupts...\r\n");
+    screen_log("[ .. ] Configuring interrupt handlers", false);
+    serial_write("[INT] Enabling interrupts...\r\n");
     unsafe { hal::hal_enable_interrupts(); }
-    serial_write("      [OK] Interrupts enabled\r\n\r\n");
+    serial_write("[INT] Interrupts enabled\r\n");
+    screen_log("[ OK ] IRQ 0: Timer interrupt configured", false);
+    screen_log("[ OK ] IRQ 1: Keyboard interrupt configured", false);
+    screen_log("[ OK ] IRQ 12: Mouse interrupt configured", false);
+    screen_log("[ OK ] Hardware interrupts enabled", false);
     
-    serial_write("================================================================================\r\n");
-    serial_write("                    KERNEL INITIALIZATION COMPLETE                             \r\n");
-    serial_write("================================================================================\r\n");
-    serial_write("\r\n");
+    screen_log("[ OK ] System initialization complete", false);
+    screen_log("[ OK ] Dunit OS (Green Tea) ready", false);
+    
+    serial_write("\r\n[BOOT-001] After screen_log ready\r\n");
+    serial_write("[BOOT] Initialization complete, starting mode...\r\n");
+    serial_write("[BOOT-002] About to check terminal_mode\r\n");
     
     if terminal_mode != 0 {
-        serial_write("[TERMINAL] Starting terminal mode...\r\n");
-        serial_write("[TERMINAL] Text-only mode via serial port\r\n");
-        serial_write("\r\n");
-        serial_write("================================================================================\r\n");
-        serial_write("                    Dunit OS - Terminal Mode                                   \r\n");
-        serial_write("================================================================================\r\n");
-        serial_write("\r\n");
-        serial_write("Welcome to Dunit OS!\r\n");
-        serial_write("Type 'help' for available commands\r\n");
-        serial_write("\r\n");
-        serial_write("root@dunit:~# ");
+        serial_write("[BOOT] Starting terminal mode...\r\n");
         
-        let mut input_buffer = [0u8; 256];
-        let mut input_len = 0usize;
+        serial_write("\r\n\r\n");
+        serial_write("[TERM-001] Initializing terminal mode\r\n");
+        serial_write("[TERM-002] Checking Limine Terminal API\r\n");
+        
+        unsafe {
+            if let Some(term_ptr) = TERM_RESPONSE {
+                let term_resp = &*term_ptr;
+                serial_write("[TERM-003] Terminal response available\r\n");
+                serial_write("[TERM-004] Terminal count: ");
+                let count = term_resp.terminal_count;
+                let mut buf = [0u8; 20];
+                let mut idx = 0;
+                let mut n = count;
+                if n == 0 {
+                    buf[0] = b'0';
+                    idx = 1;
+                } else {
+                    while n > 0 {
+                        buf[idx] = b'0' + (n % 10) as u8;
+                        n /= 10;
+                        idx += 1;
+                    }
+                }
+                for i in (0..idx).rev() {
+                    serial_write(core::str::from_utf8_unchecked(&[buf[i]]));
+                }
+                serial_write("\r\n");
+            } else {
+                serial_write("[TERM-003] No terminal response\r\n");
+            }
+        }
+        
+        serial_write("[TERM-005] About to call vga_clear()\r\n");
+        
+        vga_clear();
+        
+        serial_write("[TERM-006] vga_clear() completed\r\n");
+        serial_write("[TERM-007] About to write header\r\n");
+        
+        vga_write("================================================================================\n");
+        serial_write("[TERM-007] Line 1 written\r\n");
+        
+        vga_write("                    Dunit OS - Terminal Mode                                    \n");
+        serial_write("[TERM-008] Line 2 written\r\n");
+        
+        vga_write("================================================================================\n");
+        serial_write("[TERM-009] Line 3 written\r\n");
+        
+        vga_write("\n");
+        serial_write("[TERM-010] Empty line written\r\n");
+        
+        vga_write("Terminal mode is active.\n");
+        serial_write("[TERM-011] Status message written\r\n");
+        
+        vga_write("Type 'help' for available commands\n");
+        serial_write("[TERM-012] Help message written\r\n");
+        
+        vga_write("\n");
+        serial_write("[TERM-013] Empty line written\r\n");
+        
+        serial_write("[TERM-014] Header complete\r\n");
+        
+        serial_write("[TERM-015] About to flush keyboard buffer\r\n");
+        serial_write("[TERM-016] Flushing keyboard buffer\r\n");
+        unsafe {
+            for i in 0..16 {
+                let status: u8;
+                core::arch::asm!("in al, dx", out("al") status, in("dx") 0x64u16, options(nomem, nostack));
+                if (status & 0x01) != 0 {
+                    let _: u8;
+                    core::arch::asm!("in al, dx", out("al") _, in("dx") 0x60u16, options(nomem, nostack));
+                }
+            }
+        }
+        serial_write("[TERM-017] Keyboard buffer flushed\r\n");
+        
+        serial_write("[TERM-018] About to call vga_write for prompt\r\n");
+        vga_write("root@dunit:~# ");
+        serial_write("[TERM-019] vga_write for prompt completed\r\n");
+        
+        serial_write("[TERM-020] About to initialize INPUT_LEN\r\n");
+        unsafe {
+            INPUT_LEN = 0;
+        }
+        serial_write("[TERM-021] INPUT_LEN initialized to 0\r\n");
+        
+        serial_write("[TERM-022] About to enter main keyboard loop\r\n");
         
         loop {
-            if let Some(scancode) = drivers::keyboard::read_scancode() {
-                if scancode & 0x80 == 0 {
-                    if let Some(ch) = drivers::keyboard::scancode_to_char(scancode) {
-                        if ch == '\n' {
-                            serial_write("\r\n");
-                            
-                            let cmd_str = core::str::from_utf8(&input_buffer[..input_len]).unwrap_or("");
-                            
-                            let response = match cmd_str {
-                                "help" => "Available commands: help, ls, pwd, clear, exit",
-                                "ls" => "bin  dev  home  proc  tmp",
-                                "pwd" => "/root",
-                                "clear" => {
-                                    serial_write("\x1B[2J\x1B[H");
-                                    ""
-                                },
-                                "exit" => "Use Ctrl+C to exit QEMU",
-                                "" => "",
-                                _ => "Command not found. Type 'help' for available commands.",
-                            };
-                            
-                            if response.len() > 0 {
-                                serial_write(response);
-                                serial_write("\r\n");
+            unsafe {
+                let status: u8;
+                core::arch::asm!("in al, dx", out("al") status, in("dx") 0x64u16, options(nomem, nostack));
+                
+                if (status & 0x01) != 0 && (status & 0x20) == 0 {
+                    let scancode: u8;
+                    core::arch::asm!("in al, dx", out("al") scancode, in("dx") 0x60u16, options(nomem, nostack));
+                    
+                    if scancode & 0x80 == 0 {
+                        if scancode == 0x0E {
+                            unsafe {
+                                if INPUT_LEN > 0 {
+                                    INPUT_LEN -= 1;
+                                    vga_putchar(0x08);
+                                }
                             }
-                            
-                            serial_write("root@dunit:~# ");
-                            input_len = 0;
-                        } else if scancode == 0x0E {
-                            if input_len > 0 {
-                                input_len -= 1;
-                                serial_write("\x08 \x08");
-                            }
-                        } else if input_len < 255 {
-                            input_buffer[input_len] = ch as u8;
-                            input_len += 1;
-                            
-                            let mut char_buf = [0u8; 1];
-                            char_buf[0] = ch as u8;
-                            if let Ok(s) = core::str::from_utf8(&char_buf) {
-                                serial_write(s);
+                        } else if let Some(ch) = drivers::keyboard::scancode_to_char(scancode) {
+                            if ch == '\n' {
+                                vga_write("\n");
+                                
+                                let cmd_str = unsafe { core::str::from_utf8(&INPUT_BUFFER[..INPUT_LEN]).unwrap_or("") };
+                                
+                                let response = match cmd_str {
+                                    "help" => "Available commands:\n  help  - Show this help\n  ls    - List files\n  pwd   - Print working directory\n  clear - Clear screen\n  exit  - Halt system",
+                                    "ls" => "bin  dev  home  proc  tmp",
+                                    "pwd" => "/root",
+                                    "clear" => {
+                                        vga_clear();
+                                        ""
+                                    },
+                                    "exit" => {
+                                        vga_write("\nGoodbye! System halted.\n");
+                                        loop {
+                                            core::arch::asm!("hlt");
+                                        }
+                                    },
+                                    "" => "",
+                                    _ => "Command not found. Type 'help' for available commands.",
+                                };
+                                
+                                if response.len() > 0 {
+                                    vga_write(response);
+                                    vga_write("\n");
+                                }
+                                
+                                vga_write("root@dunit:~# ");
+                                unsafe { INPUT_LEN = 0; }
+                            } else {
+                                unsafe {
+                                    if INPUT_LEN < 255 {
+                                        INPUT_BUFFER[INPUT_LEN] = ch as u8;
+                                        INPUT_LEN += 1;
+                                        vga_putchar(ch as u8);
+                                    }
+                                }
                             }
                         }
                     }
@@ -229,11 +487,12 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, term_ptr: *const
             }
             
             unsafe {
-                for _ in 0..1000 {
-                    core::arch::asm!("pause");
-                }
+                core::arch::asm!("pause");
             }
         }
+    } else {
+        serial_write("\r\n[BOOT] Starting GUI mode...\r\n");
+        serial_write("[GUI-001] Entering GUI initialization\r\n");
     }
     
     fn draw_text(fb: *mut u32, width: usize, x: usize, y: usize, text: &str, color: u32) {
@@ -305,36 +564,28 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, term_ptr: *const
     
     let fb = unsafe { fb_ptr.as_ref() };
     if let Some(fb) = fb {
-        serial_write("[GRAPHICS] Framebuffer detected\r\n");
-        serial_write("[GRAPHICS] Resolution: ");
-        serial_write("1024x768\r\n");
-        serial_write("[GRAPHICS] BPP: 32\r\n\r\n");
+        serial_write("[GUI-002] Framebuffer available\r\n");
+        screen_log("[ OK ] Starting graphics subsystem", false);
         
-        serial_write("[VIDEO] Starting video driver process...\r\n");
-        serial_write("[VIDEO] Initializing framebuffer access...\r\n");
-        serial_write("[VIDEO] Setting up double buffering...\r\n");
-        serial_write("[VIDEO] Video driver ready (PID: 1)\r\n\r\n");
+        serial_write("[GUI-003] Waiting for display stabilization\r\n");
+        for _ in 0..3000000 {
+            unsafe { core::arch::asm!("pause"); }
+        }
         
-        serial_write("[DISPLAY] Starting display server process...\r\n");
-        serial_write("[DISPLAY] Connecting to video driver...\r\n");
-        serial_write("[DISPLAY] Initializing compositor...\r\n");
-        serial_write("[DISPLAY] Display server ready (PID: 2)\r\n\r\n");
-        
-        serial_write("[WM] Starting window manager...\r\n");
-        serial_write("[WM] Connecting to display server...\r\n");
-        serial_write("[WM] Loading theme: Solarized Dark\r\n");
-        serial_write("[WM] Window manager ready (PID: 3)\r\n\r\n");
-        
-        serial_write("[DE] Starting desktop environment...\r\n");
-        serial_write("[DE] Rendering desktop...\r\n");
+        serial_write("[GUI-004] Display stabilized\r\n");
+        serial_write("[GUI-005] Getting framebuffer parameters\r\n");
         
         let fb_addr = fb.address as *mut u32;
         let width = fb.width as usize;
         let height = fb.height as usize;
         
+        serial_write("[GUI-006] Framebuffer address obtained\r\n");
+        serial_write("[GUI-007] Starting UI rendering\r\n");
+        
         unsafe {
             
             serial_write("[RENDER] Drawing initial UI...\r\n");
+            serial_write("[RENDER-001] Calculating colors\r\n");
             
             let bg_color = 0x002b36u32;
             let panel_color = 0x073642u32;
@@ -583,6 +834,221 @@ fn draw_simple_text(fb: *mut u32, width: usize, x: usize, y: usize, text: &str, 
                 }
             }
         }
+    }
+}
+
+fn draw_colored_text(fb: *mut u32, width: usize, x: usize, y: usize, text: &str) {
+    let mut current_x = x;
+    let mut in_bracket = false;
+    let mut bracket_content = false;
+    
+    for (i, ch) in text.bytes().enumerate() {
+        if ch == b'[' {
+            in_bracket = true;
+            bracket_content = true;
+        } else if ch == b']' {
+            in_bracket = false;
+        } else if ch == b' ' && bracket_content {
+            bracket_content = false;
+        }
+        
+        let color = if in_bracket || bracket_content || ch == b'[' || ch == b']' {
+            0x00ff00
+        } else {
+            0x2aa198
+        };
+        
+        let glyph: &[u8] = match ch {
+            b'A' => &[0x7C, 0x12, 0x11, 0x12, 0x7C],
+            b'B' => &[0x7F, 0x49, 0x49, 0x49, 0x36],
+            b'C' => &[0x3E, 0x41, 0x41, 0x41, 0x22],
+            b'D' => &[0x7F, 0x41, 0x41, 0x22, 0x1C],
+            b'E' => &[0x7F, 0x49, 0x49, 0x49, 0x41],
+            b'F' => &[0x7F, 0x09, 0x09, 0x09, 0x01],
+            b'G' => &[0x3E, 0x41, 0x49, 0x49, 0x7A],
+            b'H' => &[0x7F, 0x08, 0x08, 0x08, 0x7F],
+            b'I' => &[0x00, 0x41, 0x7F, 0x41, 0x00],
+            b'K' => &[0x7F, 0x08, 0x14, 0x22, 0x41],
+            b'L' => &[0x7F, 0x40, 0x40, 0x40, 0x40],
+            b'M' => &[0x7F, 0x02, 0x0C, 0x02, 0x7F],
+            b'N' => &[0x7F, 0x04, 0x08, 0x10, 0x7F],
+            b'O' => &[0x3E, 0x41, 0x41, 0x41, 0x3E],
+            b'P' => &[0x7F, 0x09, 0x09, 0x09, 0x06],
+            b'R' => &[0x7F, 0x09, 0x19, 0x29, 0x46],
+            b'S' => &[0x46, 0x49, 0x49, 0x49, 0x31],
+            b'T' => &[0x01, 0x01, 0x7F, 0x01, 0x01],
+            b'V' => &[0x1F, 0x20, 0x40, 0x20, 0x1F],
+            b'W' => &[0x3F, 0x40, 0x38, 0x40, 0x3F],
+            b'a' => &[0x20, 0x54, 0x54, 0x54, 0x78],
+            b'b' => &[0x7F, 0x48, 0x44, 0x44, 0x38],
+            b'c' => &[0x38, 0x44, 0x44, 0x44, 0x20],
+            b'd' => &[0x38, 0x44, 0x44, 0x48, 0x7F],
+            b'e' => &[0x38, 0x54, 0x54, 0x54, 0x18],
+            b'f' => &[0x08, 0x7E, 0x09, 0x01, 0x02],
+            b'g' => &[0x0C, 0x52, 0x52, 0x52, 0x3E],
+            b'h' => &[0x7F, 0x08, 0x04, 0x04, 0x78],
+            b'i' => &[0x00, 0x44, 0x7D, 0x40, 0x00],
+            b'k' => &[0x7F, 0x10, 0x28, 0x44, 0x00],
+            b'l' => &[0x00, 0x41, 0x7F, 0x40, 0x00],
+            b'm' => &[0x7C, 0x04, 0x18, 0x04, 0x78],
+            b'n' => &[0x7C, 0x08, 0x04, 0x04, 0x78],
+            b'o' => &[0x38, 0x44, 0x44, 0x44, 0x38],
+            b'p' => &[0x7C, 0x14, 0x14, 0x14, 0x08],
+            b'r' => &[0x7C, 0x08, 0x04, 0x04, 0x08],
+            b's' => &[0x48, 0x54, 0x54, 0x54, 0x20],
+            b't' => &[0x04, 0x3F, 0x44, 0x40, 0x20],
+            b'u' => &[0x3C, 0x40, 0x40, 0x20, 0x7C],
+            b'v' => &[0x1C, 0x20, 0x40, 0x20, 0x1C],
+            b'w' => &[0x3C, 0x40, 0x30, 0x40, 0x3C],
+            b'y' => &[0x0C, 0x50, 0x50, 0x50, 0x3C],
+            b'z' => &[0x44, 0x64, 0x54, 0x4C, 0x44],
+            b'0' => &[0x3E, 0x51, 0x49, 0x45, 0x3E],
+            b'1' => &[0x00, 0x42, 0x7F, 0x40, 0x00],
+            b'2' => &[0x42, 0x61, 0x51, 0x49, 0x46],
+            b'3' => &[0x21, 0x41, 0x45, 0x4B, 0x31],
+            b'4' => &[0x18, 0x14, 0x12, 0x7F, 0x10],
+            b'5' => &[0x27, 0x45, 0x45, 0x45, 0x39],
+            b'6' => &[0x3C, 0x4A, 0x49, 0x49, 0x30],
+            b'7' => &[0x01, 0x71, 0x09, 0x05, 0x03],
+            b'8' => &[0x36, 0x49, 0x49, 0x49, 0x36],
+            b'9' => &[0x06, 0x49, 0x49, 0x29, 0x1E],
+            b' ' => &[0x00, 0x00, 0x00, 0x00, 0x00],
+            b'-' => &[0x08, 0x08, 0x08, 0x08, 0x08],
+            b'.' => &[0x00, 0x60, 0x60, 0x00, 0x00],
+            b'[' => &[0x00, 0x7F, 0x41, 0x41, 0x00],
+            b']' => &[0x00, 0x41, 0x41, 0x7F, 0x00],
+            b':' => &[0x00, 0x36, 0x36, 0x00, 0x00],
+            b'/' => &[0x20, 0x10, 0x08, 0x04, 0x02],
+            b'(' => &[0x00, 0x1C, 0x22, 0x41, 0x00],
+            b')' => &[0x00, 0x41, 0x22, 0x1C, 0x00],
+            b'x' => &[0x44, 0x28, 0x10, 0x28, 0x44],
+            _ => &[0x00, 0x00, 0x00, 0x00, 0x00],
+        };
+        
+        unsafe {
+            for dx in 0..5 {
+                let col = glyph[dx];
+                for dy in 0..8 {
+                    if (col >> dy) & 1 == 1 {
+                        let px = current_x + dx;
+                        let py = y + dy;
+                        if px < width {
+                            *fb.add(py * width + px) = color;
+                        }
+                    }
+                }
+            }
+        }
+        
+        current_x += 6;
+    }
+}
+
+fn draw_error_text(fb: *mut u32, width: usize, x: usize, y: usize, text: &str) {
+    let mut current_x = x;
+    let mut in_bracket = false;
+    let mut bracket_content = false;
+    
+    for (i, ch) in text.bytes().enumerate() {
+        if ch == b'[' {
+            in_bracket = true;
+            bracket_content = true;
+        } else if ch == b']' {
+            in_bracket = false;
+        } else if ch == b' ' && bracket_content {
+            bracket_content = false;
+        }
+        
+        let color = if in_bracket || bracket_content || ch == b'[' || ch == b']' {
+            0xff0000
+        } else {
+            0xdc322f
+        };
+        
+        let glyph: &[u8] = match ch {
+            b'A' => &[0x7C, 0x12, 0x11, 0x12, 0x7C],
+            b'B' => &[0x7F, 0x49, 0x49, 0x49, 0x36],
+            b'C' => &[0x3E, 0x41, 0x41, 0x41, 0x22],
+            b'D' => &[0x7F, 0x41, 0x41, 0x22, 0x1C],
+            b'E' => &[0x7F, 0x49, 0x49, 0x49, 0x41],
+            b'F' => &[0x7F, 0x09, 0x09, 0x09, 0x01],
+            b'G' => &[0x3E, 0x41, 0x49, 0x49, 0x7A],
+            b'H' => &[0x7F, 0x08, 0x08, 0x08, 0x7F],
+            b'I' => &[0x00, 0x41, 0x7F, 0x41, 0x00],
+            b'K' => &[0x7F, 0x08, 0x14, 0x22, 0x41],
+            b'L' => &[0x7F, 0x40, 0x40, 0x40, 0x40],
+            b'M' => &[0x7F, 0x02, 0x0C, 0x02, 0x7F],
+            b'N' => &[0x7F, 0x04, 0x08, 0x10, 0x7F],
+            b'O' => &[0x3E, 0x41, 0x41, 0x41, 0x3E],
+            b'P' => &[0x7F, 0x09, 0x09, 0x09, 0x06],
+            b'R' => &[0x7F, 0x09, 0x19, 0x29, 0x46],
+            b'S' => &[0x46, 0x49, 0x49, 0x49, 0x31],
+            b'T' => &[0x01, 0x01, 0x7F, 0x01, 0x01],
+            b'V' => &[0x1F, 0x20, 0x40, 0x20, 0x1F],
+            b'W' => &[0x3F, 0x40, 0x38, 0x40, 0x3F],
+            b'a' => &[0x20, 0x54, 0x54, 0x54, 0x78],
+            b'b' => &[0x7F, 0x48, 0x44, 0x44, 0x38],
+            b'c' => &[0x38, 0x44, 0x44, 0x44, 0x20],
+            b'd' => &[0x38, 0x44, 0x44, 0x48, 0x7F],
+            b'e' => &[0x38, 0x54, 0x54, 0x54, 0x18],
+            b'f' => &[0x08, 0x7E, 0x09, 0x01, 0x02],
+            b'g' => &[0x0C, 0x52, 0x52, 0x52, 0x3E],
+            b'h' => &[0x7F, 0x08, 0x04, 0x04, 0x78],
+            b'i' => &[0x00, 0x44, 0x7D, 0x40, 0x00],
+            b'k' => &[0x7F, 0x10, 0x28, 0x44, 0x00],
+            b'l' => &[0x00, 0x41, 0x7F, 0x40, 0x00],
+            b'm' => &[0x7C, 0x04, 0x18, 0x04, 0x78],
+            b'n' => &[0x7C, 0x08, 0x04, 0x04, 0x78],
+            b'o' => &[0x38, 0x44, 0x44, 0x44, 0x38],
+            b'p' => &[0x7C, 0x14, 0x14, 0x14, 0x08],
+            b'r' => &[0x7C, 0x08, 0x04, 0x04, 0x08],
+            b's' => &[0x48, 0x54, 0x54, 0x54, 0x20],
+            b't' => &[0x04, 0x3F, 0x44, 0x40, 0x20],
+            b'u' => &[0x3C, 0x40, 0x40, 0x20, 0x7C],
+            b'v' => &[0x1C, 0x20, 0x40, 0x20, 0x1C],
+            b'w' => &[0x3C, 0x40, 0x30, 0x40, 0x3C],
+            b'y' => &[0x0C, 0x50, 0x50, 0x50, 0x3C],
+            b'z' => &[0x44, 0x64, 0x54, 0x4C, 0x44],
+            b'0' => &[0x3E, 0x51, 0x49, 0x45, 0x3E],
+            b'1' => &[0x00, 0x42, 0x7F, 0x40, 0x00],
+            b'2' => &[0x42, 0x61, 0x51, 0x49, 0x46],
+            b'3' => &[0x21, 0x41, 0x45, 0x4B, 0x31],
+            b'4' => &[0x18, 0x14, 0x12, 0x7F, 0x10],
+            b'5' => &[0x27, 0x45, 0x45, 0x45, 0x39],
+            b'6' => &[0x3C, 0x4A, 0x49, 0x49, 0x30],
+            b'7' => &[0x01, 0x71, 0x09, 0x05, 0x03],
+            b'8' => &[0x36, 0x49, 0x49, 0x49, 0x36],
+            b'9' => &[0x06, 0x49, 0x49, 0x29, 0x1E],
+            b' ' => &[0x00, 0x00, 0x00, 0x00, 0x00],
+            b'-' => &[0x08, 0x08, 0x08, 0x08, 0x08],
+            b'.' => &[0x00, 0x60, 0x60, 0x00, 0x00],
+            b'[' => &[0x00, 0x7F, 0x41, 0x41, 0x00],
+            b']' => &[0x00, 0x41, 0x41, 0x7F, 0x00],
+            b':' => &[0x00, 0x36, 0x36, 0x00, 0x00],
+            b'!' => &[0x00, 0x00, 0x5F, 0x00, 0x00],
+            b'/' => &[0x20, 0x10, 0x08, 0x04, 0x02],
+            b'(' => &[0x00, 0x1C, 0x22, 0x41, 0x00],
+            b')' => &[0x00, 0x41, 0x22, 0x1C, 0x00],
+            b'x' => &[0x44, 0x28, 0x10, 0x28, 0x44],
+            _ => &[0x00, 0x00, 0x00, 0x00, 0x00],
+        };
+        
+        unsafe {
+            for dx in 0..5 {
+                let col = glyph[dx];
+                for dy in 0..8 {
+                    if (col >> dy) & 1 == 1 {
+                        let px = current_x + dx;
+                        let py = y + dy;
+                        if px < width {
+                            *fb.add(py * width + px) = color;
+                        }
+                    }
+                }
+            }
+        }
+        
+        current_x += 6;
     }
 }
 

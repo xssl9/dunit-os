@@ -67,9 +67,15 @@ struct limine_kernel_file_response {
     struct limine_kernel_file *kernel_file;
 };
 
+struct limine_hhdm_response {
+    uint64_t revision;
+    uint64_t offset;
+};
+
 extern struct limine_framebuffer_response *get_framebuffer_response(void);
 extern struct limine_terminal_response *get_terminal_response(void);
 extern struct limine_kernel_file_response *get_kernel_file_response(void);
+extern struct limine_hhdm_response *get_hhdm_response(void);
 
 void serial_init() {
     __asm__ volatile("outb %0, %1" : : "a"((uint8_t)0x00), "Nd"((uint16_t)0x3F8 + 1));
@@ -124,7 +130,7 @@ static int strstr_contains(const char *haystack, const char *needle) {
     return 0;
 }
 
-extern void kernel_main(struct limine_framebuffer *fb, struct limine_terminal_response *term, int terminal_mode);
+extern void kernel_main(struct limine_framebuffer *fb, struct limine_terminal_response *term, int terminal_mode, uint64_t hhdm_offset);
 
 void boot_main(void) {
     serial_init();
@@ -133,6 +139,22 @@ void boot_main(void) {
     struct limine_framebuffer_response *fb_resp = get_framebuffer_response();
     struct limine_terminal_response *term_resp = get_terminal_response();
     struct limine_kernel_file_response *kf_resp = get_kernel_file_response();
+    struct limine_hhdm_response *hhdm_resp = get_hhdm_response();
+    
+    uint64_t hhdm_offset = 0;
+    if (hhdm_resp) {
+        hhdm_offset = hhdm_resp->offset;
+        serial_write("[BOOT] HHDM offset: 0x");
+        for (int i = 60; i >= 0; i -= 4) {
+            char hex = (hhdm_offset >> i) & 0xF;
+            char c = hex < 10 ? '0' + hex : 'A' + hex - 10;
+            char buf[2] = {c, 0};
+            serial_write(buf);
+        }
+        serial_write("\r\n");
+    } else {
+        serial_write("[BOOT] WARNING: No HHDM response\r\n");
+    }
     
     int terminal_mode = 0;
     if (kf_resp && kf_resp->kernel_file && kf_resp->kernel_file->cmdline) {
@@ -155,7 +177,7 @@ void boot_main(void) {
     }
     
     serial_write("[BOOT] Calling kernel_main...\r\n");
-    kernel_main(fb, term_resp, terminal_mode);
+    kernel_main(fb, term_resp, terminal_mode, hhdm_offset);
     
     serial_write("[BOOT] kernel_main returned (should not happen)\r\n");
     
