@@ -51,6 +51,13 @@ struct LimineFramebuffer {
 static mut INPUT_BUFFER: [u8; 256] = [0; 256];
 static mut INPUT_LEN: usize = 0;
 
+// Command history
+static mut HISTORY_BUFFER: [[u8; 256]; 50] = [[0; 256]; 50];
+static mut HISTORY_LENS: [usize; 50] = [0; 50];
+static mut HISTORY_COUNT: usize = 0;
+static mut HISTORY_INDEX: usize = 0;
+static mut HISTORY_POSITION: isize = -1;
+
 fn serial_write(s: &str) {
     for byte in s.bytes() {
         unsafe {
@@ -482,7 +489,66 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
                     if let Some(scancode) = drivers::keyboard::read_scancode() {
                         unsafe {
                             if scancode & 0x80 == 0 {
-                                if scancode == 0x0E {
+                                // Check for arrow keys first
+                                if let Some(special_key) = drivers::keyboard::scancode_to_special_key(scancode) {
+                                    match special_key {
+                                        drivers::keyboard::SpecialKey::UpArrow => {
+                                            // Navigate up in history
+                                            if HISTORY_COUNT > 0 {
+                                                if HISTORY_POSITION == -1 {
+                                                    HISTORY_POSITION = HISTORY_COUNT as isize - 1;
+                                                } else if HISTORY_POSITION > 0 {
+                                                    HISTORY_POSITION -= 1;
+                                                }
+                                                
+                                                // Clear current input
+                                                for _ in 0..INPUT_LEN {
+                                                    console.draw_char('\x08');
+                                                }
+                                                
+                                                // Load command from history
+                                                let hist_idx = HISTORY_POSITION as usize;
+                                                INPUT_LEN = HISTORY_LENS[hist_idx];
+                                                for i in 0..INPUT_LEN {
+                                                    INPUT_BUFFER[i] = HISTORY_BUFFER[hist_idx][i];
+                                                }
+                                                
+                                                // Display the command
+                                                let cmd = core::str::from_utf8(&INPUT_BUFFER[..INPUT_LEN]).unwrap_or("");
+                                                console.write_str(cmd);
+                                            }
+                                        },
+                                        drivers::keyboard::SpecialKey::DownArrow => {
+                                            // Navigate down in history
+                                            if HISTORY_COUNT > 0 && HISTORY_POSITION != -1 {
+                                                // Clear current input
+                                                for _ in 0..INPUT_LEN {
+                                                    console.draw_char('\x08');
+                                                }
+                                                
+                                                if HISTORY_POSITION < (HISTORY_COUNT as isize - 1) {
+                                                    HISTORY_POSITION += 1;
+                                                    
+                                                    // Load command from history
+                                                    let hist_idx = HISTORY_POSITION as usize;
+                                                    INPUT_LEN = HISTORY_LENS[hist_idx];
+                                                    for i in 0..INPUT_LEN {
+                                                        INPUT_BUFFER[i] = HISTORY_BUFFER[hist_idx][i];
+                                                    }
+                                                    
+                                                    // Display the command
+                                                    let cmd = core::str::from_utf8(&INPUT_BUFFER[..INPUT_LEN]).unwrap_or("");
+                                                    console.write_str(cmd);
+                                                } else {
+                                                    // At the end of history, clear input
+                                                    HISTORY_POSITION = -1;
+                                                    INPUT_LEN = 0;
+                                                }
+                                            }
+                                        },
+                                        _ => {}
+                                    }
+                                } else if scancode == 0x0E {
                                     if INPUT_LEN > 0 {
                                         INPUT_LEN -= 1;
                                         console.draw_char('\x08');
@@ -492,6 +558,19 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
                                         console.write_str("\n");
                                         
                                         let cmd_str = core::str::from_utf8(&INPUT_BUFFER[..INPUT_LEN]).unwrap_or("");
+                                        
+                                        // Add non-empty commands to history
+                                        if INPUT_LEN > 0 {
+                                            let hist_idx = HISTORY_COUNT % 50;
+                                            HISTORY_LENS[hist_idx] = INPUT_LEN;
+                                            for i in 0..INPUT_LEN {
+                                                HISTORY_BUFFER[hist_idx][i] = INPUT_BUFFER[i];
+                                            }
+                                            if HISTORY_COUNT < 50 {
+                                                HISTORY_COUNT += 1;
+                                            }
+                                            HISTORY_POSITION = -1;
+                                        }
                                     
                                             let response = match cmd_str {
                                         "help" => "Available commands:\n  help     - Show this help\n  ls       - List files\n  pwd      - Print working directory\n  cd       - Change directory\n  mkdir    - Create directory\n  touch    - Create file\n  cat      - Display file contents\n  echo     - Print text\n  ps       - Process list\n  kill     - Kill process\n  top      - Process monitor\n  uname    - System information\n  date     - Show date and time\n  whoami   - Current user\n  uptime   - System uptime\n  free     - Memory usage\n  exit     - Halt system",

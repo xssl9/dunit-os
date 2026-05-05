@@ -30,6 +30,24 @@ pub fn push_scancode(scancode: u8) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecialKey {
+    UpArrow,
+    DownArrow,
+    LeftArrow,
+    RightArrow,
+}
+
+pub fn scancode_to_special_key(scancode: u8) -> Option<SpecialKey> {
+    match scancode {
+        0x48 => Some(SpecialKey::UpArrow),
+        0x50 => Some(SpecialKey::DownArrow),
+        0x4B => Some(SpecialKey::LeftArrow),
+        0x4D => Some(SpecialKey::RightArrow),
+        _ => None,
+    }
+}
+
 pub fn scancode_to_char(scancode: u8) -> Option<char> {
     match scancode {
         0x1E => Some('a'),
