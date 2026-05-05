@@ -10,6 +10,7 @@ void syscall_init(void);
 
 void hal_enable_interrupts(void);
 void hal_disable_interrupts(void);
+void hal_set_vga_text_mode(void);
 
 uint8_t hal_inb(uint16_t port);
 void hal_outb(uint16_t port, uint8_t value);

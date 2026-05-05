@@ -53,7 +53,7 @@ This creates `build/microkernel.iso` with Limine bootloader.
 
 ### GUI Mode (Default)
 ```bash
-qemu-system-x86_64 -cdrom build/microkernel.iso -m 512M
+make run
 ```
 
 Features:
@@ -65,16 +65,18 @@ Features:
 
 ### Terminal Mode (Text-only via Serial)
 ```bash
-qemu-system-x86_64 -cdrom build/microkernel.iso -m 512M -serial mon:stdio -display none
+make run-terminal
 ```
 
-Then select **"Dunit OS - Terminal Mode"** from the Limine boot menu.
+Then select **"Dunit OS - Terminal Mode (Text Only)"** from the Limine boot menu.
 
 Features:
-- Text-only interface via serial port
+- Text-only interface via serial port (output in console)
 - Interactive shell with commands: `help`, `ls`, `pwd`, `clear`, `exit`
 - No GUI initialization
 - Lower resource usage
+
+Exit: Press `Ctrl+A` then `X`
 
 ### With Serial Logging
 ```bash

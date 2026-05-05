@@ -79,6 +79,7 @@ iso: $(BUILD_DIR)/kernel.elf
 	mkdir -p $(ISO_DIR)/boot/limine
 	cp $(BUILD_DIR)/kernel.elf $(ISO_DIR)/boot/
 	cp limine.conf $(ISO_DIR)/boot/limine/
+	test -f background.png && cp background.png $(ISO_DIR)/boot/background.png || true
 	cp limine/limine-bios.sys $(ISO_DIR)/boot/limine/
 	cp limine/limine-bios-cd.bin $(ISO_DIR)/boot/limine/
 	cp limine/limine-uefi-cd.bin $(ISO_DIR)/boot/limine/
@@ -106,7 +107,10 @@ grub-iso: $(BUILD_DIR)/kernel.elf
 	@echo "GRUB ISO created at $(BUILD_DIR)/os.iso"
 
 run: iso
-	$(QEMU) -boot d -cdrom $(BUILD_DIR)/microkernel.iso -m 512M -serial stdio
+	$(QEMU) -boot d -cdrom $(BUILD_DIR)/microkernel.iso -m 512M -serial stdio -boot menu=on
+
+run-terminal: iso
+	$(QEMU) -boot d -cdrom $(BUILD_DIR)/microkernel.iso -m 512M -serial stdio -nographic -boot menu=on
 
 clean:
 	rm -rf $(BUILD_DIR)

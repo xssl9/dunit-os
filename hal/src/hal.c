@@ -30,3 +30,13 @@ void hal_init(void) {
     
     hal_enable_interrupts();
 }
+
+void hal_set_vga_text_mode(void) {
+    __asm__ volatile(
+        "mov $0x0003, %%ax\n"
+        "int $0x10\n"
+        :
+        :
+        : "ax"
+    );
+}

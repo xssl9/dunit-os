@@ -7,6 +7,7 @@ extern "C" {
     pub fn syscall_init();
     pub fn hal_enable_interrupts();
     pub fn hal_disable_interrupts();
+    pub fn hal_set_vga_text_mode();
     pub fn hal_outb(port: u16, value: u8);
     pub fn hal_inb(port: u16) -> u8;
     pub fn hal_outw(port: u16, value: u16);

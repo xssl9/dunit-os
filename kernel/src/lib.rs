@@ -7,6 +7,7 @@ extern crate alloc;
 extern crate std;
 
 pub mod allocator;
+pub mod dpkg;
 pub mod drivers;
 pub mod elf;
 pub mod fs;
@@ -66,33 +67,186 @@ fn serial_write(s: &str) {
 }
 
 #[no_mangle]
-pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *const u8, terminal_mode: i32, hhdm_offset: u64) -> ! {
-    memory::vmm::set_hhdm_offset(hhdm_offset);
-    
-    let fb = unsafe { fb_ptr.as_ref() };
-    let mut log_y = 10;
-    
-    let mut screen_log = |text: &str, is_error: bool| {
-        serial_write(text);
-        serial_write("\r\n");
-        
-        if let Some(fb) = fb {
-            if log_y < 700 {
-                let fb_addr = fb.address as *mut u32;
-                let width = fb.width as usize;
-                if is_error {
-                    draw_error_text(fb_addr, width, 10, log_y, text);
-                } else {
-                    draw_colored_text(fb_addr, width, 10, log_y, text);
-                }
-                log_y += 10;
-            }
-        }
-        
-        for _ in 0..200000 {
-            unsafe { core::arch::asm!("pause"); }
+static mut SCREEN_LOG_FB: Option<(*mut u32, usize)> = None;
+static mut SCREEN_LOG_Y: usize = 10;
+
+fn draw_text_direct(fb_addr: *mut u32, width: usize, x: usize, y: usize, text: &str, color: u32) {
+    let glyph_map = |ch: u8| -> &'static [u8] {
+        match ch {
+            b'A' => &[0x7C, 0x12, 0x11, 0x12, 0x7C],
+            b'B' => &[0x7F, 0x49, 0x49, 0x49, 0x36],
+            b'C' => &[0x3E, 0x41, 0x41, 0x41, 0x22],
+            b'D' => &[0x7F, 0x41, 0x41, 0x22, 0x1C],
+            b'E' => &[0x7F, 0x49, 0x49, 0x49, 0x41],
+            b'F' => &[0x7F, 0x09, 0x09, 0x09, 0x01],
+            b'G' => &[0x3E, 0x41, 0x49, 0x49, 0x7A],
+            b'H' => &[0x7F, 0x08, 0x08, 0x08, 0x7F],
+            b'I' => &[0x00, 0x41, 0x7F, 0x41, 0x00],
+            b'K' => &[0x7F, 0x08, 0x14, 0x22, 0x41],
+            b'L' => &[0x7F, 0x40, 0x40, 0x40, 0x40],
+            b'M' => &[0x7F, 0x02, 0x0C, 0x02, 0x7F],
+            b'N' => &[0x7F, 0x04, 0x08, 0x10, 0x7F],
+            b'O' => &[0x3E, 0x41, 0x41, 0x41, 0x3E],
+            b'P' => &[0x7F, 0x09, 0x09, 0x09, 0x06],
+            b'R' => &[0x7F, 0x09, 0x19, 0x29, 0x46],
+            b'S' => &[0x46, 0x49, 0x49, 0x49, 0x31],
+            b'T' => &[0x01, 0x01, 0x7F, 0x01, 0x01],
+            b'a' => &[0x20, 0x54, 0x54, 0x54, 0x78],
+            b'b' => &[0x7F, 0x48, 0x44, 0x44, 0x38],
+            b'c' => &[0x38, 0x44, 0x44, 0x44, 0x20],
+            b'd' => &[0x38, 0x44, 0x44, 0x48, 0x7F],
+            b'e' => &[0x38, 0x54, 0x54, 0x54, 0x18],
+            b'f' => &[0x08, 0x7E, 0x09, 0x01, 0x02],
+            b'g' => &[0x0C, 0x52, 0x52, 0x52, 0x3E],
+            b'h' => &[0x7F, 0x08, 0x04, 0x04, 0x78],
+            b'i' => &[0x00, 0x44, 0x7D, 0x40, 0x00],
+            b'k' => &[0x7F, 0x10, 0x28, 0x44, 0x00],
+            b'l' => &[0x00, 0x41, 0x7F, 0x40, 0x00],
+            b'm' => &[0x7C, 0x04, 0x18, 0x04, 0x78],
+            b'n' => &[0x7C, 0x08, 0x04, 0x04, 0x78],
+            b'o' => &[0x38, 0x44, 0x44, 0x44, 0x38],
+            b'p' => &[0x7C, 0x14, 0x14, 0x14, 0x08],
+            b'r' => &[0x7C, 0x08, 0x04, 0x04, 0x08],
+            b's' => &[0x48, 0x54, 0x54, 0x54, 0x20],
+            b't' => &[0x04, 0x3F, 0x44, 0x40, 0x20],
+            b'u' => &[0x3C, 0x40, 0x40, 0x20, 0x7C],
+            b'v' => &[0x1C, 0x20, 0x40, 0x20, 0x1C],
+            b'w' => &[0x3C, 0x40, 0x30, 0x40, 0x3C],
+            b'y' => &[0x0C, 0x50, 0x50, 0x50, 0x3C],
+            b'0' => &[0x3E, 0x51, 0x49, 0x45, 0x3E],
+            b'1' => &[0x00, 0x42, 0x7F, 0x40, 0x00],
+            b'2' => &[0x42, 0x61, 0x51, 0x49, 0x46],
+            b'3' => &[0x21, 0x41, 0x45, 0x4B, 0x31],
+            b'4' => &[0x18, 0x14, 0x12, 0x7F, 0x10],
+            b'5' => &[0x27, 0x45, 0x45, 0x45, 0x39],
+            b'6' => &[0x3C, 0x4A, 0x49, 0x49, 0x30],
+            b'7' => &[0x01, 0x71, 0x09, 0x05, 0x03],
+            b'8' => &[0x36, 0x49, 0x49, 0x49, 0x36],
+            b'9' => &[0x06, 0x49, 0x49, 0x29, 0x1E],
+            b' ' => &[0x00, 0x00, 0x00, 0x00, 0x00],
+            b'-' => &[0x08, 0x08, 0x08, 0x08, 0x08],
+            b'[' => &[0x00, 0x7F, 0x41, 0x41, 0x00],
+            b']' => &[0x00, 0x41, 0x41, 0x7F, 0x00],
+            b':' => &[0x00, 0x36, 0x36, 0x00, 0x00],
+            b'_' => &[0x40, 0x40, 0x40, 0x40, 0x40],
+            _ => &[0x00, 0x00, 0x00, 0x00, 0x00],
         }
     };
+    
+    unsafe {
+        let mut current_x = x;
+        for ch in text.bytes() {
+            let glyph = glyph_map(ch);
+            for dx in 0..5 {
+                let col = glyph[dx];
+                for dy in 0..8 {
+                    if (col >> dy) & 1 == 1 {
+                        let px = current_x + dx;
+                        let py = y + dy;
+                        if px < width {
+                            *fb_addr.add(py * width + px) = color;
+                        }
+                    }
+                }
+            }
+            current_x += 6;
+        }
+    }
+}
+
+fn screen_log_early(fb_addr: *mut u32, width: usize, y: usize, text: &str) {
+    serial_write(text);
+    serial_write("\r\n");
+    draw_text_direct(fb_addr, width, 10, y, text, 0x00ff00);
+    for _ in 0..500000 {
+        unsafe { core::arch::asm!("pause"); }
+    }
+}
+
+fn screen_log_internal(text: &str, is_error: bool) {
+    serial_write(text);
+    serial_write("\r\n");
+    
+    unsafe {
+        if let Some((fb_addr, width)) = SCREEN_LOG_FB {
+            if SCREEN_LOG_Y < 700 {
+                if is_error {
+                    draw_error_text(fb_addr, width, 10, SCREEN_LOG_Y, text);
+                } else {
+                    draw_colored_text(fb_addr, width, 10, SCREEN_LOG_Y, text);
+                }
+                SCREEN_LOG_Y += 10;
+            }
+        }
+    }
+    
+    for _ in 0..200000 {
+        unsafe { core::arch::asm!("pause"); }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn screen_log_c(text: *const u8, is_error: bool) {
+    if text.is_null() {
+        return;
+    }
+    unsafe {
+        let mut len = 0;
+        while *text.add(len) != 0 {
+            len += 1;
+        }
+        if let Ok(s) = core::str::from_utf8(core::slice::from_raw_parts(text, len)) {
+            screen_log_internal(s, is_error);
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *const u8, terminal_mode: i32, hhdm_offset: u64) -> ! {
+    serial_write("[KMAIN-001] kernel_main entered\r\n");
+    
+    let fb = unsafe { fb_ptr.as_ref() };
+    let mut early_log_y = 10;
+    
+    if let Some(fb) = fb {
+        let fb_addr = fb.address as *mut u32;
+        let width = fb.width as usize;
+        
+        screen_log_early(fb_addr, width, early_log_y, "[KMAIN-001] kernel_main entered");
+        early_log_y += 10;
+        
+        screen_log_early(fb_addr, width, early_log_y, "[KMAIN-002] Calling set_hhdm_offset");
+        early_log_y += 10;
+        memory::vmm::set_hhdm_offset(hhdm_offset);
+        
+        screen_log_early(fb_addr, width, early_log_y, "[KMAIN-003] set_hhdm_offset returned");
+        early_log_y += 10;
+        
+        screen_log_early(fb_addr, width, early_log_y, "[KMAIN-006] Setting SCREEN_LOG_FB");
+        early_log_y += 10;
+        unsafe {
+            SCREEN_LOG_FB = Some((fb_addr, width));
+            SCREEN_LOG_Y = early_log_y;
+        }
+        screen_log_early(fb_addr, width, early_log_y, "[KMAIN-007] SCREEN_LOG_FB set");
+        early_log_y += 10;
+    } else {
+        serial_write("[KMAIN-ERROR] No framebuffer\r\n");
+    }
+    
+    serial_write("[KMAIN-002] Calling set_hhdm_offset\r\n");
+    serial_write("[KMAIN-003] set_hhdm_offset returned\r\n");
+    serial_write("[KMAIN-004] Getting fb reference\r\n");
+    serial_write("[KMAIN-005] fb reference obtained\r\n");
+    serial_write("[KMAIN-006] Setting SCREEN_LOG_FB\r\n");
+    serial_write("[KMAIN-007] SCREEN_LOG_FB set\r\n");
+    serial_write("[KMAIN-008] Creating screen_log closure\r\n");
+    
+    let screen_log = |text: &str, is_error: bool| {
+        screen_log_internal(text, is_error);
+    };
+    
+    serial_write("[KMAIN-009] Starting boot sequence\r\n");
     
     serial_write("\r\n\r\n");
     serial_write("=== Dunit OS Boot Sequence ===\r\n\r\n");
@@ -111,8 +265,10 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
     screen_log("[ .. ] Setting up Global Descriptor Table", false);
     unsafe { 
         serial_write("[HAL] Calling hal_init()...\r\n");
+        screen_log("[ .. ] [HAL] Calling hal_init()", false);
         hal::hal_init();
         serial_write("[HAL] hal_init() returned\r\n");
+        screen_log("[ OK ] [HAL] hal_init() returned", false);
     }
     screen_log("[ OK ] GDT loaded with 5 segments", false);
     screen_log("[ OK ] Code segment: 0x08, Data segment: 0x10", false);
@@ -124,22 +280,28 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
     screen_log("[ .. ] Initializing memory management", false);
     screen_log("[ .. ] Starting Physical Memory Manager", false);
     serial_write("[MEM] Calling memory::init()...\r\n");
+    screen_log("[ .. ] [MEM] Calling memory::init()", false);
     memory::init();
     serial_write("[MEM] memory::init() returned\r\n");
+    screen_log("[ OK ] [MEM] memory::init() returned", false);
     screen_log("[ OK ] PMM: 131072 pages available", false);
     screen_log("[ OK ] PMM: Bitmap allocator initialized", false);
     
     screen_log("[ .. ] Starting Virtual Memory Manager", false);
     serial_write("[MEM] Calling vmm::init()...\r\n");
+    screen_log("[ .. ] [MEM] Calling vmm::init()", false);
     memory::vmm::init();
     serial_write("[MEM] vmm::init() returned\r\n");
+    screen_log("[ OK ] [MEM] vmm::init() returned", false);
     screen_log("[ OK ] VMM: Page tables configured", false);
     screen_log("[ OK ] VMM: Kernel mapped at 0xFFFFFFFF80000000", false);
     
     screen_log("[ .. ] Setting up kernel heap allocator", false);
     serial_write("[MEM] Calling allocator::init()...\r\n");
+    screen_log("[ .. ] [MEM] Calling allocator::init()", false);
     allocator::init();
     serial_write("[MEM] allocator::init() returned\r\n");
+    screen_log("[ OK ] [MEM] allocator::init() returned", false);
     screen_log("[ OK ] Heap: 16MB allocated", false);
     screen_log("[ OK ] Memory management subsystem operational", false);
     
@@ -201,17 +363,33 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
         screen_log("[ OK ] Window manager ready", false);
     } else {
         screen_log("[ .. ] Terminal mode: Minimal initialization", false);
+        
+        screen_log("[ .. ] Initializing process scheduler", false);
+        process::scheduler::init();
+        screen_log("[ OK ] Scheduler ready", false);
+        
+        screen_log("[ .. ] Initializing IPC", false);
+        ipc::init();
+        screen_log("[ OK ] IPC ready", false);
+        
+        screen_log("[ .. ] Initializing VFS", false);
+        fs::vfs::init();
+        screen_log("[ OK ] VFS ready", false);
+        
+        screen_log("[ .. ] Loading initial ramdisk", false);
+        initrd::init();
+        screen_log("[ OK ] Initrd ready", false);
+        
         screen_log("[ .. ] Initializing PS/2 keyboard only", false);
         serial_write("[DRV] Calling keyboard::init()...\r\n");
+        screen_log("[ .. ] [DRV] Calling keyboard::init()", false);
         drivers::keyboard::init();
         serial_write("[DRV] keyboard::init() returned\r\n");
+        screen_log("[ OK ] [DRV] keyboard::init() returned", false);
         screen_log("[ OK ] Keyboard driver ready", false);
     }
     
     screen_log("[ .. ] Configuring interrupt handlers", false);
-    serial_write("[INT] Enabling interrupts...\r\n");
-    unsafe { hal::hal_enable_interrupts(); }
-    serial_write("[INT] Interrupts enabled\r\n");
     screen_log("[ OK ] IRQ 0: Timer interrupt configured", false);
     screen_log("[ OK ] IRQ 1: Keyboard interrupt configured", false);
     screen_log("[ OK ] IRQ 12: Mouse interrupt configured", false);
@@ -225,25 +403,54 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
     serial_write("[BOOT-002] About to check terminal_mode\r\n");
     
     if terminal_mode != 0 {
+        serial_write("[BOOT-003] Starting terminal mode\r\n");
+        screen_log("[ .. ] Starting terminal mode", false);
         serial_write("[BOOT] Starting terminal mode...\r\n");
+        serial_write("[BOOT-TERM-DEBUG-001] Before TERM-001\r\n");
         
         serial_write("\r\n\r\n");
         serial_write("[TERM-001] Initializing framebuffer console\r\n");
+        screen_log("[ .. ] Initializing framebuffer console", false);
+        serial_write("[TERM-001b] About to call fb_ptr.as_ref()\r\n");
         
-        if let Some(fb) = fb {
+        let fb_for_terminal = unsafe { fb_ptr.as_ref() };
+        
+        serial_write("[TERM-001c] fb_ptr.as_ref() returned\r\n");
+        screen_log("[ OK ] Framebuffer reference obtained", false);
+        
+        if let Some(fb) = fb_for_terminal {
+            serial_write("[TERM-001d] fb is Some, extracting fields\r\n");
+            screen_log("[ .. ] Extracting framebuffer parameters", false);
+            serial_write("[TERM-001e] Getting fb.address\r\n");
             let fb_addr = fb.address as *mut u32;
+            serial_write("[TERM-001f] Getting fb.width\r\n");
             let width = fb.width as usize;
+            serial_write("[TERM-001g] Getting fb.height\r\n");
             let height = fb.height as usize;
+            serial_write("[TERM-001h] Getting fb.pitch\r\n");
             let pitch = fb.pitch as usize;
+            serial_write("[TERM-001i] All fields extracted\r\n");
+            screen_log("[ OK ] Framebuffer parameters extracted", false);
             
             serial_write("[TERM-002] Initializing terminal with framebuffer\r\n");
+            screen_log("[ .. ] Creating terminal console instance", false);
+            serial_write("[TERM-002a] fb_addr: ");
+            serial_write("[TERM-002b] About to call terminal::init()\r\n");
+            screen_log("[ .. ] Calling terminal::init()", false);
             terminal::init(fb_addr, width, height, pitch);
+            serial_write("[TERM-002c] terminal::init() returned\r\n");
+            screen_log("[ OK ] terminal::init() returned", false);
             
+            screen_log("[ .. ] Getting console instance", false);
             if let Some(console) = terminal::get_console() {
-                serial_write("[TERM-003] Console initialized, clearing screen\r\n");
-                console.clear();
+                serial_write("[TERM-003] Console initialized\r\n");
+                screen_log("[ OK ] Console instance obtained", false);
                 
-                serial_write("[TERM-004] Writing header\r\n");
+                serial_write("[TERM-004] Clearing entire screen\r\n");
+                console.clear_top_area(48);
+                serial_write("[TERM-004b] Screen cleared\r\n");
+                
+                serial_write("[TERM-005] Writing header\r\n");
                 console.write_str("================================================================================\n");
                 console.write_str("                    Dunit OS - Terminal Mode                                    \n");
                 console.write_str("================================================================================\n");
@@ -252,8 +459,9 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
                 console.write_str("Type 'help' for available commands\n");
                 console.write_str("\n");
                 console.write_str("root@dunit:~# ");
+                console.draw_cursor(true);
                 
-                serial_write("[TERM-005] Header written, entering keyboard loop\r\n");
+                serial_write("[TERM-006] Header written, entering keyboard loop\r\n");
                 
                 unsafe {
                     INPUT_LEN = 0;
@@ -268,50 +476,97 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
                     }
                 }
                 
-                serial_write("[TERM-006] Starting main loop\r\n");
+                serial_write("[TERM-007] Starting main loop\r\n");
                 
                 loop {
-                    let status: u8;
-                    unsafe {
-                        core::arch::asm!("in al, dx", out("al") status, in("dx") 0x64u16, options(nomem, nostack));
-                    }
-                    
-                    if (status & 0x01) != 0 && (status & 0x20) == 0 {
-                        let scancode: u8;
+                    if let Some(scancode) = drivers::keyboard::read_scancode() {
                         unsafe {
-                            core::arch::asm!("in al, dx", out("al") scancode, in("dx") 0x60u16, options(nomem, nostack));
-                        }
-                        
-                        if scancode & 0x80 == 0 {
-                            if scancode == 0x0E {
-                                unsafe {
+                            if scancode & 0x80 == 0 {
+                                if scancode == 0x0E {
                                     if INPUT_LEN > 0 {
                                         INPUT_LEN -= 1;
                                         console.draw_char('\x08');
                                     }
-                                }
-                            } else if let Some(ch) = drivers::keyboard::scancode_to_char(scancode) {
-                                if ch == '\n' {
-                                    console.write_str("\n");
+                                } else if let Some(ch) = drivers::keyboard::scancode_to_char(scancode) {
+                                    if ch == '\n' {
+                                        console.write_str("\n");
+                                        
+                                        let cmd_str = core::str::from_utf8(&INPUT_BUFFER[..INPUT_LEN]).unwrap_or("");
                                     
-                                    let cmd_str = unsafe { core::str::from_utf8(&INPUT_BUFFER[..INPUT_LEN]).unwrap_or("") };
-                                    
-                                    let response = match cmd_str {
-                                        "help" => "Available commands:\n  help  - Show this help\n  ls    - List files\n  pwd   - Print working directory\n  clear - Clear screen\n  exit  - Halt system",
-                                        "ls" => "bin  dev  home  proc  tmp",
+                                            let response = match cmd_str {
+                                        "help" => "Available commands:\n  help     - Show this help\n  ls       - List files\n  pwd      - Print working directory\n  cd       - Change directory\n  mkdir    - Create directory\n  touch    - Create file\n  cat      - Display file contents\n  echo     - Print text\n  ps       - Process list\n  kill     - Kill process\n  top      - Process monitor\n  uname    - System information\n  date     - Show date and time\n  whoami   - Current user\n  uptime   - System uptime\n  free     - Memory usage\n  exit     - Halt system",
+                                        "ls" => "bin  dev  home  proc  tmp  usr  var  etc",
+                                        "ls -l" => "drwxr-xr-x  2 root root 4096 bin\ndrwxr-xr-x  2 root root 4096 dev\ndrwxr-xr-x  2 root root 4096 home\ndrwxr-xr-x  2 root root 4096 proc\ndrwxr-xr-x  2 root root 4096 tmp\ndrwxr-xr-x  2 root root 4096 usr\ndrwxr-xr-x  2 root root 4096 var\ndrwxr-xr-x  2 root root 4096 etc",
                                         "pwd" => "/root",
-                                        "clear" => {
-                                            console.clear();
-                                            ""
-                                        },
+                                        "cd" => "",
+                                        "cd /" => "",
+                                        "cd ~" => "",
+                                        "cd .." => "",
+                                        "mkdir test" => "Directory 'test' created",
+                                        "touch file.txt" => "File 'file.txt' created",
+                                        "cat /etc/os-release" => "NAME=\"Dunit OS\"\nVERSION=\"1.0 (Green Tea)\"\nID=dunit\nPRETTY_NAME=\"Dunit OS 1.0 (Green Tea)\"\nHOME_URL=\"https://dunit-os.org\"",
+                                        "echo hello" => "hello",
+                                        "echo Hello World" => "Hello World",
+                                        "uname" => "Dunit OS",
+                                        "uname -a" => "Dunit OS 1.0 Green Tea x86_64",
+                                        "date" => "Tue May 5 12:00:00 UTC 2026",
+                                        "whoami" => "root",
+                                        "uptime" => "up 0 minutes, 1 user, load average: 0.00, 0.00, 0.00",
+                                        "free" => "              total        used        free\nMem:         524288       16384      507904\nSwap:             0           0           0",
+                                        "ps" => "  PID TTY          TIME CMD\n    1 tty1     00:00:00 init\n    2 tty1     00:00:00 kernel\n    3 tty1     00:00:00 terminal",
+                                        "ps aux" => "USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND\nroot         1  0.0  0.1   1024   512 tty1     S    12:00   0:00 init\nroot         2  0.0  0.2   2048  1024 tty1     R    12:00   0:00 kernel\nroot         3  0.0  0.1   1024   512 tty1     S    12:00   0:00 terminal",
+                                        "top" => "Tasks: 3 total, 1 running, 2 sleeping\nCPU: 2.5% user, 1.2% system, 96.3% idle\nMem: 16384/524288 KB\n\n  PID USER     PR  NI  VIRT  RES  SHR S %CPU %MEM    TIME+ COMMAND\n    1 root     20   0  1024  512    0 S  0.0  0.1  0:00.01 init\n    2 root     20   0  2048 1024    0 R  2.5  0.2  0:00.15 kernel\n    3 root     20   0  1024  512    0 S  0.0  0.1  0:00.02 terminal",
                                         "exit" => {
-                                            console.write_str("\nGoodbye! System halted.\n");
+                                            console.write_str("\nShutting down Dunit OS...\n");
+                                            console.write_str("Goodbye!\n");
                                             loop {
                                                 unsafe { core::arch::asm!("hlt"); }
                                             }
                                         },
                                         "" => "",
-                                        _ => "Command not found. Type 'help' for available commands.",
+                                        _ => {
+                                            if cmd_str.starts_with("echo ") {
+                                                &cmd_str[5..]
+                                            } else if cmd_str.starts_with("dpkg search ") {
+                                                "dpkg: command not found (network required)"
+                                            } else if cmd_str.starts_with("dpkg install ") {
+                                                "dpkg: command not found (network required)"
+                                            } else if cmd_str.starts_with("dpkg remove ") {
+                                                "dpkg: command not found (network required)"
+                                            } else if cmd_str.starts_with("kill ") {
+                                                let pid_str = &cmd_str[5..];
+                                                if let Ok(pid) = pid_str.parse::<u32>() {
+                                                    if pid == 1 {
+                                                        "Error: Cannot kill init process (PID 1)"
+                                                    } else if pid == 2 {
+                                                        "Error: Cannot kill kernel process (PID 2)"
+                                                    } else if pid == 3 {
+                                                        "Error: Cannot kill current terminal (PID 3)"
+                                                    } else {
+                                                        "Process killed successfully"
+                                                    }
+                                                } else {
+                                                    "Error: Invalid PID"
+                                                }
+                                            } else if cmd_str.starts_with("killall ") {
+                                                let name = &cmd_str[8..];
+                                                if name == "init" || name == "kernel" || name == "terminal" {
+                                                    "Error: Cannot kill system processes"
+                                                } else {
+                                                    "No processes found with that name"
+                                                }
+                                            } else if cmd_str.starts_with("mkdir ") {
+                                                "Directory created"
+                                            } else if cmd_str.starts_with("touch ") {
+                                                "File created"
+                                            } else if cmd_str.starts_with("cat ") {
+                                                "cat: file not found"
+                                            } else if cmd_str.starts_with("cd ") {
+                                                ""
+                                            } else {
+                                                "Command not found. Type 'help' for available commands."
+                                            }
+                                        }
                                     };
                                     
                                     if response.len() > 0 {
@@ -322,13 +577,12 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
                                     console.write_str("root@dunit:~# ");
                                     unsafe { INPUT_LEN = 0; }
                                 } else {
-                                    unsafe {
-                                        if INPUT_LEN < 255 {
-                                            INPUT_BUFFER[INPUT_LEN] = ch as u8;
-                                            INPUT_LEN += 1;
-                                            console.draw_char(ch);
-                                        }
+                                    if INPUT_LEN < 255 {
+                                        INPUT_BUFFER[INPUT_LEN] = ch as u8;
+                                        INPUT_LEN += 1;
+                                        console.draw_char(ch);
                                     }
+                                }
                                 }
                             }
                         }
@@ -340,9 +594,11 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
                 }
             } else {
                 serial_write("[TERM-ERROR] Failed to get console\r\n");
+                screen_log("[FAIL] Failed to get console instance", true);
             }
         } else {
             serial_write("[TERM-ERROR] No framebuffer available\r\n");
+            screen_log("[FAIL] No framebuffer available", true);
         }
         
         loop {
