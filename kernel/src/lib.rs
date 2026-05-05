@@ -47,113 +47,8 @@ struct LimineFramebuffer {
     blue_mask_shift: u8,
 }
 
-#[repr(C)]
-struct LimineTerminal {
-    columns: u64,
-    rows: u64,
-    framebuffer: *mut LimineFramebuffer,
-}
-
-type LimineTerminalWrite = extern "C" fn(*mut LimineTerminal, *const u8, u64);
-
-#[repr(C)]
-struct LimineTerminalResponse {
-    revision: u64,
-    terminal_count: u64,
-    terminals: *mut *mut LimineTerminal,
-    write: LimineTerminalWrite,
-}
-
-fn terminal_print(term_resp: &LimineTerminalResponse, s: &str) {
-    if term_resp.terminal_count > 0 {
-        unsafe {
-            let term = *term_resp.terminals;
-            (term_resp.write)(term, s.as_ptr(), s.len() as u64);
-        }
-    }
-}
-
-static mut TERM_RESPONSE: Option<*const LimineTerminalResponse> = None;
-static mut VGA_ROW: usize = 0;
-static mut VGA_COL: usize = 0;
-const VGA_WIDTH: usize = 80;
-const VGA_HEIGHT: usize = 25;
-
 static mut INPUT_BUFFER: [u8; 256] = [0; 256];
 static mut INPUT_LEN: usize = 0;
-
-fn terminal_write_str(s: &str) {
-    unsafe {
-        if let Some(term_ptr) = TERM_RESPONSE {
-            let term_resp = &*term_ptr;
-            if term_resp.terminal_count > 0 {
-                let term = *term_resp.terminals;
-                (term_resp.write)(term, s.as_ptr(), s.len() as u64);
-            }
-        }
-    }
-}
-
-fn vga_clear() {
-    serial_write("[TERM] Using Limine Terminal API\r\n");
-    terminal_write_str("\x1b[2J\x1b[H");
-    unsafe {
-        VGA_ROW = 0;
-        VGA_COL = 0;
-    }
-    serial_write("[TERM] Terminal cleared\r\n");
-}
-
-fn vga_putchar(ch: u8) {
-    unsafe {
-        if ch == b'\n' {
-            VGA_COL = 0;
-            VGA_ROW += 1;
-        } else if ch == b'\r' {
-            VGA_COL = 0;
-        } else if ch == 0x08 {
-            if VGA_COL > 0 {
-                VGA_COL -= 1;
-                terminal_write_str("\x08 \x08");
-            }
-        } else {
-            if VGA_COL >= VGA_WIDTH {
-                VGA_COL = 0;
-                VGA_ROW += 1;
-            }
-            
-            if VGA_ROW >= VGA_HEIGHT {
-                VGA_ROW = VGA_HEIGHT - 1;
-            }
-            
-            let buf = [ch];
-            terminal_write_str(core::str::from_utf8_unchecked(&buf));
-            
-            VGA_COL += 1;
-        }
-    }
-}
-
-fn vga_write(s: &str) {
-    for byte in s.bytes() {
-        unsafe {
-            let mut timeout = 100000;
-            loop {
-                let mut status: u8;
-                core::arch::asm!("in al, dx", out("al") status, in("dx") 0x3FDu16, options(nomem, nostack));
-                if (status & 0x20) != 0 {
-                    break;
-                }
-                timeout -= 1;
-                if timeout == 0 {
-                    break;
-                }
-            }
-            core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") byte, options(nomem, nostack));
-        }
-    }
-    terminal_write_str(s);
-}
 
 fn serial_write(s: &str) {
     for byte in s.bytes() {
@@ -171,11 +66,7 @@ fn serial_write(s: &str) {
 }
 
 #[no_mangle]
-pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, term_ptr: *const LimineTerminalResponse, terminal_mode: i32, hhdm_offset: u64) -> ! {
-    unsafe {
-        TERM_RESPONSE = Some(term_ptr);
-    }
-    
+pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *const u8, terminal_mode: i32, hhdm_offset: u64) -> ! {
     memory::vmm::set_hhdm_offset(hhdm_offset);
     
     let fb = unsafe { fb_ptr.as_ref() };
@@ -337,158 +228,125 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, term_ptr: *const
         serial_write("[BOOT] Starting terminal mode...\r\n");
         
         serial_write("\r\n\r\n");
-        serial_write("[TERM-001] Initializing terminal mode\r\n");
-        serial_write("[TERM-002] Checking Limine Terminal API\r\n");
+        serial_write("[TERM-001] Initializing framebuffer console\r\n");
         
-        unsafe {
-            if let Some(term_ptr) = TERM_RESPONSE {
-                let term_resp = &*term_ptr;
-                serial_write("[TERM-003] Terminal response available\r\n");
-                serial_write("[TERM-004] Terminal count: ");
-                let count = term_resp.terminal_count;
-                let mut buf = [0u8; 20];
-                let mut idx = 0;
-                let mut n = count;
-                if n == 0 {
-                    buf[0] = b'0';
-                    idx = 1;
-                } else {
-                    while n > 0 {
-                        buf[idx] = b'0' + (n % 10) as u8;
-                        n /= 10;
-                        idx += 1;
+        if let Some(fb) = fb {
+            let fb_addr = fb.address as *mut u32;
+            let width = fb.width as usize;
+            let height = fb.height as usize;
+            let pitch = fb.pitch as usize;
+            
+            serial_write("[TERM-002] Initializing terminal with framebuffer\r\n");
+            terminal::init(fb_addr, width, height, pitch);
+            
+            if let Some(console) = terminal::get_console() {
+                serial_write("[TERM-003] Console initialized, clearing screen\r\n");
+                console.clear();
+                
+                serial_write("[TERM-004] Writing header\r\n");
+                console.write_str("================================================================================\n");
+                console.write_str("                    Dunit OS - Terminal Mode                                    \n");
+                console.write_str("================================================================================\n");
+                console.write_str("\n");
+                console.write_str("Terminal mode is active.\n");
+                console.write_str("Type 'help' for available commands\n");
+                console.write_str("\n");
+                console.write_str("root@dunit:~# ");
+                
+                serial_write("[TERM-005] Header written, entering keyboard loop\r\n");
+                
+                unsafe {
+                    INPUT_LEN = 0;
+                    
+                    for _ in 0..16 {
+                        let status: u8;
+                        core::arch::asm!("in al, dx", out("al") status, in("dx") 0x64u16, options(nomem, nostack));
+                        if (status & 0x01) != 0 {
+                            let _: u8;
+                            core::arch::asm!("in al, dx", out("al") _, in("dx") 0x60u16, options(nomem, nostack));
+                        }
                     }
                 }
-                for i in (0..idx).rev() {
-                    serial_write(core::str::from_utf8_unchecked(&[buf[i]]));
-                }
-                serial_write("\r\n");
-            } else {
-                serial_write("[TERM-003] No terminal response\r\n");
-            }
-        }
-        
-        serial_write("[TERM-005] About to call vga_clear()\r\n");
-        
-        vga_clear();
-        
-        serial_write("[TERM-006] vga_clear() completed\r\n");
-        serial_write("[TERM-007] About to write header\r\n");
-        
-        vga_write("================================================================================\n");
-        serial_write("[TERM-007] Line 1 written\r\n");
-        
-        vga_write("                    Dunit OS - Terminal Mode                                    \n");
-        serial_write("[TERM-008] Line 2 written\r\n");
-        
-        vga_write("================================================================================\n");
-        serial_write("[TERM-009] Line 3 written\r\n");
-        
-        vga_write("\n");
-        serial_write("[TERM-010] Empty line written\r\n");
-        
-        vga_write("Terminal mode is active.\n");
-        serial_write("[TERM-011] Status message written\r\n");
-        
-        vga_write("Type 'help' for available commands\n");
-        serial_write("[TERM-012] Help message written\r\n");
-        
-        vga_write("\n");
-        serial_write("[TERM-013] Empty line written\r\n");
-        
-        serial_write("[TERM-014] Header complete\r\n");
-        
-        serial_write("[TERM-015] About to flush keyboard buffer\r\n");
-        serial_write("[TERM-016] Flushing keyboard buffer\r\n");
-        unsafe {
-            for i in 0..16 {
-                let status: u8;
-                core::arch::asm!("in al, dx", out("al") status, in("dx") 0x64u16, options(nomem, nostack));
-                if (status & 0x01) != 0 {
-                    let _: u8;
-                    core::arch::asm!("in al, dx", out("al") _, in("dx") 0x60u16, options(nomem, nostack));
-                }
-            }
-        }
-        serial_write("[TERM-017] Keyboard buffer flushed\r\n");
-        
-        serial_write("[TERM-018] About to call vga_write for prompt\r\n");
-        vga_write("root@dunit:~# ");
-        serial_write("[TERM-019] vga_write for prompt completed\r\n");
-        
-        serial_write("[TERM-020] About to initialize INPUT_LEN\r\n");
-        unsafe {
-            INPUT_LEN = 0;
-        }
-        serial_write("[TERM-021] INPUT_LEN initialized to 0\r\n");
-        
-        serial_write("[TERM-022] About to enter main keyboard loop\r\n");
-        
-        loop {
-            unsafe {
-                let status: u8;
-                core::arch::asm!("in al, dx", out("al") status, in("dx") 0x64u16, options(nomem, nostack));
                 
-                if (status & 0x01) != 0 && (status & 0x20) == 0 {
-                    let scancode: u8;
-                    core::arch::asm!("in al, dx", out("al") scancode, in("dx") 0x60u16, options(nomem, nostack));
+                serial_write("[TERM-006] Starting main loop\r\n");
+                
+                loop {
+                    let status: u8;
+                    unsafe {
+                        core::arch::asm!("in al, dx", out("al") status, in("dx") 0x64u16, options(nomem, nostack));
+                    }
                     
-                    if scancode & 0x80 == 0 {
-                        if scancode == 0x0E {
-                            unsafe {
-                                if INPUT_LEN > 0 {
-                                    INPUT_LEN -= 1;
-                                    vga_putchar(0x08);
-                                }
-                            }
-                        } else if let Some(ch) = drivers::keyboard::scancode_to_char(scancode) {
-                            if ch == '\n' {
-                                vga_write("\n");
-                                
-                                let cmd_str = unsafe { core::str::from_utf8(&INPUT_BUFFER[..INPUT_LEN]).unwrap_or("") };
-                                
-                                let response = match cmd_str {
-                                    "help" => "Available commands:\n  help  - Show this help\n  ls    - List files\n  pwd   - Print working directory\n  clear - Clear screen\n  exit  - Halt system",
-                                    "ls" => "bin  dev  home  proc  tmp",
-                                    "pwd" => "/root",
-                                    "clear" => {
-                                        vga_clear();
-                                        ""
-                                    },
-                                    "exit" => {
-                                        vga_write("\nGoodbye! System halted.\n");
-                                        loop {
-                                            core::arch::asm!("hlt");
-                                        }
-                                    },
-                                    "" => "",
-                                    _ => "Command not found. Type 'help' for available commands.",
-                                };
-                                
-                                if response.len() > 0 {
-                                    vga_write(response);
-                                    vga_write("\n");
-                                }
-                                
-                                vga_write("root@dunit:~# ");
-                                unsafe { INPUT_LEN = 0; }
-                            } else {
+                    if (status & 0x01) != 0 && (status & 0x20) == 0 {
+                        let scancode: u8;
+                        unsafe {
+                            core::arch::asm!("in al, dx", out("al") scancode, in("dx") 0x60u16, options(nomem, nostack));
+                        }
+                        
+                        if scancode & 0x80 == 0 {
+                            if scancode == 0x0E {
                                 unsafe {
-                                    if INPUT_LEN < 255 {
-                                        INPUT_BUFFER[INPUT_LEN] = ch as u8;
-                                        INPUT_LEN += 1;
-                                        vga_putchar(ch as u8);
+                                    if INPUT_LEN > 0 {
+                                        INPUT_LEN -= 1;
+                                        console.draw_char('\x08');
+                                    }
+                                }
+                            } else if let Some(ch) = drivers::keyboard::scancode_to_char(scancode) {
+                                if ch == '\n' {
+                                    console.write_str("\n");
+                                    
+                                    let cmd_str = unsafe { core::str::from_utf8(&INPUT_BUFFER[..INPUT_LEN]).unwrap_or("") };
+                                    
+                                    let response = match cmd_str {
+                                        "help" => "Available commands:\n  help  - Show this help\n  ls    - List files\n  pwd   - Print working directory\n  clear - Clear screen\n  exit  - Halt system",
+                                        "ls" => "bin  dev  home  proc  tmp",
+                                        "pwd" => "/root",
+                                        "clear" => {
+                                            console.clear();
+                                            ""
+                                        },
+                                        "exit" => {
+                                            console.write_str("\nGoodbye! System halted.\n");
+                                            loop {
+                                                unsafe { core::arch::asm!("hlt"); }
+                                            }
+                                        },
+                                        "" => "",
+                                        _ => "Command not found. Type 'help' for available commands.",
+                                    };
+                                    
+                                    if response.len() > 0 {
+                                        console.write_str(response);
+                                        console.write_str("\n");
+                                    }
+                                    
+                                    console.write_str("root@dunit:~# ");
+                                    unsafe { INPUT_LEN = 0; }
+                                } else {
+                                    unsafe {
+                                        if INPUT_LEN < 255 {
+                                            INPUT_BUFFER[INPUT_LEN] = ch as u8;
+                                            INPUT_LEN += 1;
+                                            console.draw_char(ch);
+                                        }
                                     }
                                 }
                             }
                         }
                     }
+                    
+                    unsafe {
+                        core::arch::asm!("pause");
+                    }
                 }
+            } else {
+                serial_write("[TERM-ERROR] Failed to get console\r\n");
             }
-            
-            unsafe {
-                core::arch::asm!("pause");
-            }
+        } else {
+            serial_write("[TERM-ERROR] No framebuffer available\r\n");
+        }
+        
+        loop {
+            unsafe { core::arch::asm!("hlt"); }
         }
     } else {
         serial_write("\r\n[BOOT] Starting GUI mode...\r\n");
