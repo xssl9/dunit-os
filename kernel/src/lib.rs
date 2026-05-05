@@ -573,7 +573,7 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
                                         }
                                     
                                             let response = match cmd_str {
-                                        "help" => "Available commands:\n  help     - Show this help\n  ls       - List files\n  pwd      - Print working directory\n  cd       - Change directory\n  mkdir    - Create directory\n  touch    - Create file\n  cat      - Display file contents\n  echo     - Print text\n  ps       - Process list\n  kill     - Kill process\n  top      - Process monitor\n  uname    - System information\n  date     - Show date and time\n  whoami   - Current user\n  uptime   - System uptime\n  free     - Memory usage\n  exit     - Halt system",
+                                        "help" => "Available commands:\n  help     - Show this help\n  ls       - List files\n  pwd      - Print working directory\n  cd       - Change directory\n  mkdir    - Create directory\n  touch    - Create file\n  cat      - Display file contents\n  echo     - Print text\n  exec     - Execute userspace program\n  ps       - Process list\n  kill     - Kill process\n  top      - Process monitor\n  uname    - System information\n  date     - Show date and time\n  whoami   - Current user\n  uptime   - System uptime\n  free     - Memory usage\n  exit     - Halt system",
                                         "ls" => "bin  dev  home  proc  tmp  usr  var  etc",
                                         "ls -l" => "drwxr-xr-x  2 root root 4096 bin\ndrwxr-xr-x  2 root root 4096 dev\ndrwxr-xr-x  2 root root 4096 home\ndrwxr-xr-x  2 root root 4096 proc\ndrwxr-xr-x  2 root root 4096 tmp\ndrwxr-xr-x  2 root root 4096 usr\ndrwxr-xr-x  2 root root 4096 var\ndrwxr-xr-x  2 root root 4096 etc",
                                         "pwd" => "/root",
@@ -642,6 +642,18 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
                                                 "cat: file not found"
                                             } else if cmd_str.starts_with("cd ") {
                                                 ""
+                                            } else if cmd_str.starts_with("exec ") {
+                                                let path = &cmd_str[5..].trim();
+                                                
+                                                if path.is_empty() {
+                                                    "Usage: exec <path>"
+                                                } else {
+                                                    console.write_str("Loading ");
+                                                    console.write_str(path);
+                                                    console.write_str("...\n");
+                                                    
+                                                    ""
+                                                }
                                             } else {
                                                 "Command not found. Type 'help' for available commands."
                                             }
@@ -661,7 +673,7 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
                                     
                                     let commands = [
                                         "help", "ls", "pwd", "cd", "mkdir", "touch", "cat", 
-                                        "echo", "ps", "kill", "top", "uname", "date", 
+                                        "echo", "exec", "ps", "kill", "top", "uname", "date", 
                                         "whoami", "uptime", "free", "exit", "killall"
                                     ];
                                     
