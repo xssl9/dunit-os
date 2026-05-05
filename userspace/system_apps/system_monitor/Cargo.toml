@@ -1,10 +1,10 @@
 [package]
-name = "plank"
+name = "system_monitor"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "plank"
+name = "system_monitor"
 path = "src/main.rs"
 
 [dependencies]

@@ -1,4 +1,4 @@
-.PHONY: all clean hal kernel iso run
+.PHONY: all clean hal kernel userspace iso run
 
 CC = gcc
 AS = nasm
@@ -7,8 +7,10 @@ QEMU = qemu-system-x86_64
 
 HAL_DIR = hal
 KERNEL_DIR = kernel
+USERSPACE_DIR = userspace
 BUILD_DIR = build
 ISO_DIR = $(BUILD_DIR)/iso
+USERSPACE_BUILD_DIR = $(BUILD_DIR)/userspace
 
 HAL_OBJS = $(BUILD_DIR)/boot.o $(BUILD_DIR)/boot_main.o $(BUILD_DIR)/limine.o $(BUILD_DIR)/hal.o $(BUILD_DIR)/ports.o \
            $(BUILD_DIR)/gdt.o $(BUILD_DIR)/gdt_asm.o \
@@ -75,11 +77,29 @@ kernel: $(BUILD_DIR)/kernel.o
 $(BUILD_DIR)/kernel.elf: kernel
 	/usr/bin/ld.lld-19 -T $(KERNEL_DIR)/linker.ld -o $@ $(HAL_OBJS) $(BUILD_DIR)/kernel.o
 
-iso: $(BUILD_DIR)/kernel.elf
+userspace:
+	mkdir -p $(USERSPACE_BUILD_DIR)
+	cd $(USERSPACE_DIR)/system_apps/plank && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
+	cp $(USERSPACE_DIR)/system_apps/plank/target/x86_64-unknown-none/release/plank $(USERSPACE_BUILD_DIR)/plank
+	cd $(USERSPACE_DIR)/system_apps/terminal && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
+	cp $(USERSPACE_DIR)/system_apps/terminal/target/x86_64-unknown-none/release/terminal $(USERSPACE_BUILD_DIR)/terminal
+	cd $(USERSPACE_DIR)/system_apps/file_manager && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
+	cp $(USERSPACE_DIR)/system_apps/file_manager/target/x86_64-unknown-none/release/file_manager $(USERSPACE_BUILD_DIR)/file_manager
+	cd $(USERSPACE_DIR)/system_apps/text_editor && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
+	cp $(USERSPACE_DIR)/system_apps/text_editor/target/x86_64-unknown-none/release/text_editor $(USERSPACE_BUILD_DIR)/text_editor
+	cd $(USERSPACE_DIR)/system_apps/settings && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
+	cp $(USERSPACE_DIR)/system_apps/settings/target/x86_64-unknown-none/release/settings $(USERSPACE_BUILD_DIR)/settings
+	cd $(USERSPACE_DIR)/system_apps/system_monitor && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
+	cp $(USERSPACE_DIR)/system_apps/system_monitor/target/x86_64-unknown-none/release/system_monitor $(USERSPACE_BUILD_DIR)/system_monitor
+	@echo "Userspace programs built in $(USERSPACE_BUILD_DIR)/"
+
+iso: $(BUILD_DIR)/kernel.elf userspace
 	mkdir -p $(ISO_DIR)/boot/limine
+	mkdir -p $(ISO_DIR)/boot/userspace
 	cp $(BUILD_DIR)/kernel.elf $(ISO_DIR)/boot/
 	cp limine.conf $(ISO_DIR)/boot/limine/
 	test -f background.png && cp background.png $(ISO_DIR)/boot/background.png || true
+	cp $(USERSPACE_BUILD_DIR)/* $(ISO_DIR)/boot/userspace/ 2>/dev/null || true
 	cp limine/limine-bios.sys $(ISO_DIR)/boot/limine/
 	cp limine/limine-bios-cd.bin $(ISO_DIR)/boot/limine/
 	cp limine/limine-uefi-cd.bin $(ISO_DIR)/boot/limine/
