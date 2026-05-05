@@ -78,6 +78,7 @@ pub fn scancode_to_char(scancode: u8) -> Option<char> {
         0x2C => Some('z'),
         0x39 => Some(' '),
         0x1C => Some('\n'),
+        0x0F => Some('\t'),  // Tab key
         _ => None,
     }
 }

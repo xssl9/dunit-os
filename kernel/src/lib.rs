@@ -655,6 +655,54 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
                                     
                                     console.write_str("root@dunit:~# ");
                                     unsafe { INPUT_LEN = 0; }
+                                } else if ch == '\t' {
+                                    // Tab autocomplete
+                                    let input = core::str::from_utf8(&INPUT_BUFFER[..INPUT_LEN]).unwrap_or("");
+                                    
+                                    let commands = [
+                                        "help", "ls", "pwd", "cd", "mkdir", "touch", "cat", 
+                                        "echo", "ps", "kill", "top", "uname", "date", 
+                                        "whoami", "uptime", "free", "exit", "killall"
+                                    ];
+                                    
+                                    let mut matches: [&str; 20] = [""; 20];
+                                    let mut match_count = 0;
+                                    
+                                    for &cmd in commands.iter() {
+                                        if cmd.starts_with(input) && match_count < 20 {
+                                            matches[match_count] = cmd;
+                                            match_count += 1;
+                                        }
+                                    }
+                                    
+                                    if match_count == 1 {
+                                        // Single match - autocomplete
+                                        let completion = matches[0];
+                                        
+                                        // Clear current input
+                                        for _ in 0..INPUT_LEN {
+                                            console.draw_char('\x08');
+                                        }
+                                        
+                                        // Write completed command
+                                        INPUT_LEN = completion.len();
+                                        for (i, &b) in completion.as_bytes().iter().enumerate() {
+                                            INPUT_BUFFER[i] = b;
+                                        }
+                                        console.write_str(completion);
+                                    } else if match_count > 1 {
+                                        // Multiple matches - show them
+                                        console.write_str("\n");
+                                        for i in 0..match_count {
+                                            console.write_str(matches[i]);
+                                            console.write_str("  ");
+                                        }
+                                        console.write_str("\nroot@dunit:~# ");
+                                        
+                                        // Redisplay current input
+                                        let input_str = core::str::from_utf8(&INPUT_BUFFER[..INPUT_LEN]).unwrap_or("");
+                                        console.write_str(input_str);
+                                    }
                                 } else {
                                     if INPUT_LEN < 255 {
                                         INPUT_BUFFER[INPUT_LEN] = ch as u8;
