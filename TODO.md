@@ -11,7 +11,7 @@
 ## In Progress
 ### Task 4: Improve Terminal Mode
 - [x] Add command history (up/down arrows)
-- [ ] Add tab autocomplete
+- [x] Add tab autocomplete
 - [ ] Add `exec` command to run userspace programs
 - [ ] Add command aliases
 - [ ] Add environment variables
