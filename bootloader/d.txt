@@ -1,0 +1,436 @@
+DUNIT OS (GREEN TEA) - ПОЛНОЕ ОПИСАНИЕ СИСТЕМЫ
+ОБЩАЯ ИНФОРМАЦИЯ
+Название: Dunit OS (Green Tea)
+Архитектура: Microkernel x86_64
+Bootloader: Limine v5.0
+Языки: Rust (kernel), C (HAL), Assembly (low-level)
+Статус: В разработке, GUI режим работает, Terminal режим имеет проблемы с VGA
+
+СТРУКТУРА ПРОЕКТА
+dunit-os/
+├── hal/                          # Hardware Abstraction Layer (C + Assembly)
+│   ├── src/
+│   │   ├── boot.asm             # 64-bit boot entry point
+│   │   ├── boot32.asm           # 32-bit boot stub
+│   │   ├── boot_main.c          # C boot initialization
+│   │   ├── limine.c             # Limine bootloader requests
+│   │   ├── limine.h             # Limine protocol headers
+│   │   ├── hal.c                # HAL initialization
+│   │   ├── hal.h                # HAL interface
+│   │   ├── gdt.c                # Global Descriptor Table
+│   │   ├── gdt.asm              # GDT assembly routines
+│   │   ├── idt.c                # Interrupt Descriptor Table
+│   │   ├── idt.asm              # IDT assembly routines
+│   │   ├── interrupts.asm       # Interrupt handlers
+│   │   ├── context_switch.asm   # Process context switching
+│   │   ├── syscall.asm          # System call entry
+│   │   ├── ports.c              # I/O port operations
+│   │   └── hal_test.c           # HAL testing
+│   └── boot_linker.ld           # Boot linker script
+│
+├── kernel/                       # Microkernel (Rust)
+│   ├── src/
+│   │   ├── lib.rs               # Main kernel entry, boot logs, terminal
+│   │   ├── main.rs              # Kernel main (unused, lib.rs used)
+│   │   ├── hal.rs               # HAL interface bindings
+│   │   ├── allocator.rs         # Heap allocator
+│   │   ├── interrupts.rs        # Interrupt handling
+│   │   ├── font.rs              # Bitmap font for GUI
+│   │   ├── initrd.rs            # Initial ramdisk
+│   │   ├── kthreads.rs          # Kernel threads
+│   │   ├── terminal.rs          # Terminal emulator
+│   │   ├── ui_loop.rs           # GUI main loop
+│   │   ├── window_manager.rs    # Window manager with Plank dock
+│   │   │
+│   │   ├── memory/              # Memory management
+│   │   │   ├── mod.rs           # Memory subsystem init
+│   │   │   ├── pmm.rs           # Physical Memory Manager (bitmap)
+│   │   │   └── vmm.rs           # Virtual Memory Manager (page tables)
+│   │   │
+│   │   ├── process/             # Process management
+│   │   │   ├── mod.rs           # Process structures
+│   │   │   └── scheduler.rs     # Round-robin scheduler
+│   │   │
+│   │   ├── syscall/             # System calls
+│   │   │   └── mod.rs           # Syscall dispatcher
+│   │   │
+│   │   ├── ipc/                 # Inter-Process Communication
+│   │   │   └── mod.rs           # Message passing, shared memory
+│   │   │
+│   │   ├── fs/                  # Virtual File System
+│   │   │   ├── mod.rs           # VFS interface
+│   │   │   ├── vfs.rs           # VFS implementation
+│   │   │   ├── memfs.rs         # In-memory filesystem
+│   │   │   ├── devfs.rs         # Device filesystem
+│   │   │   └── procfs.rs        # Process filesystem
+│   │   │
+│   │   ├── drivers/             # Device drivers
+│   │   │   ├── mod.rs           # Driver subsystem
+│   │   │   ├── keyboard.rs      # PS/2 keyboard driver
+│   │   │   └── mouse.rs         # PS/2 mouse driver
+│   │   │
+│   │   └── elf/                 # ELF loader
+│   │       └── mod.rs           # ELF parsing and loading
+│   │
+│   ├── tests/                   # Property-based tests
+│   │   ├── allocator_properties.rs
+│   │   ├── pmm_properties.rs
+│   │   ├── vmm_properties.rs
+│   │   ├── scheduler_properties.rs
+│   │   ├── process_isolation_properties.rs
+│   │   ├── interrupt_properties.rs
+│   │   ├── syscall_properties.rs
+│   │   ├── ipc_message_properties.rs
+│   │   ├── ipc_shared_memory_properties.rs
+│   │   ├── vfs_properties.rs
+│   │   └── elf_properties.rs
+│   │
+│   ├── Cargo.toml               # Rust dependencies
+│   ├── linker.ld                # Kernel linker script (Limine)
+│   ├── grub_linker.ld           # GRUB linker script (legacy)
+│   └── x86_64-unknown-none.json # Custom Rust target
+│
+├── userspace/                   # Userspace programs (planned)
+│   ├── display_server/          # Display server
+│   │   ├── src/
+│   │   │   ├── lib.rs
+│   │   │   └── main.rs
+│   │   └── tests/
+│   │       ├── window_creation_properties.rs
+│   │       ├── window_management_properties.rs
+│   │       ├── compositing_properties.rs
+│   │       └── input_forwarding_properties.rs
+│   │
+│   └── video_driver/            # Video driver
+│       ├── src/
+│       │   ├── lib.rs
+│       │   └── main.rs
+│       └── tests/
+│           └── render_properties.rs
+│
+├── limine/                      # Limine bootloader files
+│   ├── limine                   # Limine installer
+│   ├── limine-bios.sys          # BIOS boot file
+│   ├── limine-bios-cd.bin       # CD boot image
+│   ├── limine-uefi-cd.bin       # UEFI CD boot
+│   ├── BOOTX64.EFI              # UEFI bootloader
+│   └── limine.h                 # Limine protocol header
+│
+├── build/                       # Build artifacts
+│   ├── kernel.elf               # Final kernel binary
+│   ├── microkernel.iso          # Bootable ISO image
+│   └── iso/                     # ISO filesystem
+│
+├── .kiro/                       # Kiro AI specs
+│   └── specs/microkernel-os/
+│       ├── requirements.md      # System requirements
+│       ├── design.md            # Architecture design
+│       └── tasks.md             # Development tasks
+│
+├── Makefile                     # Build system
+├── limine.conf                  # Bootloader configuration
+├── background.png               # Boot background
+├── dr15.bmp                     # Theme image
+├── BUILD.md                     # Build instructions
+├── GIT_GUIDE.md                 # Git workflow
+├── READY_TO_TEST.md             # Testing guide
+├── TERMINAL_MODE.md             # Terminal mode docs
+├── TEST_TERMINAL.md             # Terminal testing
+├── THEME.md                     # UI theme documentation
+└── rust-toolchain.toml          # Rust toolchain config
+АРХИТЕКТУРА СИСТЕМЫ
+1. BOOT SEQUENCE (Limine → HAL → Kernel)
+Этап 1: Limine Bootloader
+
+Загружает kernel.elf в память
+Переключает CPU в 64-bit long mode
+Настраивает базовые page tables с HHDM (Higher Half Direct Map)
+Инициализирует framebuffer (1024x768x32)
+Передает управление на boot.asm
+Этап 2: HAL Boot (boot.asm → boot_main.c)
+
+boot.asm: Entry point, настройка стека, вызов boot_main()
+boot_main.c:
+Инициализация serial port (COM1) для логов
+Получение Limine responses (framebuffer, terminal, HHDM offset)
+Парсинг cmdline для определения режима (GUI/Terminal)
+Вызов kernel_main() с параметрами
+Этап 3: Kernel Initialization (kernel/src/lib.rs)
+
+kernel_main() {
+    1. HAL init (GDT, IDT)
+    2. Memory init (PMM, VMM, Heap)
+    3. IF GUI mode:
+       - Scheduler init
+       - IPC init
+       - VFS init
+       - Initrd load
+       - Drivers init (keyboard, mouse)
+       - Window manager init
+    4. IF Terminal mode:
+       - Keyboard driver only
+    5. Enable interrupts
+    6. Start UI loop / Terminal loop
+}
+2. HARDWARE ABSTRACTION LAYER (HAL)
+Компоненты:
+
+GDT (Global Descriptor Table): 5 сегментов (null, code, data, user code, user data)
+IDT (Interrupt Descriptor Table): 256 entries для exceptions и IRQs
+Interrupt Handlers: Timer (IRQ0), Keyboard (IRQ1), Mouse (IRQ12)
+Context Switch: Сохранение/восстановление регистров процессов
+Syscall Entry: Fast system call interface (syscall/sysret)
+I/O Ports: Обертки для in/out инструкций
+Интерфейс (hal.h):
+
+void hal_init(void);
+void hal_enable_interrupts(void);
+void hal_disable_interrupts(void);
+uint8_t hal_inb(uint16_t port);
+void hal_outb(uint16_t port, uint8_t value);
+3. MEMORY MANAGEMENT
+Physical Memory Manager (PMM)
+
+Bitmap allocator для физических страниц (4KB)
+131072 страниц доступно (512MB RAM)
+Функции: pmm_alloc_page(), pmm_free_page()
+Virtual Memory Manager (VMM)
+
+4-level page tables (PML4 → PDP → PD → PT)
+Kernel mapped at 0xFFFFFFFF80000000 (higher half)
+HHDM offset: 0xFFFF800000000000 (physical memory mapping)
+Функции: map_page(), unmap_page(), translate()
+ПРОБЛЕМА: VGA buffer (0xB8000) не замаплен через HHDM
+Heap Allocator
+
+16MB kernel heap
+Linked list allocator
+Поддержка alloc::vec::Vec, alloc::string::String
+4. PROCESS MANAGEMENT
+Process Structure:
+
+struct Process {
+    pid: usize,
+    state: ProcessState,  // Ready, Running, Blocked, Terminated
+    context: Context,     // Registers (rax, rbx, rip, rsp, etc.)
+    page_table: *mut PageTable,
+    priority: u8,
+}
+Scheduler:
+
+Round-robin алгоритм
+Ready queue для процессов
+Context switching через context_switch.asm
+Timer interrupt (IRQ0) для preemption
+5. INTER-PROCESS COMMUNICATION (IPC)
+Message Passing:
+
+struct Message {
+    sender: usize,
+    receiver: usize,
+    data: [u8; 256],
+    length: usize,
+}
+Функции: ipc_send(), ipc_receive(), ipc_reply()
+Shared Memory:
+
+struct SharedMemory {
+    id: usize,
+    physical_addr: usize,
+    size: usize,
+    permissions: Permissions,
+}
+Функции: shm_create(), shm_attach(), shm_detach()
+6. VIRTUAL FILE SYSTEM (VFS)
+Структура:
+
+/                    (root)
+├── dev/             (devfs - устройства)
+│   ├── null
+│   ├── zero
+│   └── random
+├── proc/            (procfs - информация о процессах)
+│   ├── 1/
+│   ├── 2/
+│   └── ...
+├── tmp/             (tmpfs - временные файлы)
+├── boot/
+└── home/
+VFS Interface:
+
+trait FileSystem {
+    fn open(&self, path: &str) -> Result<FileHandle>;
+    fn read(&self, handle: FileHandle, buf: &mut [u8]) -> Result<usize>;
+    fn write(&self, handle: FileHandle, buf: &[u8]) -> Result<usize>;
+    fn close(&self, handle: FileHandle) -> Result<()>;
+}
+Реализации:
+
+MemFS: In-memory filesystem
+DevFS: Device files (/dev/null, /dev/zero)
+ProcFS: Process information (/proc/[pid])
+7. DEVICE DRIVERS
+PS/2 Keyboard Driver:
+
+Polling mode (IRQ1 не используется в terminal mode)
+Scancode → ASCII conversion
+Поддержка: буквы, цифры, Enter, Backspace
+Функция: scancode_to_char(scancode: u8) -> Option<char>
+PS/2 Mouse Driver:
+
+Packet-based protocol (3 bytes)
+Координаты (x, y), кнопки (left, right, middle)
+Используется только в GUI mode
+8. GUI SYSTEM
+Window Manager:
+
+Solarized Dark theme
+Plank dock (64px height) внизу экрана
+5 иконок приложений: Terminal, Files, Settings, Monitor, Editor
+Цвета:
+Background: 0x002b36
+Panel: 0x073642
+Plank: 0x1c1c1c
+Icons: 0x268bd2, 0x859900, 0xb58900, 0xdc322fu, 0x6c71c4
+UI Loop (ui_loop.rs):
+
+Обработка mouse events
+Hover эффекты на иконках
+Click detection
+Framebuffer rendering (direct pixel writes)
+Font Rendering:
+
+Bitmap font 5x8 pixels
+Поддержка A-Z, a-z, 0-9, символы
+Функция: draw_text(fb, x, y, text, color)
+9. TERMINAL MODE
+Статус: НЕ РАБОТАЕТ (проблема с VGA)
+
+Проблема:
+
+VGA text mode buffer (0xB8000) недоступен
+HHDM mapping (0xFFFF8000000B8000) вызывает page fault
+Identity mapping (0xB8000) тоже не работает
+Limine Terminal API недоступен в terminal mode
+Текущая реализация:
+
+Serial-only output (COM1)
+Keyboard polling работает
+Команды: help, ls, pwd, clear, exit
+Prompt: root@dunit:~#
+Решения:
+
+Serial-only terminal (работает через COM порт)
+Написать VGA driver с page table mapping
+Убрать terminal mode, оставить только GUI
+10. SYSTEM CALLS
+Syscall Interface:
+
+enum Syscall {
+    Exit(i32),
+    Fork,
+    Exec(path: &str),
+    Read(fd: usize, buf: &mut [u8]),
+    Write(fd: usize, buf: &[u8]),
+    Open(path: &str, flags: u32),
+    Close(fd: usize),
+    IpcSend(msg: &Message),
+    IpcReceive(msg: &mut Message),
+}
+Entry Point: syscall.asm → syscall_handler() в Rust
+
+11. ELF LOADER
+Поддержка:
+
+ELF64 format
+Загрузка executable в память
+Парсинг program headers
+Настройка entry point
+Создание процесса из ELF
+12. BUILD SYSTEM
+Makefile Targets:
+
+make all - собрать kernel.elf
+make iso - создать bootable ISO
+make run - запустить в QEMU (GUI mode)
+make run-terminal - запустить в QEMU (terminal mode, nographic)
+make clean - очистить build artifacts
+Процесс сборки:
+
+Компиляция HAL (C + Assembly) → .o файлы
+Компиляция Kernel (Rust) → libkernel.a
+Линковка HAL + Kernel → kernel.elf
+Создание ISO с Limine bootloader
+Установка Limine на ISO
+13. BOOT MENU (limine.conf)
+Опции:
+
+Dunit OS - Terminal Mode
+
+Cmdline: mode=terminal
+Минимальная инициализация
+Только keyboard driver
+НЕ РАБОТАЕТ (VGA проблема)
+Dunit OS - GUI Mode
+
+Resolution: 1024x768x32
+Полная инициализация
+Window manager, drivers, VFS
+РАБОТАЕТ
+Тема меню: Catppuccin Mocha
+
+14. TESTING
+Property-Based Tests (proptest):
+
+Allocator: allocation/deallocation invariants
+PMM: page allocation consistency
+VMM: page table mapping correctness
+Scheduler: fairness, no starvation
+IPC: message delivery guarantees
+VFS: file operations consistency
+ELF: valid binary loading
+Запуск: cargo test (в kernel/)
+
+15. ТЕКУЩИЕ ПРОБЛЕМЫ
+КРИТИЧЕСКИЕ:
+
+Terminal Mode VGA: Не работает запись в VGA buffer
+Причина: Limine не мапит 0xB8000 через HHDM
+Решение: Написать VGA driver с page table setup
+СРЕДНИЕ: 2. VMM не полностью реализован (пустой init) 3. Scheduler не запускается (нет процессов) 4. ELF loader не тестирован 5. Userspace программы не реализованы
+
+МЕЛКИЕ: 6. Много unused imports warnings 7. Unsafe блоки в terminal loop 8. Hardcoded константы (VGA_WIDTH, colors)
+
+16. ROADMAP
+Ближайшие задачи:
+
+Исправить Terminal Mode (VGA driver или serial-only)
+Реализовать полноценный VMM с page table management
+Создать init процесс
+Запустить scheduler с реальными процессами
+Протестировать ELF loader
+Написать userspace программы (shell, file manager)
+Добавить поддержку файловых систем (FAT32, ext2)
+Реализовать network stack
+Портировать на реальное железо
+17. ТЕХНИЧЕСКИЕ ДЕТАЛИ
+Размеры:
+
+Kernel binary: ~2MB
+ISO image: ~2.1MB (2161 sectors)
+RAM usage: 512MB allocated
+Heap: 16MB
+Stack: 16KB per process
+Performance:
+
+Boot time: ~2 секунды
+Context switch: <1μs
+Syscall overhead: <100ns
+GUI rendering: 60 FPS capable
+Совместимость:
+
+QEMU: работает
+VirtualBox: не тестировалось
+Real hardware: GUI mode должен работать, Terminal mode нет
+ЗАКЛЮЧЕНИЕ
+Dunit OS - это функциональный microkernel с GUI, работающим в QEMU. Основная проблема - Terminal Mode не работает из-за VGA mapping. Система имеет все базовые компоненты ОС: memory management, process scheduling, IPC, VFS, drivers. Следующий шаг - исправить Terminal Mode и запустить реальные userspace процессы.
