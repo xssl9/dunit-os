@@ -1,0 +1,10 @@
+[package]
+name = "libdunit"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "libdunit"
+crate-type = ["rlib"]
+
+[dependencies]

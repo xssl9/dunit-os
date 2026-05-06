@@ -234,6 +234,10 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
         unsafe {
             SCREEN_LOG_FB = Some((fb_addr, width));
             SCREEN_LOG_Y = early_log_y;
+            crate::syscall::KERNEL_FB_ADDR = fb.address as u64;
+            crate::syscall::KERNEL_FB_WIDTH = fb.width as u32;
+            crate::syscall::KERNEL_FB_HEIGHT = fb.height as u32;
+            crate::syscall::KERNEL_FB_PITCH = fb.pitch as u32;
         }
         screen_log_early(fb_addr, width, early_log_y, "[KMAIN-007] SCREEN_LOG_FB set");
         early_log_y += 10;
@@ -997,7 +1001,28 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
         serial_write("[INFO] System ready for user interaction\r\n");
         
         serial_write("\r\n[UI] Starting interactive UI loop...\r\n");
-        ui_loop::run_ui_loop(fb_addr, width, height);
+        
+        screen_log("[ OK ] Starting Plank dock", false);
+        serial_write("[PLANK] Loading plank from embedded binary\r\n");
+        
+        static PLANK_ELF: &[u8] = include_bytes!("../../build/userspace/plank");
+        
+        match crate::elf::ElfParser::new(PLANK_ELF) {
+            Ok(parser) => {
+                serial_write("[PLANK] ELF parsed successfully\r\n");
+                let entry = parser.entry_point();
+                serial_write("[PLANK] Jumping to plank entry point\r\n");
+                
+                unsafe {
+                    let entry_fn: extern "C" fn() -> ! = core::mem::transmute(entry as usize);
+                    entry_fn();
+                }
+            }
+            Err(_) => {
+                serial_write("[PLANK] ELF parse failed, falling back to built-in UI\r\n");
+                ui_loop::run_ui_loop(fb_addr, width, height);
+            }
+        }
     } else {
         serial_write("[GRAPHICS] No framebuffer available\r\n");
         serial_write("[GRAPHICS] Running in headless mode\r\n");

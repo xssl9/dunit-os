@@ -11,6 +11,16 @@ pub enum Syscall {
     Mmap = 7,
     SendMessage = 8,
     ReceiveMessage = 9,
+    GetFramebuffer = 10,
+    DrawPixel = 11,
+    DrawRect = 12,
+    GetKey = 13,
+    GetMousePos = 14,
+    SpawnProcess = 15,
+    WaitProcess = 16,
+    GetPid = 17,
+    KillProcess = 18,
+    Sleep = 19,
 }
 
 impl Syscall {
@@ -26,6 +36,16 @@ impl Syscall {
             7 => Some(Syscall::Mmap),
             8 => Some(Syscall::SendMessage),
             9 => Some(Syscall::ReceiveMessage),
+            10 => Some(Syscall::GetFramebuffer),
+            11 => Some(Syscall::DrawPixel),
+            12 => Some(Syscall::DrawRect),
+            13 => Some(Syscall::GetKey),
+            14 => Some(Syscall::GetMousePos),
+            15 => Some(Syscall::SpawnProcess),
+            16 => Some(Syscall::WaitProcess),
+            17 => Some(Syscall::GetPid),
+            18 => Some(Syscall::KillProcess),
+            19 => Some(Syscall::Sleep),
             _ => None,
         }
     }
@@ -35,6 +55,19 @@ pub const EFAULT: i64 = -14;
 pub const EINVAL: i64 = -22;
 pub const EBADF: i64 = -9;
 pub const ENOSYS: i64 = -38;
+
+pub static mut KERNEL_FB_ADDR: u64 = 0;
+pub static mut KERNEL_FB_WIDTH: u32 = 0;
+pub static mut KERNEL_FB_HEIGHT: u32 = 0;
+pub static mut KERNEL_FB_PITCH: u32 = 0;
+
+#[repr(C)]
+pub struct FbInfo {
+    pub addr: u64,
+    pub width: u32,
+    pub height: u32,
+    pub pitch: u32,
+}
 
 const USER_SPACE_START: u64 = 0x0000_0000_0000_0000;
 const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
@@ -92,6 +125,16 @@ pub extern "C" fn syscall_handler(
         Syscall::Mmap => sys_mmap(arg1 as usize, arg2 as usize, arg3 as u32, arg4 as u32),
         Syscall::SendMessage => sys_send_message(arg1 as u32, arg2 as *const u8),
         Syscall::ReceiveMessage => sys_receive_message(arg1 as *mut u8),
+        Syscall::GetFramebuffer => sys_get_framebuffer(arg1 as *mut FbInfo),
+        Syscall::DrawPixel => sys_draw_pixel(arg1 as u32, arg2 as u32, arg3 as u32),
+        Syscall::DrawRect => sys_draw_rect(arg1 as u32, arg2 as u32, arg3 as u32, arg4 as u32, _arg5 as u32),
+        Syscall::GetKey => sys_get_key(),
+        Syscall::GetMousePos => sys_get_mouse_pos(arg1 as *mut u32, arg2 as *mut u32),
+        Syscall::SpawnProcess => sys_spawn_process(arg1 as *const u8),
+        Syscall::WaitProcess => sys_wait_process(arg1 as u32),
+        Syscall::GetPid => sys_get_pid(),
+        Syscall::KillProcess => sys_kill_process(arg1 as u32),
+        Syscall::Sleep => sys_sleep(arg1),
     }
 }
 
@@ -186,4 +229,103 @@ fn sys_receive_message(msg: *mut u8) -> i64 {
     }
     
     ENOSYS
+}
+
+fn sys_get_framebuffer(info: *mut FbInfo) -> i64 {
+    if !is_valid_user_pointer(info as u64, core::mem::size_of::<FbInfo>()) {
+        return EFAULT;
+    }
+    unsafe {
+        if KERNEL_FB_ADDR == 0 {
+            return EINVAL;
+        }
+        let fb = &mut *info;
+        fb.addr = KERNEL_FB_ADDR;
+        fb.width = KERNEL_FB_WIDTH;
+        fb.height = KERNEL_FB_HEIGHT;
+        fb.pitch = KERNEL_FB_PITCH;
+    }
+    0
+}
+
+fn sys_draw_pixel(x: u32, y: u32, color: u32) -> i64 {
+    unsafe {
+        if KERNEL_FB_ADDR == 0 {
+            return EINVAL;
+        }
+        let fb = KERNEL_FB_ADDR as *mut u32;
+        let w = KERNEL_FB_WIDTH as usize;
+        let h = KERNEL_FB_HEIGHT as usize;
+        if (x as usize) < w && (y as usize) < h {
+            let pitch_pixels = KERNEL_FB_PITCH as usize / 4;
+            core::ptr::write_volatile(fb.add(y as usize * pitch_pixels + x as usize), color);
+        }
+    }
+    0
+}
+
+fn sys_draw_rect(x: u32, y: u32, w: u32, h: u32, color: u32) -> i64 {
+    unsafe {
+        if KERNEL_FB_ADDR == 0 {
+            return EINVAL;
+        }
+        let fb = KERNEL_FB_ADDR as *mut u32;
+        let fb_w = KERNEL_FB_WIDTH as usize;
+        let fb_h = KERNEL_FB_HEIGHT as usize;
+        let pitch_pixels = KERNEL_FB_PITCH as usize / 4;
+        for dy in 0..h as usize {
+            for dx in 0..w as usize {
+                let px = x as usize + dx;
+                let py = y as usize + dy;
+                if px < fb_w && py < fb_h {
+                    core::ptr::write_volatile(fb.add(py * pitch_pixels + px), color);
+                }
+            }
+        }
+    }
+    0
+}
+
+fn sys_get_key() -> i64 {
+    if let Some(sc) = crate::drivers::keyboard::read_scancode() {
+        sc as i64
+    } else {
+        -1
+    }
+}
+
+fn sys_get_mouse_pos(x: *mut u32, y: *mut u32) -> i64 {
+    if !is_valid_user_pointer(x as u64, 4) || !is_valid_user_pointer(y as u64, 4) {
+        return EFAULT;
+    }
+    let (mx, my) = crate::drivers::mouse::get_position();
+    unsafe {
+        *x = mx as u32;
+        *y = my as u32;
+    }
+    0
+}
+
+fn sys_spawn_process(_path: *const u8) -> i64 {
+    ENOSYS
+}
+
+fn sys_wait_process(_pid: u32) -> i64 {
+    ENOSYS
+}
+
+fn sys_get_pid() -> i64 {
+    0
+}
+
+fn sys_kill_process(_pid: u32) -> i64 {
+    ENOSYS
+}
+
+fn sys_sleep(ms: u64) -> i64 {
+    let iters = ms * 1000;
+    for _ in 0..iters {
+        unsafe { core::arch::asm!("pause"); }
+    }
+    0
 }
