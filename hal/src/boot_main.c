@@ -78,23 +78,23 @@ extern struct limine_kernel_file_response *get_kernel_file_response(void);
 extern struct limine_hhdm_response *get_hhdm_response(void);
 
 void serial_init() {
-    __asm__ volatile("outb %0, %1" : : "a"((uint8_t)0x00), "Nd"((uint16_t)0x3F8 + 1));
-    __asm__ volatile("outb %0, %1" : : "a"((uint8_t)0x80), "Nd"((uint16_t)0x3F8 + 3));
-    __asm__ volatile("outb %0, %1" : : "a"((uint8_t)0x03), "Nd"((uint16_t)0x3F8 + 0));
-    __asm__ volatile("outb %0, %1" : : "a"((uint8_t)0x00), "Nd"((uint16_t)0x3F8 + 1));
-    __asm__ volatile("outb %0, %1" : : "a"((uint8_t)0x03), "Nd"((uint16_t)0x3F8 + 3));
-    __asm__ volatile("outb %0, %1" : : "a"((uint8_t)0xC7), "Nd"((uint16_t)0x3F8 + 2));
-    __asm__ volatile("outb %0, %1" : : "a"((uint8_t)0x0B), "Nd"((uint16_t)0x3F8 + 4));
+    __asm__ volatile("outb %%al, %%dx" : : "a"((uint8_t)0x00), "d"((uint16_t)0x3F8 + 1));
+    __asm__ volatile("outb %%al, %%dx" : : "a"((uint8_t)0x80), "d"((uint16_t)0x3F8 + 3));
+    __asm__ volatile("outb %%al, %%dx" : : "a"((uint8_t)0x03), "d"((uint16_t)0x3F8 + 0));
+    __asm__ volatile("outb %%al, %%dx" : : "a"((uint8_t)0x00), "d"((uint16_t)0x3F8 + 1));
+    __asm__ volatile("outb %%al, %%dx" : : "a"((uint8_t)0x03), "d"((uint16_t)0x3F8 + 3));
+    __asm__ volatile("outb %%al, %%dx" : : "a"((uint8_t)0xC7), "d"((uint16_t)0x3F8 + 2));
+    __asm__ volatile("outb %%al, %%dx" : : "a"((uint8_t)0x0B), "d"((uint16_t)0x3F8 + 4));
 }
 
 void serial_write(const char* str) {
     for (int i = 0; str[i] != '\0'; i++) {
         while (1) {
             uint8_t status;
-            __asm__ volatile("inb %1, %0" : "=a"(status) : "Nd"((uint16_t)0x3F8 + 5));
+            __asm__ volatile("inb %%dx, %%al" : "=a"(status) : "d"((uint16_t)0x3F8 + 5));
             if (status & 0x20) break;
         }
-        __asm__ volatile("outb %0, %1" : : "a"((uint8_t)str[i]), "Nd"((uint16_t)0x3F8));
+        __asm__ volatile("outb %%al, %%dx" : : "a"((uint8_t)str[i]), "d"((uint16_t)0x3F8));
     }
 }
 
