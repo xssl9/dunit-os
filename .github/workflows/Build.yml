@@ -1,0 +1,68 @@
+name: Build Dunit OS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: # ручной запуск из браузера
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc \
+            nasm \
+            lld \
+            xorriso \
+            mtools \
+            git
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: rust-src, llvm-tools-preview
+
+      # Кэшируем cargo registry — ускоряет повторные сборки в разы
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            kernel/target
+            userspace/system_apps/plank/target
+            userspace/system_apps/terminal/target
+            userspace/system_apps/file_manager/target
+            userspace/system_apps/text_editor/target
+            userspace/system_apps/settings/target
+            userspace/system_apps/system_monitor/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # Limine клонируется в build_iso.sh, но кэшируем чтобы не качать каждый раз
+      - name: Cache Limine
+        uses: actions/cache@v4
+        with:
+          path: limine
+          key: limine-v8-binary
+
+      - name: Build ISO
+        run: bash build_iso.sh
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dunit-os-${{ github.sha }}
+          path: build/microkernel.iso
+          retention-days: 14
