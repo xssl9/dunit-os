@@ -3,9 +3,10 @@ name: Build Dunit OS
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
-  workflow_dispatch: # ручной запуск из браузера
+  workflow_dispatch:
+
+permissions:
+  contents: write  # нужно для создания релизов
 
 jobs:
   build:
@@ -32,7 +33,6 @@ jobs:
           toolchain: nightly
           components: rust-src, llvm-tools-preview
 
-      # Кэшируем cargo registry — ускоряет повторные сборки в разы
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -50,7 +50,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      # Limine клонируется в build_iso.sh, но кэшируем чтобы не качать каждый раз
       - name: Cache Limine
         uses: actions/cache@v4
         with:
@@ -60,9 +59,13 @@ jobs:
       - name: Build ISO
         run: bash build_iso.sh
 
-      - name: Upload ISO artifact
-        uses: actions/upload-artifact@v4
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: dunit-os-${{ github.sha }}
-          path: build/microkernel.iso
-          retention-days: 14
+          tag_name: build-${{ github.run_number }}-${{ github.sha }}
+          name: "Dunit OS build #${{ github.run_number }}"
+          body: |
+            Автосборка из коммита ${{ github.sha }}
+            Ветка: ${{ github.ref_name }}
+          files: build/microkernel.iso
+          prerelease: true
