@@ -3,6 +3,8 @@
 
 extern crate alloc;
 
+use alloc::boxed::Box;
+
 #[cfg(test)]
 extern crate std;
 
@@ -364,6 +366,23 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
         screen_log("[ OK ] PS/2: Mouse detected on port 2", false);
         screen_log("[ OK ] Input drivers loaded", false);
         
+        screen_log("[ .. ] Mounting disk filesystem", false);
+        if let Some(drive) = drivers::ata::get_primary_master() {
+            if let Some(ext2) = fs::ext2::Ext2Fs::new(drive) {
+                if let Some(vfs) = fs::vfs::get_vfs() {
+                    let ext2_static = Box::leak(Box::new(ext2));
+                    vfs.mount("/mnt", ext2_static);
+                    screen_log("[ OK ] Ext2: Mounted at /mnt", false);
+                } else {
+                    screen_log("[ !! ] Ext2: VFS not available", false);
+                }
+            } else {
+                screen_log("[ !! ] Ext2: Failed to initialize", false);
+            }
+        } else {
+            screen_log("[ !! ] Ext2: No ATA drive found", false);
+        }
+        
         screen_log("[ .. ] Starting window manager", false);
         serial_write("[WM] Calling window_manager::init()...\r\n");
         window_manager::init();
@@ -398,6 +417,27 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
         serial_write("[DRV] keyboard::init() returned\r\n");
         screen_log("[ OK ] [DRV] keyboard::init() returned", false);
         screen_log("[ OK ] Keyboard driver ready", false);
+        
+        screen_log("[ .. ] Initializing ATA driver", false);
+        drivers::ata::init();
+        screen_log("[ OK ] ATA driver ready", false);
+        
+        screen_log("[ .. ] Mounting disk filesystem", false);
+        if let Some(drive) = drivers::ata::get_primary_master() {
+            if let Some(ext2) = fs::ext2::Ext2Fs::new(drive) {
+                if let Some(vfs) = fs::vfs::get_vfs() {
+                    let ext2_static = Box::leak(Box::new(ext2));
+                    vfs.mount("/mnt", ext2_static);
+                    screen_log("[ OK ] Ext2: Mounted at /mnt", false);
+                } else {
+                    screen_log("[ !! ] Ext2: VFS not available", false);
+                }
+            } else {
+                screen_log("[ !! ] Ext2: Failed to initialize", false);
+            }
+        } else {
+            screen_log("[ !! ] Ext2: No ATA drive found", false);
+        }
     }
     
     screen_log("[ .. ] Configuring interrupt handlers", false);
@@ -578,8 +618,6 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
                                     
                                             let response = match cmd_str {
                                         "help" => "Available commands:\n  help     - Show this help\n  ls       - List files\n  pwd      - Print working directory\n  cd       - Change directory\n  mkdir    - Create directory\n  touch    - Create file\n  cat      - Display file contents\n  echo     - Print text\n  exec     - Execute userspace program\n  ps       - Process list\n  kill     - Kill process\n  top      - Process monitor\n  uname    - System information\n  date     - Show date and time\n  whoami   - Current user\n  uptime   - System uptime\n  free     - Memory usage\n  exit     - Halt system",
-                                        "ls" => "bin  dev  home  proc  tmp  usr  var  etc",
-                                        "ls -l" => "drwxr-xr-x  2 root root 4096 bin\ndrwxr-xr-x  2 root root 4096 dev\ndrwxr-xr-x  2 root root 4096 home\ndrwxr-xr-x  2 root root 4096 proc\ndrwxr-xr-x  2 root root 4096 tmp\ndrwxr-xr-x  2 root root 4096 usr\ndrwxr-xr-x  2 root root 4096 var\ndrwxr-xr-x  2 root root 4096 etc",
                                         "pwd" => "/root",
                                         "cd" => "",
                                         "cd /" => "",
@@ -639,11 +677,111 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
                                                     "No processes found with that name"
                                                 }
                                             } else if cmd_str.starts_with("mkdir ") {
-                                                "Directory created"
+                                                let path = &cmd_str[6..].trim();
+                                                if let Some(vfs) = fs::vfs::get_vfs() {
+                                                    match vfs.mkdir(path) {
+                                                        Ok(_) => "Directory created",
+                                                        Err(e) => {
+                                                            console.write_str("mkdir: ");
+                                                            match e {
+                                                                fs::vfs::VfsError::NotFound => "parent directory not found",
+                                                                fs::vfs::VfsError::AlreadyExists => "directory already exists",
+                                                                fs::vfs::VfsError::PermissionDenied => "permission denied",
+                                                                _ => "error creating directory",
+                                                            }
+                                                        }
+                                                    }
+                                                } else {
+                                                    "mkdir: VFS not available"
+                                                }
                                             } else if cmd_str.starts_with("touch ") {
-                                                "File created"
+                                                let path = &cmd_str[6..].trim();
+                                                if let Some(vfs) = fs::vfs::get_vfs() {
+                                                    match vfs.create(path) {
+                                                        Ok(_) => "File created",
+                                                        Err(e) => {
+                                                            console.write_str("touch: ");
+                                                            match e {
+                                                                fs::vfs::VfsError::NotFound => "parent directory not found",
+                                                                fs::vfs::VfsError::AlreadyExists => "file already exists",
+                                                                fs::vfs::VfsError::PermissionDenied => "permission denied",
+                                                                _ => "error creating file",
+                                                            }
+                                                        }
+                                                    }
+                                                } else {
+                                                    "touch: VFS not available"
+                                                }
                                             } else if cmd_str.starts_with("cat ") {
-                                                "cat: file not found"
+                                                let path = &cmd_str[4..].trim();
+                                                if let Some(vfs) = fs::vfs::get_vfs() {
+                                                    match vfs.open(path, fs::vfs::OpenFlags::ReadOnly) {
+                                                        Ok(fd) => {
+                                                            let mut buffer = [0u8; 1024];
+                                                            match vfs.read(fd, &mut buffer) {
+                                                                Ok(bytes_read) => {
+                                                                    if bytes_read > 0 {
+                                                                        if let Ok(content) = core::str::from_utf8(&buffer[..bytes_read]) {
+                                                                            console.write_str(content);
+                                                                        } else {
+                                                                            console.write_str("cat: binary file");
+                                                                        }
+                                                                    }
+                                                                    let _ = vfs.close(fd);
+                                                                    ""
+                                                                }
+                                                                Err(_) => {
+                                                                    let _ = vfs.close(fd);
+                                                                    "cat: error reading file"
+                                                                }
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            console.write_str("cat: ");
+                                                            match e {
+                                                                fs::vfs::VfsError::NotFound => "file not found",
+                                                                fs::vfs::VfsError::PermissionDenied => "permission denied",
+                                                                fs::vfs::VfsError::IsADirectory => "is a directory",
+                                                                _ => "error opening file",
+                                                            }
+                                                        }
+                                                    }
+                                                } else {
+                                                    "cat: VFS not available"
+                                                }
+                                            } else if cmd_str == "ls" || cmd_str.starts_with("ls ") {
+                                                let path = if cmd_str == "ls" {
+                                                    "/mnt"
+                                                } else {
+                                                    cmd_str[3..].trim()
+                                                };
+                                                
+                                                if let Some(vfs) = fs::vfs::get_vfs() {
+                                                    match vfs.list_dir(path) {
+                                                        Ok(entries) => {
+                                                            if entries.is_empty() {
+                                                                ""
+                                                            } else {
+                                                                for entry in entries {
+                                                                    console.write_str(&entry);
+                                                                    console.write_str("  ");
+                                                                }
+                                                                ""
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            console.write_str("ls: ");
+                                                            match e {
+                                                                fs::vfs::VfsError::NotFound => "directory not found",
+                                                                fs::vfs::VfsError::NotADirectory => "not a directory",
+                                                                fs::vfs::VfsError::PermissionDenied => "permission denied",
+                                                                _ => "error listing directory",
+                                                            }
+                                                        }
+                                                    }
+                                                } else {
+                                                    "ls: VFS not available"
+                                                }
                                             } else if cmd_str.starts_with("cd ") {
                                                 ""
                                             } else if cmd_str.starts_with("exec ") {

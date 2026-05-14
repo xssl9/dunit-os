@@ -30,4 +30,8 @@ sed -i.bak "s|/usr/bin/ld\.lld[^[:space:]]*|$(command -v $LINKER)|g" Makefile
 echo "==> Сборка ISO образа..."
 make iso
 
+echo "==> Создание образа диска с Ext2..."
+./create_disk.sh
+
 echo "==> ISO образ создан: build/microkernel.iso"
+echo "==> Образ диска создан: build/disk.img"

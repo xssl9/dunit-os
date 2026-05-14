@@ -16,7 +16,7 @@ impl ProcFs {
 }
 
 impl FileSystem for ProcFs {
-    fn open(&self, path: &str, _flags: OpenFlags) -> Result<FileHandle> {
+    fn open(&mut self, path: &str, _flags: OpenFlags) -> Result<FileHandle> {
         if path.is_empty() || path.parse::<u32>().is_ok() {
             let handle = self.next_handle.fetch_add(1, Ordering::SeqCst);
             Ok(handle)
@@ -25,18 +25,18 @@ impl FileSystem for ProcFs {
         }
     }
 
-    fn read(&self, _handle: FileHandle, buf: &mut [u8]) -> Result<usize> {
+    fn read(&mut self, _handle: FileHandle, buf: &mut [u8]) -> Result<usize> {
         let data = b"pid: 1\nstate: Running\n";
         let len = buf.len().min(data.len());
         buf[..len].copy_from_slice(&data[..len]);
         Ok(len)
     }
 
-    fn write(&self, _handle: FileHandle, _buf: &[u8]) -> Result<usize> {
+    fn write(&mut self, _handle: FileHandle, _buf: &[u8]) -> Result<usize> {
         Err(VfsError::PermissionDenied)
     }
 
-    fn close(&self, _handle: FileHandle) -> Result<()> {
+    fn close(&mut self, _handle: FileHandle) -> Result<()> {
         Ok(())
     }
 }

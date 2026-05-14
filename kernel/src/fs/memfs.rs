@@ -39,26 +39,40 @@ impl MemFs {
 }
 
 impl FileSystem for MemFs {
-    fn open(&self, path: &str, _flags: OpenFlags) -> Result<FileHandle> {
+    fn open(&mut self, path: &str, _flags: OpenFlags) -> Result<FileHandle> {
         if self.files.contains_key(path) {
             let handle = self.next_handle.fetch_add(1, Ordering::SeqCst);
+            self.open_handles.insert(handle, (String::from(path), 0));
             Ok(handle)
         } else {
             Err(VfsError::NotFound)
         }
     }
 
-    fn read(&self, handle: FileHandle, buf: &mut [u8]) -> Result<usize> {
-        let _ = handle;
-        let len = buf.len().min(0);
-        Ok(len)
+    fn read(&mut self, handle: FileHandle, buf: &mut [u8]) -> Result<usize> {
+        let (path, offset) = self.open_handles.get(&handle)
+            .ok_or(VfsError::InvalidDescriptor)?
+            .clone();
+        
+        let file = self.files.get(&path).ok_or(VfsError::NotFound)?;
+        let remaining = file.data.len().saturating_sub(offset);
+        let to_read = buf.len().min(remaining);
+        
+        buf[..to_read].copy_from_slice(&file.data[offset..offset + to_read]);
+        
+        if let Some(entry) = self.open_handles.get_mut(&handle) {
+            entry.1 += to_read;
+        }
+        
+        Ok(to_read)
     }
 
-    fn write(&self, _handle: FileHandle, _buf: &[u8]) -> Result<usize> {
+    fn write(&mut self, _handle: FileHandle, _buf: &[u8]) -> Result<usize> {
         Err(VfsError::PermissionDenied)
     }
 
-    fn close(&self, _handle: FileHandle) -> Result<()> {
+    fn close(&mut self, handle: FileHandle) -> Result<()> {
+        self.open_handles.remove(&handle);
         Ok(())
     }
 }

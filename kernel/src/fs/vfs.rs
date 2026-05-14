@@ -42,35 +42,51 @@ impl fmt::Display for VfsError {
 pub type Result<T> = core::result::Result<T, VfsError>;
 
 pub trait FileSystem: Send + Sync {
-    fn open(&self, path: &str, flags: OpenFlags) -> Result<FileHandle>;
-    fn read(&self, handle: FileHandle, buf: &mut [u8]) -> Result<usize>;
-    fn write(&self, handle: FileHandle, buf: &[u8]) -> Result<usize>;
-    fn close(&self, handle: FileHandle) -> Result<()>;
+    fn open(&mut self, path: &str, flags: OpenFlags) -> Result<FileHandle>;
+    fn read(&mut self, handle: FileHandle, buf: &mut [u8]) -> Result<usize>;
+    fn write(&mut self, handle: FileHandle, buf: &[u8]) -> Result<usize>;
+    fn close(&mut self, handle: FileHandle) -> Result<()>;
+    
+    fn create(&mut self, _path: &str) -> Result<()> {
+        Err(VfsError::PermissionDenied)
+    }
+    
+    fn mkdir(&mut self, _path: &str) -> Result<()> {
+        Err(VfsError::PermissionDenied)
+    }
+    
+    fn list_dir(&self, _path: &str) -> Result<Vec<String>> {
+        Err(VfsError::NotADirectory)
+    }
+    
+    fn remove(&mut self, _path: &str) -> Result<()> {
+        Err(VfsError::PermissionDenied)
+    }
 }
 
 pub struct OpenFile {
-    fs: &'static dyn FileSystem,
+    fs: *mut dyn FileSystem,
     handle: FileHandle,
     position: usize,
 }
 
 impl OpenFile {
-    pub fn new(fs: &'static dyn FileSystem, handle: FileHandle) -> Self {
+    pub fn new(fs: &'static mut dyn FileSystem, handle: FileHandle) -> Self {
         Self {
-            fs,
+            fs: fs as *mut dyn FileSystem,
             handle,
             position: 0,
         }
     }
 
     pub fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        let bytes_read = self.fs.read(self.handle, buf)?;
+        let bytes_read = unsafe { (*self.fs).read(self.handle, buf)? };
         self.position += bytes_read;
         Ok(bytes_read)
     }
 
     pub fn write(&mut self, buf: &[u8]) -> Result<usize> {
-        let bytes_written = self.fs.write(self.handle, buf)?;
+        let bytes_written = unsafe { (*self.fs).write(self.handle, buf)? };
         self.position += bytes_written;
         Ok(bytes_written)
     }
@@ -82,12 +98,12 @@ impl OpenFile {
 
 impl Drop for OpenFile {
     fn drop(&mut self) {
-        let _ = self.fs.close(self.handle);
+        let _ = unsafe { (*self.fs).close(self.handle) };
     }
 }
 
 pub struct VirtualFileSystem {
-    mount_points: BTreeMap<String, &'static dyn FileSystem>,
+    mount_points: BTreeMap<String, *mut dyn FileSystem>,
     open_files: BTreeMap<FileDescriptor, OpenFile>,
     next_fd: FileDescriptor,
 }
@@ -101,12 +117,12 @@ impl VirtualFileSystem {
         }
     }
 
-    pub fn mount(&mut self, path: &str, fs: &'static dyn FileSystem) {
-        self.mount_points.insert(String::from(path), fs);
+    pub fn mount(&mut self, path: &str, fs: &'static mut dyn FileSystem) {
+        self.mount_points.insert(String::from(path), fs as *mut dyn FileSystem);
     }
 
-    fn resolve_path<'a>(&self, path: &'a str) -> Result<(&'static dyn FileSystem, &'a str)> {
-        for (mount_point, fs) in self.mount_points.iter().rev() {
+    fn resolve_path<'a>(&mut self, path: &'a str) -> Result<(&'static mut dyn FileSystem, &'a str)> {
+        for (mount_point, fs_ptr) in self.mount_points.iter_mut().rev() {
             if path.starts_with(mount_point.as_str()) {
                 let relative_path = &path[mount_point.len()..];
                 let relative_path = if relative_path.starts_with('/') {
@@ -114,7 +130,7 @@ impl VirtualFileSystem {
                 } else {
                     relative_path
                 };
-                return Ok((*fs, relative_path));
+                return Ok((unsafe { &mut **fs_ptr }, relative_path));
             }
         }
         Err(VfsError::NotFound)
@@ -150,6 +166,26 @@ impl VirtualFileSystem {
             .ok_or(VfsError::InvalidDescriptor)?;
         Ok(())
     }
+
+    pub fn create(&mut self, path: &str) -> Result<()> {
+        let (fs, relative_path) = self.resolve_path(path)?;
+        fs.create(relative_path)
+    }
+
+    pub fn mkdir(&mut self, path: &str) -> Result<()> {
+        let (fs, relative_path) = self.resolve_path(path)?;
+        fs.mkdir(relative_path)
+    }
+
+    pub fn list_dir(&mut self, path: &str) -> Result<Vec<String>> {
+        let (fs, relative_path) = self.resolve_path(path)?;
+        fs.list_dir(relative_path)
+    }
+
+    pub fn remove(&mut self, path: &str) -> Result<()> {
+        let (fs, relative_path) = self.resolve_path(path)?;
+        fs.remove(relative_path)
+    }
 }
 
 impl Default for VirtualFileSystem {
@@ -161,8 +197,9 @@ impl Default for VirtualFileSystem {
 static mut VFS_INSTANCE: Option<VirtualFileSystem> = None;
 
 pub fn init() {
-    // Временно пропускаем инициализацию VFS
-    // TODO: инициализировать после настройки аллокатора
+    unsafe {
+        VFS_INSTANCE = Some(VirtualFileSystem::new());
+    }
 }
 
 pub fn get_vfs() -> Option<&'static mut VirtualFileSystem> {

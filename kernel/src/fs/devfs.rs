@@ -52,27 +52,28 @@ impl DevFs {
 }
 
 impl FileSystem for DevFs {
-    fn open(&self, path: &str, _flags: OpenFlags) -> Result<FileHandle> {
+    fn open(&mut self, path: &str, _flags: OpenFlags) -> Result<FileHandle> {
         if self.devices.contains_key(path) {
             let handle = self.next_handle.fetch_add(1, Ordering::SeqCst);
+            self.open_handles.insert(handle, String::from(path));
             Ok(handle)
         } else {
             Err(VfsError::NotFound)
         }
     }
 
-    fn read(&self, handle: FileHandle, buf: &mut [u8]) -> Result<usize> {
-        let _ = handle;
-        let len = buf.len().min(0);
-        Ok(len)
+    fn read(&mut self, handle: FileHandle, buf: &mut [u8]) -> Result<usize> {
+        let _ = (handle, buf);
+        Ok(0)
     }
 
-    fn write(&self, handle: FileHandle, buf: &[u8]) -> Result<usize> {
+    fn write(&mut self, handle: FileHandle, buf: &[u8]) -> Result<usize> {
         let _ = handle;
         Ok(buf.len())
     }
 
-    fn close(&self, _handle: FileHandle) -> Result<()> {
+    fn close(&mut self, handle: FileHandle) -> Result<()> {
+        self.open_handles.remove(&handle);
         Ok(())
     }
 }
