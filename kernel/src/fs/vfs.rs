@@ -2,6 +2,7 @@ use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::UnsafeCell;
 use core::fmt;
 
 pub type FileDescriptor = u32;
@@ -65,28 +66,30 @@ pub trait FileSystem: Send + Sync {
 }
 
 pub struct OpenFile {
-    fs: *mut dyn FileSystem,
+    fs: &'static UnsafeCell<dyn FileSystem>,
     handle: FileHandle,
     position: usize,
 }
 
 impl OpenFile {
-    pub fn new(fs: &'static mut dyn FileSystem, handle: FileHandle) -> Self {
+    pub fn new(fs: &'static UnsafeCell<dyn FileSystem>, handle: FileHandle) -> Self {
         Self {
-            fs: fs as *mut dyn FileSystem,
+            fs,
             handle,
             position: 0,
         }
     }
 
     pub fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        let bytes_read = unsafe { (*self.fs).read(self.handle, buf)? };
+        let fs = unsafe { &mut *self.fs.get() };
+        let bytes_read = fs.read(self.handle, buf)?;
         self.position += bytes_read;
         Ok(bytes_read)
     }
 
     pub fn write(&mut self, buf: &[u8]) -> Result<usize> {
-        let bytes_written = unsafe { (*self.fs).write(self.handle, buf)? };
+        let fs = unsafe { &mut *self.fs.get() };
+        let bytes_written = fs.write(self.handle, buf)?;
         self.position += bytes_written;
         Ok(bytes_written)
     }
@@ -98,12 +101,13 @@ impl OpenFile {
 
 impl Drop for OpenFile {
     fn drop(&mut self) {
-        let _ = unsafe { (*self.fs).close(self.handle) };
+        let fs = unsafe { &mut *self.fs.get() };
+        let _ = fs.close(self.handle);
     }
 }
 
 pub struct VirtualFileSystem {
-    mount_points: BTreeMap<String, *mut dyn FileSystem>,
+    mount_points: BTreeMap<String, &'static UnsafeCell<dyn FileSystem>>,
     open_files: BTreeMap<FileDescriptor, OpenFile>,
     next_fd: FileDescriptor,
 }
@@ -117,12 +121,12 @@ impl VirtualFileSystem {
         }
     }
 
-    pub fn mount(&mut self, path: &str, fs: &'static mut dyn FileSystem) {
-        self.mount_points.insert(String::from(path), fs as *mut dyn FileSystem);
+    pub fn mount(&mut self, path: &str, fs: &'static UnsafeCell<dyn FileSystem>) {
+        self.mount_points.insert(String::from(path), fs);
     }
 
-    fn resolve_path<'a>(&mut self, path: &'a str) -> Result<(&'static mut dyn FileSystem, &'a str)> {
-        for (mount_point, fs_ptr) in self.mount_points.iter_mut().rev() {
+    fn resolve_path<'a>(&mut self, path: &'a str) -> Result<(&'static UnsafeCell<dyn FileSystem>, &'a str)> {
+        for (mount_point, fs) in self.mount_points.iter().rev() {
             if path.starts_with(mount_point.as_str()) {
                 let relative_path = &path[mount_point.len()..];
                 let relative_path = if relative_path.starts_with('/') {
@@ -130,20 +134,21 @@ impl VirtualFileSystem {
                 } else {
                     relative_path
                 };
-                return Ok((unsafe { &mut **fs_ptr }, relative_path));
+                return Ok((*fs, relative_path));
             }
         }
         Err(VfsError::NotFound)
     }
 
     pub fn open(&mut self, path: &str, flags: OpenFlags) -> Result<FileDescriptor> {
-        let (fs, relative_path) = self.resolve_path(path)?;
+        let (fs_cell, relative_path) = self.resolve_path(path)?;
+        let fs = unsafe { &mut *fs_cell.get() };
         let handle = fs.open(relative_path, flags)?;
         
         let fd = self.next_fd;
         self.next_fd += 1;
         
-        let open_file = OpenFile::new(fs, handle);
+        let open_file = OpenFile::new(fs_cell, handle);
         self.open_files.insert(fd, open_file);
         
         Ok(fd)
@@ -168,22 +173,26 @@ impl VirtualFileSystem {
     }
 
     pub fn create(&mut self, path: &str) -> Result<()> {
-        let (fs, relative_path) = self.resolve_path(path)?;
+        let (fs_cell, relative_path) = self.resolve_path(path)?;
+        let fs = unsafe { &mut *fs_cell.get() };
         fs.create(relative_path)
     }
 
     pub fn mkdir(&mut self, path: &str) -> Result<()> {
-        let (fs, relative_path) = self.resolve_path(path)?;
+        let (fs_cell, relative_path) = self.resolve_path(path)?;
+        let fs = unsafe { &mut *fs_cell.get() };
         fs.mkdir(relative_path)
     }
 
     pub fn list_dir(&mut self, path: &str) -> Result<Vec<String>> {
-        let (fs, relative_path) = self.resolve_path(path)?;
+        let (fs_cell, relative_path) = self.resolve_path(path)?;
+        let fs = unsafe { &*fs_cell.get() };
         fs.list_dir(relative_path)
     }
 
     pub fn remove(&mut self, path: &str) -> Result<()> {
-        let (fs, relative_path) = self.resolve_path(path)?;
+        let (fs_cell, relative_path) = self.resolve_path(path)?;
+        let fs = unsafe { &mut *fs_cell.get() };
         fs.remove(relative_path)
     }
 }

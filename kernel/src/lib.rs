@@ -370,8 +370,10 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
         if let Some(drive) = drivers::ata::get_primary_master() {
             if let Some(ext2) = fs::ext2::Ext2Fs::new(drive) {
                 if let Some(vfs) = fs::vfs::get_vfs() {
-                    let ext2_static = Box::leak(Box::new(ext2));
-                    vfs.mount("/mnt", ext2_static);
+                    use core::cell::UnsafeCell;
+                    let ext2_cell: &'static UnsafeCell<dyn fs::vfs::FileSystem> = 
+                        Box::leak(Box::new(UnsafeCell::new(ext2)));
+                    vfs.mount("/mnt", ext2_cell);
                     screen_log("[ OK ] Ext2: Mounted at /mnt", false);
                 } else {
                     screen_log("[ !! ] Ext2: VFS not available", false);
@@ -426,8 +428,10 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
         if let Some(drive) = drivers::ata::get_primary_master() {
             if let Some(ext2) = fs::ext2::Ext2Fs::new(drive) {
                 if let Some(vfs) = fs::vfs::get_vfs() {
-                    let ext2_static = Box::leak(Box::new(ext2));
-                    vfs.mount("/mnt", ext2_static);
+                    use core::cell::UnsafeCell;
+                    let ext2_cell: &'static UnsafeCell<dyn fs::vfs::FileSystem> = 
+                        Box::leak(Box::new(UnsafeCell::new(ext2)));
+                    vfs.mount("/mnt", ext2_cell);
                     screen_log("[ OK ] Ext2: Mounted at /mnt", false);
                 } else {
                     screen_log("[ !! ] Ext2: VFS not available", false);
