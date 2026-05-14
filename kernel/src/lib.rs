@@ -338,51 +338,38 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
         screen_log("[ OK ] IPC: Shared memory manager ready", false);
         screen_log("[ OK ] IPC subsystem operational", false);
         
-        screen_log("[ .. ] Initializing Virtual File System", false);
-        screen_log("[ .. ] Mounting root filesystem", false);
         serial_write("[VFS] Calling vfs::init()...\r\n");
         fs::vfs::init();
         serial_write("[VFS] vfs::init() returned\r\n");
-        screen_log("[ OK ] VFS: Root mounted at /", false);
-        screen_log("[ OK ] VFS: /dev filesystem mounted", false);
-        screen_log("[ OK ] VFS: /proc filesystem mounted", false);
-        screen_log("[ OK ] VFS: /tmp tmpfs mounted", false);
-        screen_log("[ OK ] Virtual filesystem ready", false);
         
-        screen_log("[ .. ] Loading initial ramdisk", false);
         serial_write("[INITRD] Calling initrd::init()...\r\n");
         initrd::init();
         serial_write("[INITRD] initrd::init() returned\r\n");
-        screen_log("[ OK ] Initrd: Archive located", false);
-        screen_log("[ OK ] Initrd: Files extracted to /", false);
         
-        screen_log("[ .. ] Initializing input drivers", false);
-        screen_log("[ .. ] Initializing PS/2 controller", false);
         serial_write("[DRV] Calling drivers::init()...\r\n");
         drivers::init();
         serial_write("[DRV] drivers::init() returned\r\n");
-        screen_log("[ OK ] PS/2: Controller initialized", false);
-        screen_log("[ OK ] PS/2: Keyboard detected on port 1", false);
-        screen_log("[ OK ] PS/2: Mouse detected on port 2", false);
-        screen_log("[ OK ] Input drivers loaded", false);
         
-        screen_log("[ .. ] Mounting disk filesystem", false);
+        serial_write("[EXT2] Mounting disk filesystem...\r\n");
         if let Some(drive) = drivers::ata::get_primary_master() {
+            serial_write("[EXT2] ATA drive found\r\n");
             if let Some(ext2) = fs::ext2::Ext2Fs::new(drive) {
+                serial_write("[EXT2] Ext2 filesystem initialized\r\n");
                 if let Some(vfs) = fs::vfs::get_vfs() {
+                    serial_write("[EXT2] VFS available, mounting...\r\n");
                     use core::cell::UnsafeCell;
                     let ext2_cell: &'static UnsafeCell<dyn fs::vfs::FileSystem> = 
                         Box::leak(Box::new(UnsafeCell::new(ext2)));
                     vfs.mount("/mnt", ext2_cell);
-                    screen_log("[ OK ] Ext2: Mounted at /mnt", false);
+                    serial_write("[EXT2] Mounted at /mnt\r\n");
                 } else {
-                    screen_log("[ !! ] Ext2: VFS not available", false);
+                    serial_write("[EXT2] ERROR: VFS not available\r\n");
                 }
             } else {
-                screen_log("[ !! ] Ext2: Failed to initialize", false);
+                serial_write("[EXT2] ERROR: Failed to initialize\r\n");
             }
         } else {
-            screen_log("[ !! ] Ext2: No ATA drive found", false);
+            serial_write("[EXT2] ERROR: No ATA drive found\r\n");
         }
         
         screen_log("[ .. ] Starting window manager", false);
@@ -394,53 +381,52 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
         screen_log("[ OK ] Desktop theme: Solarized Dark loaded", false);
         screen_log("[ OK ] Window manager ready", false);
     } else {
-        screen_log("[ .. ] Terminal mode: Minimal initialization", false);
+        serial_write("[TERM] Terminal mode initialization\r\n");
         
-        screen_log("[ .. ] Initializing process scheduler", false);
+        serial_write("[SCHED] Calling scheduler::init()...\r\n");
         process::scheduler::init();
-        screen_log("[ OK ] Scheduler ready", false);
+        serial_write("[SCHED] scheduler::init() returned\r\n");
         
-        screen_log("[ .. ] Initializing IPC", false);
+        serial_write("[IPC] Calling ipc::init()...\r\n");
         ipc::init();
-        screen_log("[ OK ] IPC ready", false);
+        serial_write("[IPC] ipc::init() returned\r\n");
         
-        screen_log("[ .. ] Initializing VFS", false);
+        serial_write("[VFS] Calling vfs::init()...\r\n");
         fs::vfs::init();
-        screen_log("[ OK ] VFS ready", false);
+        serial_write("[VFS] vfs::init() returned\r\n");
         
-        screen_log("[ .. ] Loading initial ramdisk", false);
+        serial_write("[INITRD] Calling initrd::init()...\r\n");
         initrd::init();
-        screen_log("[ OK ] Initrd ready", false);
+        serial_write("[INITRD] initrd::init() returned\r\n");
         
-        screen_log("[ .. ] Initializing PS/2 keyboard only", false);
-        serial_write("[DRV] Calling keyboard::init()...\r\n");
-        screen_log("[ .. ] [DRV] Calling keyboard::init()", false);
+        serial_write("[KBD] Calling keyboard::init()...\r\n");
         drivers::keyboard::init();
-        serial_write("[DRV] keyboard::init() returned\r\n");
-        screen_log("[ OK ] [DRV] keyboard::init() returned", false);
-        screen_log("[ OK ] Keyboard driver ready", false);
+        serial_write("[KBD] keyboard::init() returned\r\n");
         
-        screen_log("[ .. ] Initializing ATA driver", false);
+        serial_write("[ATA] Calling ata::init()...\r\n");
         drivers::ata::init();
-        screen_log("[ OK ] ATA driver ready", false);
+        serial_write("[ATA] ata::init() returned\r\n");
         
-        screen_log("[ .. ] Mounting disk filesystem", false);
+        serial_write("[EXT2] Mounting disk filesystem...\r\n");
         if let Some(drive) = drivers::ata::get_primary_master() {
+            serial_write("[EXT2] ATA drive found\r\n");
             if let Some(ext2) = fs::ext2::Ext2Fs::new(drive) {
+                serial_write("[EXT2] Ext2 filesystem initialized\r\n");
                 if let Some(vfs) = fs::vfs::get_vfs() {
+                    serial_write("[EXT2] VFS available, mounting...\r\n");
                     use core::cell::UnsafeCell;
                     let ext2_cell: &'static UnsafeCell<dyn fs::vfs::FileSystem> = 
                         Box::leak(Box::new(UnsafeCell::new(ext2)));
                     vfs.mount("/mnt", ext2_cell);
-                    screen_log("[ OK ] Ext2: Mounted at /mnt", false);
+                    serial_write("[EXT2] Mounted at /mnt\r\n");
                 } else {
-                    screen_log("[ !! ] Ext2: VFS not available", false);
+                    serial_write("[EXT2] ERROR: VFS not available\r\n");
                 }
             } else {
-                screen_log("[ !! ] Ext2: Failed to initialize", false);
+                serial_write("[EXT2] ERROR: Failed to initialize\r\n");
             }
         } else {
-            screen_log("[ !! ] Ext2: No ATA drive found", false);
+            serial_write("[EXT2] ERROR: No ATA drive found\r\n");
         }
     }
     

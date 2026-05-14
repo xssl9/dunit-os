@@ -27,7 +27,7 @@ all: $(BUILD_DIR)/kernel.elf
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-$(BUILD_DIR)/boot.o: $(HAL_DIR)/src/boot32.asm | $(BUILD_DIR)
+$(BUILD_DIR)/boot.o: $(HAL_DIR)/src/limine_entry.asm | $(BUILD_DIR)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD_DIR)/boot_main.o: $(HAL_DIR)/src/boot_main.c | $(BUILD_DIR)
