@@ -18,5 +18,5 @@ _start:
 section .bss
 align 16
 stack_bottom:
-    resb 16384
+    resb 262144
 stack_top:

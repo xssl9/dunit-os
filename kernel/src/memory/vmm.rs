@@ -215,6 +215,8 @@ static mut VMM_INSTANCE: Option<VirtualMemoryManager> = None;
 static mut HHDM_OFFSET: u64 = 0;
 
 pub fn init() {
+    super::serial_write("[VMM] START\r\n");
+    super::serial_write("[VMM] OK\r\n");
 }
 
 pub fn set_hhdm_offset(offset: u64) {

@@ -78,6 +78,14 @@ pub fn handle_invalid_opcode(frame: &InterruptFrame) {
 }
 
 pub fn handle_device_not_available(_frame: &InterruptFrame) {
+    // Clear CR0.TS so SSE/MMX instructions work after #NM.
+    unsafe {
+        let mut cr0: u64;
+        core::arch::asm!("mov {}, cr0", out(reg) cr0);
+        cr0 &= !(1 << 3);
+        core::arch::asm!("mov cr0, {}", in(reg) cr0);
+        core::arch::asm!("fninit", options(nostack, preserves_flags));
+    }
 }
 
 pub fn handle_double_fault(frame: &InterruptFrame) {

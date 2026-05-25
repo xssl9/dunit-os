@@ -146,7 +146,16 @@ pub fn init_heap(heap_start: usize, heap_size: usize) {
     ALLOCATOR.init(heap_start, heap_size);
 }
 
+static mut KERNEL_HEAP: [u8; 2 * 1024 * 1024] = [0; 2 * 1024 * 1024];
+
 pub fn init() {
-    // Временно пропускаем инициализацию аллокатора
-    // TODO: настроить heap после получения memory map
+    crate::memory::serial_write("[HEAP] START\r\n");
+
+    unsafe {
+        let heap_start = KERNEL_HEAP.as_ptr() as usize;
+        let heap_size = core::mem::size_of_val(&KERNEL_HEAP);
+        init_heap(heap_start, heap_size);
+    }
+
+    crate::memory::serial_write("[HEAP] OK\r\n");
 }

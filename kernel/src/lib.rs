@@ -7,6 +7,7 @@ extern crate alloc;
 extern crate std;
 
 pub mod allocator;
+pub mod cpu;
 pub mod dpkg;
 pub mod drivers;
 pub mod elf;
@@ -209,28 +210,36 @@ pub extern "C" fn screen_log_c(text: *const u8, is_error: bool) {
 }
 
 #[no_mangle]
-pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *const u8, terminal_mode: i32, hhdm_offset: u64) -> ! {
-    serial_write("[KMAIN-001] kernel_main entered\r\n");
-    
+pub extern "C" fn kernel_main(
+    fb_ptr: *const LimineFramebuffer,
+    _term_ptr: *const u8,
+    terminal_mode: i32,
+    hhdm_offset: u64,
+) -> ! {
+    serial_write("[KERNEL] START\r\n");
+
+    unsafe {
+        cpu::init_fpu();
+    }
+
+    memory::vmm::set_hhdm_offset(hhdm_offset);
+
     let fb = unsafe { fb_ptr.as_ref() };
     let mut early_log_y = 10;
-    
+
     if let Some(fb) = fb {
         let fb_addr = fb.address as *mut u32;
         let width = fb.width as usize;
-        
-        screen_log_early(fb_addr, width, early_log_y, "[KMAIN-001] kernel_main entered");
+
+        screen_log_early(fb_addr, width, early_log_y, "[KERNEL] START");
         early_log_y += 10;
-        
-        screen_log_early(fb_addr, width, early_log_y, "[KMAIN-002] Calling set_hhdm_offset");
+
+        screen_log_early(fb_addr, width, early_log_y, "[KERNEL] HHDM setup");
         early_log_y += 10;
-        memory::vmm::set_hhdm_offset(hhdm_offset);
-        
-        screen_log_early(fb_addr, width, early_log_y, "[KMAIN-003] set_hhdm_offset returned");
+
+        screen_log_early(fb_addr, width, early_log_y, "[KERNEL] framebuffer ready");
         early_log_y += 10;
-        
-        screen_log_early(fb_addr, width, early_log_y, "[KMAIN-006] Setting SCREEN_LOG_FB");
-        early_log_y += 10;
+
         unsafe {
             SCREEN_LOG_FB = Some((fb_addr, width));
             SCREEN_LOG_Y = early_log_y;
@@ -239,25 +248,15 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
             crate::syscall::KERNEL_FB_HEIGHT = fb.height as u32;
             crate::syscall::KERNEL_FB_PITCH = fb.pitch as u32;
         }
-        screen_log_early(fb_addr, width, early_log_y, "[KMAIN-007] SCREEN_LOG_FB set");
+        screen_log_early(fb_addr, width, early_log_y, "[KERNEL] screen log ready");
         early_log_y += 10;
     } else {
-        serial_write("[KMAIN-ERROR] No framebuffer\r\n");
+        serial_write("[KERNEL] framebuffer FAIL\r\n");
     }
-    
-    serial_write("[KMAIN-002] Calling set_hhdm_offset\r\n");
-    serial_write("[KMAIN-003] set_hhdm_offset returned\r\n");
-    serial_write("[KMAIN-004] Getting fb reference\r\n");
-    serial_write("[KMAIN-005] fb reference obtained\r\n");
-    serial_write("[KMAIN-006] Setting SCREEN_LOG_FB\r\n");
-    serial_write("[KMAIN-007] SCREEN_LOG_FB set\r\n");
-    serial_write("[KMAIN-008] Creating screen_log closure\r\n");
-    
+
     let screen_log = |text: &str, is_error: bool| {
         screen_log_internal(text, is_error);
     };
-    
-    serial_write("[KMAIN-009] Starting boot sequence\r\n");
     
     serial_write("\r\n\r\n");
     serial_write("=== Dunit OS Boot Sequence ===\r\n\r\n");
@@ -274,12 +273,12 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
     
     screen_log("[ .. ] Initializing Hardware Abstraction Layer", false);
     screen_log("[ .. ] Setting up Global Descriptor Table", false);
-    unsafe { 
-        serial_write("[HAL] Calling hal_init()...\r\n");
-        screen_log("[ .. ] [HAL] Calling hal_init()", false);
+    unsafe {
+        serial_write("[HAL] START\r\n");
+        screen_log("[ .. ] [HAL] START", false);
         hal::hal_init();
-        serial_write("[HAL] hal_init() returned\r\n");
-        screen_log("[ OK ] [HAL] hal_init() returned", false);
+        serial_write("[HAL] OK\r\n");
+        screen_log("[ OK ] [HAL] OK", false);
     }
     screen_log("[ OK ] GDT loaded with 5 segments", false);
     screen_log("[ OK ] Code segment: 0x08, Data segment: 0x10", false);
@@ -287,33 +286,12 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
     screen_log("[ OK ] IDT loaded with 256 entries", false);
     screen_log("[ OK ] Exception handlers registered", false);
     screen_log("[ OK ] Hardware Abstraction Layer ready", false);
-    
+
     screen_log("[ .. ] Initializing memory management", false);
     screen_log("[ .. ] Starting Physical Memory Manager", false);
-    serial_write("[MEM] Calling memory::init()...\r\n");
-    screen_log("[ .. ] [MEM] Calling memory::init()", false);
+    serial_write("[KERNEL] memory START\r\n");
     memory::init();
-    serial_write("[MEM] memory::init() returned\r\n");
-    screen_log("[ OK ] [MEM] memory::init() returned", false);
-    screen_log("[ OK ] PMM: 131072 pages available", false);
-    screen_log("[ OK ] PMM: Bitmap allocator initialized", false);
-    
-    screen_log("[ .. ] Starting Virtual Memory Manager", false);
-    serial_write("[MEM] Calling vmm::init()...\r\n");
-    screen_log("[ .. ] [MEM] Calling vmm::init()", false);
-    memory::vmm::init();
-    serial_write("[MEM] vmm::init() returned\r\n");
-    screen_log("[ OK ] [MEM] vmm::init() returned", false);
-    screen_log("[ OK ] VMM: Page tables configured", false);
-    screen_log("[ OK ] VMM: Kernel mapped at 0xFFFFFFFF80000000", false);
-    
-    screen_log("[ .. ] Setting up kernel heap allocator", false);
-    serial_write("[MEM] Calling allocator::init()...\r\n");
-    screen_log("[ .. ] [MEM] Calling allocator::init()", false);
-    allocator::init();
-    serial_write("[MEM] allocator::init() returned\r\n");
-    screen_log("[ OK ] [MEM] allocator::init() returned", false);
-    screen_log("[ OK ] Heap: 16MB allocated", false);
+    serial_write("[KERNEL] memory OK\r\n");
     screen_log("[ OK ] Memory management subsystem operational", false);
     
     if terminal_mode == 0 {
@@ -408,10 +386,9 @@ pub extern "C" fn kernel_main(fb_ptr: *const LimineFramebuffer, _term_ptr: *cons
     
     screen_log("[ OK ] System initialization complete", false);
     screen_log("[ OK ] Dunit OS (Green Tea) ready", false);
-    
-    serial_write("\r\n[BOOT-001] After screen_log ready\r\n");
-    serial_write("[BOOT] Initialization complete, starting mode...\r\n");
-    serial_write("[BOOT-002] About to check terminal_mode\r\n");
+
+    serial_write("[KERNEL] OK\r\n");
+    serial_write("[KERNEL] mode select START\r\n");
     
     if terminal_mode != 0 {
         serial_write("[BOOT-003] Starting terminal mode\r\n");

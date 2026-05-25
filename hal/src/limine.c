@@ -27,6 +27,12 @@ static volatile struct limine_hhdm_request hhdm_request = {
     .revision = 0
 };
 
+__attribute__((used, section(".limine_requests")))
+static volatile struct limine_memmap_request memmap_request = {
+    .id = LIMINE_MEMMAP_REQUEST,
+    .revision = 0
+};
+
 __attribute__((used, section(".limine_requests_start_marker")))
 static volatile LIMINE_REQUESTS_START_MARKER;
 
@@ -47,4 +53,8 @@ struct limine_kernel_file_response *get_kernel_file_response(void) {
 
 struct limine_hhdm_response *get_hhdm_response(void) {
     return hhdm_request.response;
+}
+
+struct limine_memmap_response *get_memmap_response(void) {
+    return memmap_request.response;
 }
