@@ -59,6 +59,14 @@ static mut HISTORY_COUNT: usize = 0;
 static mut HISTORY_INDEX: usize = 0;
 static mut HISTORY_POSITION: isize = -1;
 
+// Current working directory
+static mut CWD: [u8; 256] = {
+    let mut buf = [0u8; 256];
+    buf[0] = b'/';
+    buf
+};
+static mut CWD_LEN: usize = 1;
+
 fn serial_write(s: &str) {
     for byte in s.bytes() {
         unsafe {
@@ -553,29 +561,89 @@ pub extern "C" fn kernel_main(
                                             HISTORY_POSITION = -1;
                                         }
                                     
-                                            let response = match cmd_str {
-                                        "help" => "Available commands:\n  help     - Show this help\n  ls       - List files\n  pwd      - Print working directory\n  cd       - Change directory\n  mkdir    - Create directory\n  touch    - Create file\n  cat      - Display file contents\n  echo     - Print text\n  exec     - Execute userspace program\n  ps       - Process list\n  kill     - Kill process\n  top      - Process monitor\n  uname    - System information\n  date     - Show date and time\n  whoami   - Current user\n  uptime   - System uptime\n  free     - Memory usage\n  exit     - Halt system",
-                                        "ls" => "bin  dev  home  proc  tmp  usr  var  etc",
-                                        "ls -l" => "drwxr-xr-x  2 root root 4096 bin\ndrwxr-xr-x  2 root root 4096 dev\ndrwxr-xr-x  2 root root 4096 home\ndrwxr-xr-x  2 root root 4096 proc\ndrwxr-xr-x  2 root root 4096 tmp\ndrwxr-xr-x  2 root root 4096 usr\ndrwxr-xr-x  2 root root 4096 var\ndrwxr-xr-x  2 root root 4096 etc",
-                                        "pwd" => "/root",
-                                        "cd" => "",
-                                        "cd /" => "",
-                                        "cd ~" => "",
-                                        "cd .." => "",
-                                        "mkdir test" => "Directory 'test' created",
-                                        "touch file.txt" => "File 'file.txt' created",
-                                        "cat /etc/os-release" => "NAME=\"Dunit OS\"\nVERSION=\"1.0 (Green Tea)\"\nID=dunit\nPRETTY_NAME=\"Dunit OS 1.0 (Green Tea)\"\nHOME_URL=\"https://dunit-os.org\"",
-                                        "echo hello" => "hello",
-                                        "echo Hello World" => "Hello World",
-                                        "uname" => "Dunit OS",
-                                        "uname -a" => "Dunit OS 1.0 Green Tea x86_64",
-                                        "date" => "Tue May 5 12:00:00 UTC 2026",
-                                        "whoami" => "root",
-                                        "uptime" => "up 0 minutes, 1 user, load average: 0.00, 0.00, 0.00",
-                                        "free" => "              total        used        free\nMem:         524288       16384      507904\nSwap:             0           0           0",
-                                        "ps" => "  PID TTY          TIME CMD\n    1 tty1     00:00:00 init\n    2 tty1     00:00:00 kernel\n    3 tty1     00:00:00 terminal",
-                                        "ps aux" => "USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND\nroot         1  0.0  0.1   1024   512 tty1     S    12:00   0:00 init\nroot         2  0.0  0.2   2048  1024 tty1     R    12:00   0:00 kernel\nroot         3  0.0  0.1   1024   512 tty1     S    12:00   0:00 terminal",
-                                        "top" => "Tasks: 3 total, 1 running, 2 sleeping\nCPU: 2.5% user, 1.2% system, 96.3% idle\nMem: 16384/524288 KB\n\n  PID USER     PR  NI  VIRT  RES  SHR S %CPU %MEM    TIME+ COMMAND\n    1 root     20   0  1024  512    0 S  0.0  0.1  0:00.01 init\n    2 root     20   0  2048 1024    0 R  2.5  0.2  0:00.15 kernel\n    3 root     20   0  1024  512    0 S  0.0  0.1  0:00.02 terminal",
+                                            use alloc::string::{String, ToString};
+                                            use alloc::vec::Vec;
+                                            
+                                            let mut response_buf = String::new();
+                                            let has_response = match cmd_str {
+                                        "help" => {
+                                            response_buf.push_str("Available commands:\n  help     - Show this help\n  ls       - List files\n  pwd      - Print working directory\n  cd       - Change directory\n  mkdir    - Create directory\n  touch    - Create file\n  cat      - Display file contents\n  echo     - Print text\n  exec     - Execute userspace program\n  ps       - Process list\n  kill     - Kill process\n  top      - Process monitor\n  uname    - System information\n  date     - Show date and time\n  whoami   - Current user\n  uptime   - System uptime\n  free     - Memory usage\n  exit     - Halt system");
+                                            true
+                                        },
+                                        "ls" | "ls -l" => {
+                                            let cwd_str = unsafe { core::str::from_utf8(&CWD[..CWD_LEN]).unwrap_or("/") };
+                                            if let Some(vfs) = crate::fs::vfs::get_vfs() {
+                                                match vfs.list_dir(cwd_str) {
+                                                    Ok(entries) => {
+                                                        if entries.is_empty() {
+                                                            response_buf.push_str("(empty)");
+                                                        } else {
+                                                            for entry in entries {
+                                                                response_buf.push_str(&entry);
+                                                                response_buf.push_str("  ");
+                                                            }
+                                                        }
+                                                        true
+                                                    }
+                                                    Err(e) => {
+                                                        response_buf.push_str("ls: ");
+                                                        response_buf.push_str(&e.to_string());
+                                                        true
+                                                    }
+                                                }
+                                            } else {
+                                                response_buf.push_str("ls: VFS not available");
+                                                true
+                                            }
+                                        },
+                                        "pwd" => {
+                                            let cwd_str = unsafe { core::str::from_utf8(&CWD[..CWD_LEN]).unwrap_or("/") };
+                                            response_buf.push_str(cwd_str);
+                                            true
+                                        },
+                                        "cd" | "cd ~" => {
+                                            unsafe {
+                                                CWD[0] = b'/';
+                                                CWD_LEN = 1;
+                                            }
+                                            false
+                                        },
+                                        "uname" => {
+                                            response_buf.push_str("Dunit OS");
+                                            true
+                                        },
+                                        "uname -a" => {
+                                            response_buf.push_str("Dunit OS 1.0 Green Tea x86_64");
+                                            true
+                                        },
+                                        "date" => {
+                                            response_buf.push_str("Tue May 5 12:00:00 UTC 2026");
+                                            true
+                                        },
+                                        "whoami" => {
+                                            response_buf.push_str("root");
+                                            true
+                                        },
+                                        "uptime" => {
+                                            response_buf.push_str("up 0 minutes, 1 user, load average: 0.00, 0.00, 0.00");
+                                            true
+                                        },
+                                        "free" => {
+                                            response_buf.push_str("              total        used        free\nMem:         524288       16384      507904\nSwap:             0           0           0");
+                                            true
+                                        },
+                                        "ps" => {
+                                            response_buf.push_str("  PID TTY          TIME CMD\n    1 tty1     00:00:00 init\n    2 tty1     00:00:00 kernel\n    3 tty1     00:00:00 terminal");
+                                            true
+                                        },
+                                        "ps aux" => {
+                                            response_buf.push_str("USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND\nroot         1  0.0  0.1   1024   512 tty1     S    12:00   0:00 init\nroot         2  0.0  0.2   2048  1024 tty1     R    12:00   0:00 kernel\nroot         3  0.0  0.1   1024   512 tty1     S    12:00   0:00 terminal");
+                                            true
+                                        },
+                                        "top" => {
+                                            response_buf.push_str("Tasks: 3 total, 1 running, 2 sleeping\nCPU: 2.5% user, 1.2% system, 96.3% idle\nMem: 16384/524288 KB\n\n  PID USER     PR  NI  VIRT  RES  SHR S %CPU %MEM    TIME+ COMMAND\n    1 root     20   0  1024  512    0 S  0.0  0.1  0:00.01 init\n    2 root     20   0  2048 1024    0 R  2.5  0.2  0:00.15 kernel\n    3 root     20   0  1024  512    0 S  0.0  0.1  0:00.02 terminal");
+                                            true
+                                        },
                                         "exit" => {
                                             console.write_str("\nShutting down Dunit OS...\n");
                                             console.write_str("Goodbye!\n");
@@ -583,66 +651,176 @@ pub extern "C" fn kernel_main(
                                                 unsafe { core::arch::asm!("hlt"); }
                                             }
                                         },
-                                        "" => "",
+                                        "" => false,
                                         _ => {
-                                            if cmd_str.starts_with("echo ") {
-                                                &cmd_str[5..]
+                                            if cmd_str.starts_with("cd ") {
+                                                let path = cmd_str[3..].trim();
+                                                let cwd_str = unsafe { core::str::from_utf8(&CWD[..CWD_LEN]).unwrap_or("/") };
+                                                
+                                                let (new_path, early_return) = if path == ".." {
+                                                    (if cwd_str == "/" {
+                                                        "/"
+                                                    } else if let Some(slash) = cwd_str.rfind('/') {
+                                                        if slash == 0 { "/" } else { &cwd_str[..slash] }
+                                                    } else {
+                                                        "/"
+                                                    }, false)
+                                                } else if path.starts_with('/') {
+                                                    (path, false)
+                                                } else if path == "/" {
+                                                    ("/", false)
+                                                } else {
+                                                    response_buf.push_str("cd: relative paths not yet supported");
+                                                    ("", true)
+                                                };
+                                                
+                                                if early_return {
+                                                    true
+                                                } else if let Some(vfs) = crate::fs::vfs::get_vfs() {
+                                                    match vfs.list_dir(new_path) {
+                                                        Ok(_) => {
+                                                            unsafe {
+                                                                let bytes = new_path.as_bytes();
+                                                                CWD_LEN = bytes.len().min(255);
+                                                                CWD[..CWD_LEN].copy_from_slice(&bytes[..CWD_LEN]);
+                                                            }
+                                                            false
+                                                        }
+                                                        Err(e) => {
+                                                            response_buf.push_str("cd: ");
+                                                            response_buf.push_str(&e.to_string());
+                                                            true
+                                                        }
+                                                    }
+                                                } else {
+                                                    response_buf.push_str("cd: VFS not available");
+                                                    true
+                                                }
+                                            } else if cmd_str.starts_with("mkdir ") {
+                                                let path = cmd_str[6..].trim();
+                                                if let Some(vfs) = crate::fs::vfs::get_vfs() {
+                                                    match vfs.mkdir(path) {
+                                                        Ok(()) => {
+                                                            response_buf.push_str("Directory created");
+                                                            true
+                                                        }
+                                                        Err(e) => {
+                                                            response_buf.push_str("mkdir: ");
+                                                            response_buf.push_str(&e.to_string());
+                                                            true
+                                                        }
+                                                    }
+                                                } else {
+                                                    response_buf.push_str("mkdir: VFS not available");
+                                                    true
+                                                }
+                                            } else if cmd_str.starts_with("touch ") {
+                                                let path = cmd_str[6..].trim();
+                                                if let Some(vfs) = crate::fs::vfs::get_vfs() {
+                                                    match vfs.open(path, crate::fs::vfs::OpenFlags::WriteOnly) {
+                                                        Ok(fd) => {
+                                                            let _ = vfs.close(fd);
+                                                            response_buf.push_str("File created");
+                                                            true
+                                                        }
+                                                        Err(e) => {
+                                                            response_buf.push_str("touch: ");
+                                                            response_buf.push_str(&e.to_string());
+                                                            true
+                                                        }
+                                                    }
+                                                } else {
+                                                    response_buf.push_str("touch: VFS not available");
+                                                    true
+                                                }
+                                            } else if cmd_str.starts_with("cat ") {
+                                                let path = cmd_str[4..].trim();
+                                                if let Some(vfs) = crate::fs::vfs::get_vfs() {
+                                                    match vfs.open(path, crate::fs::vfs::OpenFlags::ReadOnly) {
+                                                        Ok(fd) => {
+                                                            let mut buf = Vec::new();
+                                                            let mut chunk = [0u8; 256];
+                                                            loop {
+                                                                match vfs.read(fd, &mut chunk) {
+                                                                    Ok(0) => break,
+                                                                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                                                                    Err(_) => break,
+                                                                }
+                                                            }
+                                                            let _ = vfs.close(fd);
+                                                            if let Ok(s) = core::str::from_utf8(&buf) {
+                                                                response_buf.push_str(s);
+                                                            } else {
+                                                                response_buf.push_str("(binary file)");
+                                                            }
+                                                            true
+                                                        }
+                                                        Err(e) => {
+                                                            response_buf.push_str("cat: ");
+                                                            response_buf.push_str(&e.to_string());
+                                                            true
+                                                        }
+                                                    }
+                                                } else {
+                                                    response_buf.push_str("cat: VFS not available");
+                                                    true
+                                                }
+                                            } else if cmd_str.starts_with("echo ") {
+                                                response_buf.push_str(&cmd_str[5..]);
+                                                true
                                             } else if cmd_str.starts_with("dpkg search ") {
-                                                "dpkg: command not found (network required)"
+                                                response_buf.push_str("dpkg: command not found (network required)");
+                                                true
                                             } else if cmd_str.starts_with("dpkg install ") {
-                                                "dpkg: command not found (network required)"
+                                                response_buf.push_str("dpkg: command not found (network required)");
+                                                true
                                             } else if cmd_str.starts_with("dpkg remove ") {
-                                                "dpkg: command not found (network required)"
+                                                response_buf.push_str("dpkg: command not found (network required)");
+                                                true
                                             } else if cmd_str.starts_with("kill ") {
                                                 let pid_str = &cmd_str[5..];
                                                 if let Ok(pid) = pid_str.parse::<u32>() {
                                                     if pid == 1 {
-                                                        "Error: Cannot kill init process (PID 1)"
+                                                        response_buf.push_str("Error: Cannot kill init process (PID 1)");
                                                     } else if pid == 2 {
-                                                        "Error: Cannot kill kernel process (PID 2)"
+                                                        response_buf.push_str("Error: Cannot kill kernel process (PID 2)");
                                                     } else if pid == 3 {
-                                                        "Error: Cannot kill current terminal (PID 3)"
+                                                        response_buf.push_str("Error: Cannot kill current terminal (PID 3)");
                                                     } else {
-                                                        "Process killed successfully"
+                                                        response_buf.push_str("Process killed successfully");
                                                     }
                                                 } else {
-                                                    "Error: Invalid PID"
+                                                    response_buf.push_str("Error: Invalid PID");
                                                 }
+                                                true
                                             } else if cmd_str.starts_with("killall ") {
                                                 let name = &cmd_str[8..];
                                                 if name == "init" || name == "kernel" || name == "terminal" {
-                                                    "Error: Cannot kill system processes"
+                                                    response_buf.push_str("Error: Cannot kill system processes");
                                                 } else {
-                                                    "No processes found with that name"
+                                                    response_buf.push_str("No processes found with that name");
                                                 }
-                                            } else if cmd_str.starts_with("mkdir ") {
-                                                "Directory created"
-                                            } else if cmd_str.starts_with("touch ") {
-                                                "File created"
-                                            } else if cmd_str.starts_with("cat ") {
-                                                "cat: file not found"
-                                            } else if cmd_str.starts_with("cd ") {
-                                                ""
+                                                true
                                             } else if cmd_str.starts_with("exec ") {
                                                 let path = &cmd_str[5..].trim();
                                                 
                                                 if path.is_empty() {
-                                                    "Usage: exec <path>"
+                                                    response_buf.push_str("Usage: exec <path>");
                                                 } else {
                                                     console.write_str("Loading ");
                                                     console.write_str(path);
                                                     console.write_str("...\n");
-                                                    
-                                                    ""
                                                 }
+                                                false
                                             } else {
-                                                "Command not found. Type 'help' for available commands."
+                                                response_buf.push_str("Command not found. Type 'help' for available commands.");
+                                                true
                                             }
                                         }
                                     };
                                     
-                                    if response.len() > 0 {
-                                        console.write_str(response);
+                                    if has_response {
+                                        console.write_str(&response_buf);
                                         console.write_str("\n");
                                     }
                                     

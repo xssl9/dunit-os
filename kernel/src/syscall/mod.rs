@@ -157,46 +157,86 @@ fn sys_read(fd: u32, buf: *mut u8, count: usize) -> i64 {
     if !is_valid_fd(fd) {
         return EBADF;
     }
-    
     if !is_valid_user_pointer(buf as u64, count) {
         return EFAULT;
     }
-    
     if count == 0 {
         return 0;
     }
-    
-    ENOSYS
+    if let Some(vfs) = crate::fs::vfs::get_vfs() {
+        let slice = unsafe { core::slice::from_raw_parts_mut(buf, count) };
+        match vfs.read(fd, slice) {
+            Ok(n) => n as i64,
+            Err(_) => EBADF,
+        }
+    } else {
+        ENOSYS
+    }
 }
 
 fn sys_write(fd: u32, buf: *const u8, count: usize) -> i64 {
     if !is_valid_fd(fd) {
         return EBADF;
     }
-    
     if !is_valid_user_pointer(buf as u64, count) {
         return EFAULT;
     }
-    
     if count == 0 {
         return 0;
     }
-    
-    ENOSYS
+    if let Some(vfs) = crate::fs::vfs::get_vfs() {
+        let slice = unsafe { core::slice::from_raw_parts(buf, count) };
+        match vfs.write(fd, slice) {
+            Ok(n) => n as i64,
+            Err(_) => EBADF,
+        }
+    } else {
+        ENOSYS
+    }
 }
 
-fn sys_open(path: *const u8, _flags: u32) -> i64 {
+fn sys_open(path: *const u8, flags: u32) -> i64 {
     if !is_valid_string_pointer(path) {
         return EFAULT;
     }
-    ENOSYS
+    let path_str = unsafe {
+        let mut len = 0usize;
+        while *path.add(len) != 0 {
+            len += 1;
+        }
+        match core::str::from_utf8(core::slice::from_raw_parts(path, len)) {
+            Ok(s) => s,
+            Err(_) => return EINVAL,
+        }
+    };
+    let open_flags = match flags {
+        0 => crate::fs::vfs::OpenFlags::ReadOnly,
+        1 => crate::fs::vfs::OpenFlags::WriteOnly,
+        2 => crate::fs::vfs::OpenFlags::ReadWrite,
+        _ => crate::fs::vfs::OpenFlags::ReadOnly,
+    };
+    if let Some(vfs) = crate::fs::vfs::get_vfs() {
+        match vfs.open(path_str, open_flags) {
+            Ok(fd) => fd as i64,
+            Err(_) => -1,
+        }
+    } else {
+        ENOSYS
+    }
 }
 
 fn sys_close(fd: u32) -> i64 {
     if !is_valid_fd(fd) {
         return EBADF;
     }
-    ENOSYS
+    if let Some(vfs) = crate::fs::vfs::get_vfs() {
+        match vfs.close(fd) {
+            Ok(()) => 0,
+            Err(_) => EBADF,
+        }
+    } else {
+        ENOSYS
+    }
 }
 
 fn sys_mmap(addr: usize, length: usize, _prot: u32, _flags: u32) -> i64 {
