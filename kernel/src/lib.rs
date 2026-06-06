@@ -439,13 +439,11 @@ pub extern "C" fn kernel_main(
                 serial_write("[TERM-004b] Screen cleared\r\n");
                 
                 serial_write("[TERM-005] Writing header\r\n");
-                console.write_str("================================================================================\n");
-                console.write_str("                    Dunit OS - Terminal Mode                                    \n");
-                console.write_str("================================================================================\n");
+                console.write_str("Dunit OS 1.0.0 (Green Tea) tty1\n");
                 console.write_str("\n");
-                console.write_str("Terminal mode is active.\n");
-                console.write_str("Type 'help' for available commands\n");
-                console.write_str("\n");
+                console.write_str("dunit login: root\n");
+                console.write_str("Password: \n");
+                console.write_str("Last login: Sat Jun  6 12:00:00 UTC 2026 on tty1\n");
                 console.write_str("root@dunit:~# ");
                 console.draw_cursor(true);
                 
@@ -1110,7 +1108,7 @@ fn draw_colored_text(fb: *mut u32, width: usize, x: usize, y: usize, text: &str)
         let color = if in_bracket || bracket_content || ch == b'[' || ch == b']' {
             0x00ff00
         } else {
-            0x2aa198
+            0xffffff
         };
         
         let glyph: &[u8] = match ch {
@@ -1200,6 +1198,10 @@ fn draw_colored_text(fb: *mut u32, width: usize, x: usize, y: usize, text: &str)
 }
 
 fn draw_error_text(fb: *mut u32, width: usize, x: usize, y: usize, text: &str) {
+    draw_text_direct(fb, width, x, y, text, 0xff0000);
+}
+
+fn draw_error_text_old(fb: *mut u32, width: usize, x: usize, y: usize, text: &str) {
     let mut current_x = x;
     let mut in_bracket = false;
     let mut bracket_content = false;

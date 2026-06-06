@@ -27,7 +27,7 @@ fn get_pixel_color(x: usize, y: usize, width: usize, height: usize) -> u32 {
                 } else if dx == 0 || dx == window.width - 1 || dy == 0 || dy == window.height - 1 {
                     return 0x586e75;
                 } else if window.app_type == AppType::Terminal {
-                    return 0x002b36;
+                    return 0x000000;
                 } else {
                     return 0xfdf6e3;
                 }
@@ -209,7 +209,7 @@ fn draw_window(fb_addr: *mut u32, width: usize, height: usize, x: usize, y: usiz
                     } else if dx == 0 || dx == w-1 || dy == 0 || dy == h-1 {
                         0x586e75
                     } else if app_type == AppType::Terminal {
-                        0x002b36
+                        0x000000
                     } else {
                         0xfdf6e3
                     };

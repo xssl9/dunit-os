@@ -52,7 +52,7 @@ impl FbConsole {
             char_width: 8,
             char_height: 16,
             fg_color: 0xFFFFFF,
-            bg_color: 0x002b36,
+            bg_color: 0x000000,
             stride,
         };
         unsafe {
@@ -373,7 +373,7 @@ pub fn init(fb_addr: *mut u32, width: usize, height: usize, pitch: usize) {
         core::ptr::write(&mut (*ptr).fg_color, 0xFFFFFF);
         serial_write(b"[TERM-INIT-013] fg_color written\r\n\0".as_ptr());
         
-        core::ptr::write(&mut (*ptr).bg_color, 0x002b36);
+        core::ptr::write(&mut (*ptr).bg_color, 0x000000);
         serial_write(b"[TERM-INIT-014] bg_color written\r\n\0".as_ptr());
         
         core::ptr::write(&mut (*ptr).stride, stride);

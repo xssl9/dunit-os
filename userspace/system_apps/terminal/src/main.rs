@@ -22,10 +22,10 @@ fn syscall1(num: usize, a1: usize) -> isize {
     ret
 }
 
-const BG: u32 = 0x002b36;
-const FG: u32 = 0x839496;
-const PROMPT_COLOR: u32 = 0x859900;
-const CURSOR_COLOR: u32 = 0x268bd2;
+const BG: u32 = 0x000000;
+const FG: u32 = 0xffffff;
+const PROMPT_COLOR: u32 = 0x00ff00;
+const CURSOR_COLOR: u32 = 0xffffff;
 
 fn get_glyph(ch: u8) -> [u8; 5] {
     match ch {
