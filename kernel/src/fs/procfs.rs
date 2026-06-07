@@ -1,4 +1,6 @@
-use super::vfs::{FileSystem, FileHandle, OpenFlags, Result, VfsError};
+use super::vfs::{
+    DirEntry, FileSystem, FileHandle, FileStat, FileType, OpenFlags, Result, VfsError,
+};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -16,7 +18,7 @@ impl ProcFs {
 }
 
 impl FileSystem for ProcFs {
-    fn open(&self, path: &str, _flags: OpenFlags) -> Result<FileHandle> {
+    fn open(&mut self, path: &str, _flags: OpenFlags) -> Result<FileHandle> {
         if path.is_empty() || path.parse::<u32>().is_ok() {
             let handle = self.next_handle.fetch_add(1, Ordering::SeqCst);
             Ok(handle)
@@ -25,19 +27,58 @@ impl FileSystem for ProcFs {
         }
     }
 
-    fn read(&self, _handle: FileHandle, buf: &mut [u8]) -> Result<usize> {
+    fn read(&mut self, _handle: FileHandle, buf: &mut [u8]) -> Result<usize> {
         let data = b"pid: 1\nstate: Running\n";
         let len = buf.len().min(data.len());
         buf[..len].copy_from_slice(&data[..len]);
         Ok(len)
     }
 
-    fn write(&self, _handle: FileHandle, _buf: &[u8]) -> Result<usize> {
+    fn write(&mut self, _handle: FileHandle, _buf: &[u8]) -> Result<usize> {
         Err(VfsError::PermissionDenied)
     }
 
-    fn close(&self, _handle: FileHandle) -> Result<()> {
+    fn close(&mut self, _handle: FileHandle) -> Result<()> {
         Ok(())
+    }
+
+    fn readdir(&mut self, path: &str) -> Result<Vec<DirEntry>> {
+        if !path.is_empty() {
+            return Err(VfsError::NotADirectory);
+        }
+
+        let mut entries = Vec::new();
+        entries.push(DirEntry {
+            name: String::from("1"),
+            file_type: FileType::File,
+        });
+        Ok(entries)
+    }
+
+    fn create(&mut self, _path: &str) -> Result<()> {
+        Err(VfsError::Unsupported)
+    }
+
+    fn mkdir(&mut self, _path: &str) -> Result<()> {
+        Err(VfsError::Unsupported)
+    }
+
+    fn stat(&mut self, path: &str) -> Result<FileStat> {
+        if path.is_empty() {
+            return Ok(FileStat {
+                file_type: FileType::Directory,
+                size: 1,
+            });
+        }
+
+        if path == "1" {
+            Ok(FileStat {
+                file_type: FileType::File,
+                size: 22,
+            })
+        } else {
+            Err(VfsError::NotFound)
+        }
     }
 }
 

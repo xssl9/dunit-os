@@ -58,6 +58,8 @@ static mut HISTORY_LENS: [usize; 50] = [0; 50];
 static mut HISTORY_COUNT: usize = 0;
 static mut HISTORY_INDEX: usize = 0;
 static mut HISTORY_POSITION: isize = -1;
+static mut TERMINAL_CWD: [u8; 256] = [0; 256];
+static mut TERMINAL_CWD_LEN: usize = 0;
 
 fn serial_write(s: &str) {
     for byte in s.bytes() {
@@ -72,6 +74,173 @@ fn serial_write(s: &str) {
             core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") byte, options(nomem, nostack));
         }
     }
+}
+
+fn terminal_set_cwd(path: &str) {
+    unsafe {
+        let bytes = path.as_bytes();
+        let len = bytes.len().min(TERMINAL_CWD.len());
+        TERMINAL_CWD[..len].copy_from_slice(&bytes[..len]);
+        TERMINAL_CWD_LEN = len;
+    }
+}
+
+fn terminal_cwd() -> &'static str {
+    unsafe {
+        if TERMINAL_CWD_LEN == 0 {
+            terminal_set_cwd("/");
+        }
+        core::str::from_utf8(&TERMINAL_CWD[..TERMINAL_CWD_LEN]).unwrap_or("/")
+    }
+}
+
+fn write_vfs_error(console: &mut terminal::FbConsole, command: &str, error: fs::vfs::VfsError) {
+    console.write_str(command);
+    console.write_str(": ");
+    console.write_str(match error {
+        fs::vfs::VfsError::NotFound => "not found",
+        fs::vfs::VfsError::PermissionDenied => "permission denied",
+        fs::vfs::VfsError::InvalidDescriptor => "invalid descriptor",
+        fs::vfs::VfsError::AlreadyExists => "already exists",
+        fs::vfs::VfsError::NotADirectory => "not a directory",
+        fs::vfs::VfsError::IsADirectory => "is a directory",
+        fs::vfs::VfsError::InvalidPath => "invalid path",
+        fs::vfs::VfsError::Unsupported => "unsupported",
+        fs::vfs::VfsError::IoError => "I/O error",
+    });
+    console.write_str("\n");
+}
+
+fn terminal_handle_fs_command(console: &mut terminal::FbConsole, cmd_str: &str) -> bool {
+    let trimmed = cmd_str.trim();
+    let cwd = terminal_cwd();
+
+    if trimmed == "pwd" {
+        console.write_str(cwd);
+        console.write_str("\n");
+        return true;
+    }
+
+    if trimmed == "ls" || trimmed.starts_with("ls ") {
+        let path = trimmed.strip_prefix("ls").unwrap_or("").trim();
+        let path = if path.is_empty() { "." } else { path };
+        if let Some(vfs) = fs::vfs::get_vfs() {
+            match vfs.readdir_at(cwd, path) {
+                Ok(entries) => {
+                    for (idx, entry) in entries.iter().enumerate() {
+                        if idx > 0 {
+                            console.write_str("  ");
+                        }
+                        console.write_str(&entry.name);
+                    }
+                    console.write_str("\n");
+                }
+                Err(error) => write_vfs_error(console, "ls", error),
+            }
+        } else {
+            console.write_str("ls: VFS not initialized\n");
+        }
+        return true;
+    }
+
+    if trimmed == "cd" || trimmed.starts_with("cd ") {
+        let path = trimmed.strip_prefix("cd").unwrap_or("").trim();
+        let path = if path.is_empty() { "/" } else { path };
+        if let Some(vfs) = fs::vfs::get_vfs() {
+            match vfs.stat_at(cwd, path) {
+                Ok(stat) if stat.file_type == fs::vfs::FileType::Directory => {
+                    match vfs.normalize_at(cwd, path) {
+                        Ok(new_cwd) => terminal_set_cwd(&new_cwd),
+                        Err(error) => write_vfs_error(console, "cd", error),
+                    }
+                }
+                Ok(_) => console.write_str("cd: not a directory\n"),
+                Err(error) => write_vfs_error(console, "cd", error),
+            }
+        } else {
+            console.write_str("cd: VFS not initialized\n");
+        }
+        return true;
+    }
+
+    if trimmed.starts_with("mkdir ") {
+        let path = trimmed[6..].trim();
+        if path.is_empty() {
+            console.write_str("mkdir: missing operand\n");
+        } else if let Some(vfs) = fs::vfs::get_vfs() {
+            if let Err(error) = vfs.mkdir_at(cwd, path) {
+                write_vfs_error(console, "mkdir", error);
+            }
+        } else {
+            console.write_str("mkdir: VFS not initialized\n");
+        }
+        return true;
+    }
+
+    if trimmed.starts_with("touch ") {
+        let path = trimmed[6..].trim();
+        if path.is_empty() {
+            console.write_str("touch: missing operand\n");
+        } else if let Some(vfs) = fs::vfs::get_vfs() {
+            match vfs.stat_at(cwd, path) {
+                Ok(stat) if stat.file_type == fs::vfs::FileType::File => {}
+                Ok(_) => console.write_str("touch: not a file\n"),
+                Err(fs::vfs::VfsError::NotFound) => {
+                    if let Err(error) = vfs.create_at(cwd, path) {
+                        write_vfs_error(console, "touch", error);
+                    }
+                }
+                Err(error) => write_vfs_error(console, "touch", error),
+            }
+        } else {
+            console.write_str("touch: VFS not initialized\n");
+        }
+        return true;
+    }
+
+    if trimmed.starts_with("cat ") {
+        let path = trimmed[4..].trim();
+        if path.is_empty() {
+            console.write_str("cat: missing operand\n");
+        } else if let Some(vfs) = fs::vfs::get_vfs() {
+            match vfs.open_at(cwd, path, fs::vfs::OpenFlags::ReadOnly) {
+                Ok(fd) => {
+                    let mut buf = [0u8; 512];
+                    loop {
+                        match vfs.read(fd, &mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                let text = core::str::from_utf8(&buf[..n]).unwrap_or("<binary>");
+                                console.write_str(text);
+                                if n < buf.len() {
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                write_vfs_error(console, "cat", error);
+                                break;
+                            }
+                        }
+                    }
+                    let _ = vfs.close(fd);
+                    console.write_str("\n");
+                }
+                Err(error) => write_vfs_error(console, "cat", error),
+            }
+        } else {
+            console.write_str("cat: VFS not initialized\n");
+        }
+        return true;
+    }
+
+    if trimmed == "echo" || trimmed.starts_with("echo ") {
+        let text = trimmed.strip_prefix("echo").unwrap_or("").trim_start();
+        console.write_str(text);
+        console.write_str("\n");
+        return true;
+    }
+
+    false
 }
 
 #[no_mangle]
@@ -317,13 +486,17 @@ pub extern "C" fn kernel_main(
         screen_log("[ .. ] Initializing Virtual File System", false);
         screen_log("[ .. ] Mounting root filesystem", false);
         serial_write("[VFS] Calling vfs::init()...\r\n");
-        fs::vfs::init();
-        serial_write("[VFS] vfs::init() returned\r\n");
-        screen_log("[ OK ] VFS: Root mounted at /", false);
-        screen_log("[ OK ] VFS: /dev filesystem mounted", false);
-        screen_log("[ OK ] VFS: /proc filesystem mounted", false);
-        screen_log("[ OK ] VFS: /tmp tmpfs mounted", false);
-        screen_log("[ OK ] Virtual filesystem ready", false);
+        match fs::vfs::init() {
+            Ok(()) => {
+                serial_write("[VFS] vfs::init() returned OK\r\n");
+                screen_log("[ OK ] VFS: Root MemFS mounted at /", false);
+                screen_log("[ OK ] Virtual filesystem ready", false);
+            }
+            Err(_) => {
+                serial_write("[VFS] vfs::init() failed\r\n");
+                screen_log("[FAIL] Virtual filesystem initialization failed", true);
+            }
+        }
         
         screen_log("[ .. ] Loading initial ramdisk", false);
         serial_write("[INITRD] Calling initrd::init()...\r\n");
@@ -362,8 +535,10 @@ pub extern "C" fn kernel_main(
         screen_log("[ OK ] IPC ready", false);
         
         screen_log("[ .. ] Initializing VFS", false);
-        fs::vfs::init();
-        screen_log("[ OK ] VFS ready", false);
+        match fs::vfs::init() {
+            Ok(()) => screen_log("[ OK ] VFS ready", false),
+            Err(_) => screen_log("[FAIL] VFS initialization failed", true),
+        }
         
         screen_log("[ .. ] Loading initial ramdisk", false);
         initrd::init();
@@ -444,6 +619,7 @@ pub extern "C" fn kernel_main(
                 console.write_str("dunit login: root\n");
                 console.write_str("Password: \n");
                 console.write_str("Last login: Sat Jun  6 12:00:00 UTC 2026 on tty1\n");
+                terminal_set_cwd("/");
                 console.write_str("root@dunit:~# ");
                 console.draw_cursor(true);
                 
@@ -551,20 +727,11 @@ pub extern "C" fn kernel_main(
                                             HISTORY_POSITION = -1;
                                         }
                                     
-                                            let response = match cmd_str {
+                                            let response = if terminal_handle_fs_command(console, cmd_str) {
+                                                ""
+                                            } else {
+                                                match cmd_str {
                                         "help" => "Available commands:\n  help     - Show this help\n  ls       - List files\n  pwd      - Print working directory\n  cd       - Change directory\n  mkdir    - Create directory\n  touch    - Create file\n  cat      - Display file contents\n  echo     - Print text\n  exec     - Execute userspace program\n  ps       - Process list\n  kill     - Kill process\n  top      - Process monitor\n  uname    - System information\n  date     - Show date and time\n  whoami   - Current user\n  uptime   - System uptime\n  free     - Memory usage\n  exit     - Halt system",
-                                        "ls" => "bin  dev  home  proc  tmp  usr  var  etc",
-                                        "ls -l" => "drwxr-xr-x  2 root root 4096 bin\ndrwxr-xr-x  2 root root 4096 dev\ndrwxr-xr-x  2 root root 4096 home\ndrwxr-xr-x  2 root root 4096 proc\ndrwxr-xr-x  2 root root 4096 tmp\ndrwxr-xr-x  2 root root 4096 usr\ndrwxr-xr-x  2 root root 4096 var\ndrwxr-xr-x  2 root root 4096 etc",
-                                        "pwd" => "/root",
-                                        "cd" => "",
-                                        "cd /" => "",
-                                        "cd ~" => "",
-                                        "cd .." => "",
-                                        "mkdir test" => "Directory 'test' created",
-                                        "touch file.txt" => "File 'file.txt' created",
-                                        "cat /etc/os-release" => "NAME=\"Dunit OS\"\nVERSION=\"1.0 (Green Tea)\"\nID=dunit\nPRETTY_NAME=\"Dunit OS 1.0 (Green Tea)\"\nHOME_URL=\"https://dunit-os.org\"",
-                                        "echo hello" => "hello",
-                                        "echo Hello World" => "Hello World",
                                         "uname" => "Dunit OS",
                                         "uname -a" => "Dunit OS 1.0 Green Tea x86_64",
                                         "date" => "Tue May 5 12:00:00 UTC 2026",
@@ -583,9 +750,7 @@ pub extern "C" fn kernel_main(
                                         },
                                         "" => "",
                                         _ => {
-                                            if cmd_str.starts_with("echo ") {
-                                                &cmd_str[5..]
-                                            } else if cmd_str.starts_with("dpkg search ") {
+                                            if cmd_str.starts_with("dpkg search ") {
                                                 "dpkg: command not found (network required)"
                                             } else if cmd_str.starts_with("dpkg install ") {
                                                 "dpkg: command not found (network required)"
@@ -613,14 +778,6 @@ pub extern "C" fn kernel_main(
                                                 } else {
                                                     "No processes found with that name"
                                                 }
-                                            } else if cmd_str.starts_with("mkdir ") {
-                                                "Directory created"
-                                            } else if cmd_str.starts_with("touch ") {
-                                                "File created"
-                                            } else if cmd_str.starts_with("cat ") {
-                                                "cat: file not found"
-                                            } else if cmd_str.starts_with("cd ") {
-                                                ""
                                             } else if cmd_str.starts_with("exec ") {
                                                 let path = &cmd_str[5..].trim();
                                                 
@@ -637,6 +794,7 @@ pub extern "C" fn kernel_main(
                                                 "Command not found. Type 'help' for available commands."
                                             }
                                         }
+                                    }
                                     };
                                     
                                     if response.len() > 0 {

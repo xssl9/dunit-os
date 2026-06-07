@@ -1,4 +1,6 @@
-use super::vfs::{FileSystem, FileHandle, OpenFlags, Result, VfsError};
+use super::vfs::{
+    DirEntry, FileSystem, FileHandle, FileStat, FileType, OpenFlags, Result, VfsError,
+};
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -52,7 +54,7 @@ impl DevFs {
 }
 
 impl FileSystem for DevFs {
-    fn open(&self, path: &str, _flags: OpenFlags) -> Result<FileHandle> {
+    fn open(&mut self, path: &str, _flags: OpenFlags) -> Result<FileHandle> {
         if self.devices.contains_key(path) {
             let handle = self.next_handle.fetch_add(1, Ordering::SeqCst);
             Ok(handle)
@@ -61,19 +63,60 @@ impl FileSystem for DevFs {
         }
     }
 
-    fn read(&self, handle: FileHandle, buf: &mut [u8]) -> Result<usize> {
+    fn read(&mut self, handle: FileHandle, buf: &mut [u8]) -> Result<usize> {
         let _ = handle;
         let len = buf.len().min(0);
         Ok(len)
     }
 
-    fn write(&self, handle: FileHandle, buf: &[u8]) -> Result<usize> {
+    fn write(&mut self, handle: FileHandle, buf: &[u8]) -> Result<usize> {
         let _ = handle;
         Ok(buf.len())
     }
 
-    fn close(&self, _handle: FileHandle) -> Result<()> {
+    fn close(&mut self, _handle: FileHandle) -> Result<()> {
         Ok(())
+    }
+
+    fn readdir(&mut self, path: &str) -> Result<Vec<DirEntry>> {
+        if !path.is_empty() {
+            return Err(VfsError::NotADirectory);
+        }
+
+        let mut entries = Vec::new();
+        for name in self.devices.keys() {
+            entries.push(DirEntry {
+                name: name.clone(),
+                file_type: FileType::Device,
+            });
+        }
+        Ok(entries)
+    }
+
+    fn create(&mut self, _path: &str) -> Result<()> {
+        Err(VfsError::Unsupported)
+    }
+
+    fn mkdir(&mut self, _path: &str) -> Result<()> {
+        Err(VfsError::Unsupported)
+    }
+
+    fn stat(&mut self, path: &str) -> Result<FileStat> {
+        if path.is_empty() {
+            return Ok(FileStat {
+                file_type: FileType::Directory,
+                size: self.devices.len(),
+            });
+        }
+
+        if self.devices.contains_key(path) {
+            Ok(FileStat {
+                file_type: FileType::Device,
+                size: 0,
+            })
+        } else {
+            Err(VfsError::NotFound)
+        }
     }
 }
 
