@@ -9,5 +9,5 @@ target/
 *.sys
 .DS_Store
 limine/
-windowsbuildonlyfordev(notongit).py
 build_and_run_multipass.py
+qemu_serial_test.log
