@@ -89,7 +89,7 @@
 
 ---
 
-## Build & Run
+## Build & run
 
 **Prerequisites:**
 - Rust nightly toolchain
