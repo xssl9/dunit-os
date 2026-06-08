@@ -1,3 +1,7 @@
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt::Write;
+
 #[repr(u64)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Syscall {
@@ -55,6 +59,7 @@ pub const EFAULT: i64 = -14;
 pub const EINVAL: i64 = -22;
 pub const EBADF: i64 = -9;
 pub const ENOSYS: i64 = -38;
+pub const ENAMETOOLONG: i64 = -36;
 
 pub static mut KERNEL_FB_ADDR: u64 = 0;
 pub static mut KERNEL_FB_WIDTH: u32 = 0;
@@ -72,8 +77,32 @@ pub struct FbInfo {
 const USER_SPACE_START: u64 = 0x0000_0000_0000_0000;
 const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
 const MAX_FD: u32 = 1024;
+const MAX_USER_COPY: usize = 64 * 1024;
+
+struct SyscallLogWriter;
+
+impl core::fmt::Write for SyscallLogWriter {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        crate::memory::serial_write(s);
+        Ok(())
+    }
+}
+
+fn syscall_log(args: core::fmt::Arguments) {
+    let _ = SyscallLogWriter.write_fmt(args);
+}
+
+macro_rules! syscall_log {
+    ($($arg:tt)*) => {{
+        syscall_log(format_args!($($arg)*));
+    }};
+}
 
 fn is_valid_user_pointer(ptr: u64, size: usize) -> bool {
+    if size == 0 {
+        return true;
+    }
+
     if ptr == 0 {
         return false;
     }
@@ -85,6 +114,20 @@ fn is_valid_user_pointer(ptr: u64, size: usize) -> bool {
     }
     
     ptr >= USER_SPACE_START && end <= USER_SPACE_END
+}
+
+fn validate_user_range(ptr: u64, size: usize) -> Result<(), i64> {
+    if size > MAX_USER_COPY {
+        syscall_log!("[SYSCALL] user copy too large: len={}\r\n", size);
+        return Err(EINVAL);
+    }
+
+    if !is_valid_user_pointer(ptr, size) {
+        syscall_log!("[SYSCALL] invalid user pointer: ptr={:#x}, len={}\r\n", ptr, size);
+        return Err(EFAULT);
+    }
+
+    Ok(())
 }
 
 fn is_valid_fd(fd: u32) -> bool {
@@ -100,6 +143,60 @@ fn is_valid_string_pointer(ptr: *const u8) -> bool {
     is_valid_user_pointer(addr, 1)
 }
 
+pub fn copy_string_from_user(ptr: *const u8, max_len: usize) -> Result<String, i64> {
+    if max_len == 0 || max_len > MAX_USER_COPY {
+        syscall_log!("[SYSCALL] invalid user string max_len={}\r\n", max_len);
+        return Err(EINVAL);
+    }
+
+    validate_user_range(ptr as u64, max_len)?;
+
+    let mut out = String::new();
+    for offset in 0..max_len {
+        let byte = unsafe { core::ptr::read_volatile(ptr.add(offset)) };
+        if byte == 0 {
+            return Ok(out);
+        }
+        out.push(byte as char);
+    }
+
+    syscall_log!("[SYSCALL] unterminated user string: ptr={:#x}, max_len={}\r\n", ptr as u64, max_len);
+    Err(ENAMETOOLONG)
+}
+
+pub fn copy_buffer_from_user(ptr: *const u8, len: usize) -> Result<Vec<u8>, i64> {
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+
+    validate_user_range(ptr as u64, len)?;
+
+    let mut out = Vec::new();
+    out.reserve(len);
+    for offset in 0..len {
+        let byte = unsafe { core::ptr::read_volatile(ptr.add(offset)) };
+        out.push(byte);
+    }
+
+    Ok(out)
+}
+
+pub fn copy_buffer_to_user(ptr: *mut u8, data: &[u8]) -> Result<(), i64> {
+    if data.is_empty() {
+        return Ok(());
+    }
+
+    validate_user_range(ptr as u64, data.len())?;
+
+    for (offset, byte) in data.iter().enumerate() {
+        unsafe {
+            core::ptr::write_volatile(ptr.add(offset), *byte);
+        }
+    }
+
+    Ok(())
+}
+
 #[no_mangle]
 pub extern "C" fn syscall_handler(
     syscall_num: u64,
@@ -111,7 +208,10 @@ pub extern "C" fn syscall_handler(
 ) -> i64 {
     let syscall = match Syscall::from_u64(syscall_num) {
         Some(s) => s,
-        None => return ENOSYS,
+        None => {
+            syscall_log!("[SYSCALL] invalid syscall number: {}\r\n", syscall_num);
+            return ENOSYS;
+        }
     };
 
     match syscall {
@@ -147,8 +247,8 @@ fn sys_fork() -> i64 {
 }
 
 fn sys_exec(path: *const u8) -> i64 {
-    if !is_valid_string_pointer(path) {
-        return EFAULT;
+    if let Err(error) = copy_string_from_user(path, 256) {
+        return error;
     }
     ENOSYS
 }
@@ -158,12 +258,12 @@ fn sys_read(fd: u32, buf: *mut u8, count: usize) -> i64 {
         return EBADF;
     }
     
-    if !is_valid_user_pointer(buf as u64, count) {
-        return EFAULT;
-    }
-    
     if count == 0 {
         return 0;
+    }
+
+    if let Err(error) = validate_user_range(buf as u64, count) {
+        return error;
     }
     
     ENOSYS
@@ -174,20 +274,20 @@ fn sys_write(fd: u32, buf: *const u8, count: usize) -> i64 {
         return EBADF;
     }
     
-    if !is_valid_user_pointer(buf as u64, count) {
-        return EFAULT;
-    }
-    
     if count == 0 {
         return 0;
+    }
+
+    if let Err(error) = copy_buffer_from_user(buf, count).map(|_| ()) {
+        return error;
     }
     
     ENOSYS
 }
 
 fn sys_open(path: *const u8, _flags: u32) -> i64 {
-    if !is_valid_string_pointer(path) {
-        return EFAULT;
+    if let Err(error) = copy_string_from_user(path, 256) {
+        return error;
     }
     ENOSYS
 }
@@ -216,34 +316,40 @@ fn sys_send_message(target_pid: u32, msg: *const u8) -> i64 {
         return EINVAL;
     }
     
-    if !is_valid_user_pointer(msg as u64, 256) {
-        return EFAULT;
+    if let Err(error) = copy_buffer_from_user(msg, 256).map(|_| ()) {
+        return error;
     }
     
     ENOSYS
 }
 
 fn sys_receive_message(msg: *mut u8) -> i64 {
-    if !is_valid_user_pointer(msg as u64, 256) {
-        return EFAULT;
+    let empty = [0u8; 256];
+    if let Err(error) = copy_buffer_to_user(msg, &empty) {
+        return error;
     }
     
     ENOSYS
 }
 
 fn sys_get_framebuffer(info: *mut FbInfo) -> i64 {
-    if !is_valid_user_pointer(info as u64, core::mem::size_of::<FbInfo>()) {
-        return EFAULT;
-    }
     unsafe {
         if KERNEL_FB_ADDR == 0 {
             return EINVAL;
         }
-        let fb = &mut *info;
-        fb.addr = KERNEL_FB_ADDR;
-        fb.width = KERNEL_FB_WIDTH;
-        fb.height = KERNEL_FB_HEIGHT;
-        fb.pitch = KERNEL_FB_PITCH;
+        let fb = FbInfo {
+            addr: KERNEL_FB_ADDR,
+            width: KERNEL_FB_WIDTH,
+            height: KERNEL_FB_HEIGHT,
+            pitch: KERNEL_FB_PITCH,
+        };
+        let bytes = core::slice::from_raw_parts(
+            &fb as *const FbInfo as *const u8,
+            core::mem::size_of::<FbInfo>(),
+        );
+        if let Err(error) = copy_buffer_to_user(info as *mut u8, bytes) {
+            return error;
+        }
     }
     0
 }
@@ -295,18 +401,25 @@ fn sys_get_key() -> i64 {
 }
 
 fn sys_get_mouse_pos(x: *mut u32, y: *mut u32) -> i64 {
-    if !is_valid_user_pointer(x as u64, 4) || !is_valid_user_pointer(y as u64, 4) {
-        return EFAULT;
-    }
     let (mx, my) = crate::drivers::mouse::get_position();
-    unsafe {
-        *x = mx as u32;
-        *y = my as u32;
+    let x_bytes = (mx as u32).to_le_bytes();
+    let y_bytes = (my as u32).to_le_bytes();
+
+    if let Err(error) = copy_buffer_to_user(x as *mut u8, &x_bytes) {
+        return error;
     }
+    if let Err(error) = copy_buffer_to_user(y as *mut u8, &y_bytes) {
+        return error;
+    }
+
     0
 }
 
-fn sys_spawn_process(_path: *const u8) -> i64 {
+fn sys_spawn_process(path: *const u8) -> i64 {
+    if let Err(error) = copy_string_from_user(path, 256) {
+        return error;
+    }
+
     ENOSYS
 }
 

@@ -29,6 +29,8 @@ pub fn syscall0(num: usize) -> isize {
             "syscall",
             in("rax") num,
             lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
             options(nostack)
         );
     }
@@ -44,6 +46,8 @@ pub fn syscall1(num: usize, a1: usize) -> isize {
             in("rax") num,
             in("rdi") a1,
             lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
             options(nostack)
         );
     }
@@ -61,6 +65,8 @@ pub fn syscall3(num: usize, a1: usize, a2: usize, a3: usize) -> isize {
             in("rsi") a2,
             in("rdx") a3,
             lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
             options(nostack)
         );
     }
@@ -80,6 +86,8 @@ pub fn syscall5(num: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usiz
             in("r10") a4,
             in("r8") a5,
             lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
             options(nostack)
         );
     }
