@@ -35,4 +35,5 @@ pub fn init() {
 
     vmm::init();
     crate::allocator::init();
+    vmm::run_address_space_smoke();
 }

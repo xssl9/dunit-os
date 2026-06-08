@@ -113,6 +113,8 @@ const SMOKE_STDOUT_DATA: &[u8] = b"[STDOUT-TEST] hello from userspace\n";
 static SYSCALL_SMOKE_OK: AtomicBool = AtomicBool::new(false);
 static SYSCALL_FS_SMOKE_OK: AtomicBool = AtomicBool::new(false);
 static SYSCALL_FS_SEMANTICS_OK: AtomicBool = AtomicBool::new(false);
+static ELF_TEST_RUNNING: AtomicBool = AtomicBool::new(false);
+static ELF_TEST_RETURNED: AtomicBool = AtomicBool::new(false);
 
 #[repr(align(4096))]
 struct UserSmokeStack([u8; 4096]);
@@ -316,7 +318,17 @@ pub extern "C" fn syscall_handler(
     }
 }
 
-fn sys_exit(_code: i32) -> i64 {
+fn sys_exit(code: i32) -> i64 {
+    if ELF_TEST_RUNNING.load(Ordering::SeqCst) {
+        if code == 0 {
+            syscall_log!("[ELF-TEST] userspace app returned\r\n");
+        } else {
+            syscall_log!("[ELF-TEST] userspace app exited with code {}\r\n", code);
+        }
+        ELF_TEST_RETURNED.store(true, Ordering::SeqCst);
+        return SMOKE_RETURN_MAGIC;
+    }
+
     0
 }
 
@@ -769,6 +781,16 @@ pub fn run_userspace_syscall_smoke() -> bool {
         syscall_log!("[SYSCALL-FS-SEMANTICS-TEST] failed\r\n");
     }
     ok && fs_ok && semantics_ok
+}
+
+pub fn begin_elf_test() {
+    ELF_TEST_RETURNED.store(false, Ordering::SeqCst);
+    ELF_TEST_RUNNING.store(true, Ordering::SeqCst);
+}
+
+pub fn finish_elf_test() -> bool {
+    ELF_TEST_RUNNING.store(false, Ordering::SeqCst);
+    ELF_TEST_RETURNED.load(Ordering::SeqCst)
 }
 
 extern "C" fn user_syscall_smoke_entry() -> ! {

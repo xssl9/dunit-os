@@ -1,4 +1,9 @@
-use super::pmm::PhysicalAddress;
+use super::pmm::{get_pmm, PhysicalAddress};
+use alloc::vec::Vec;
+
+const PAGE_SIZE: usize = 4096;
+const USER_SPACE_END: usize = 0x0000_8000_0000_0000;
+const PML4_KERNEL_START: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VirtualAddress(pub usize);
@@ -106,6 +111,215 @@ impl PageTableEntry {
     pub fn set(&mut self, addr: PhysicalAddress, flags: PageFlags) {
         self.entry = (addr.as_usize() as u64) | flags.bits();
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressSpaceError {
+    NoPhysicalMemoryManager,
+    OutOfMemory,
+    InvalidUserAddress,
+    HugePageInPath,
+}
+
+pub struct AddressSpace {
+    root_frame: PhysicalAddress,
+    user_frames: Vec<PhysicalAddress>,
+    page_table_frames: Vec<PhysicalAddress>,
+}
+
+impl AddressSpace {
+    pub fn new() -> Result<Self, AddressSpaceError> {
+        let pmm = get_pmm().ok_or(AddressSpaceError::NoPhysicalMemoryManager)?;
+        let root_frame = pmm.alloc_frame().ok_or(AddressSpaceError::OutOfMemory)?;
+        let root_table = unsafe { page_table_from_phys_mut(root_frame) };
+        root_table.zero();
+
+        copy_kernel_half_from_active(root_table)?;
+
+        let mut page_table_frames = Vec::new();
+        page_table_frames.push(root_frame);
+
+        Ok(Self {
+            root_frame,
+            user_frames: Vec::new(),
+            page_table_frames,
+        })
+    }
+
+    pub fn root_frame(&self) -> PhysicalAddress {
+        self.root_frame
+    }
+
+    pub fn user_frame_count(&self) -> usize {
+        self.user_frames.len()
+    }
+
+    pub fn map_user_page(
+        &mut self,
+        virt: VirtualAddress,
+        flags: PageFlags,
+    ) -> Result<PhysicalAddress, AddressSpaceError> {
+        let virt_addr = virt.as_usize();
+        if virt_addr == 0 || virt_addr >= USER_SPACE_END || (virt_addr & (PAGE_SIZE - 1)) != 0 {
+            return Err(AddressSpaceError::InvalidUserAddress);
+        }
+
+        let pmm = get_pmm().ok_or(AddressSpaceError::NoPhysicalMemoryManager)?;
+        let frame = pmm.alloc_frame().ok_or(AddressSpaceError::OutOfMemory)?;
+        unsafe {
+            core::ptr::write_bytes(phys_to_virt(frame.as_usize()) as *mut u8, 0, PAGE_SIZE);
+        }
+
+        let user_flags = flags | PageFlags::PRESENT | PageFlags::USER;
+        self.map_user_frame(virt, frame, user_flags)?;
+        self.user_frames.push(frame);
+        Ok(frame)
+    }
+
+    pub fn map_user_frame(
+        &mut self,
+        virt: VirtualAddress,
+        phys: PhysicalAddress,
+        flags: PageFlags,
+    ) -> Result<(), AddressSpaceError> {
+        let virt_addr = virt.as_usize();
+        if virt_addr == 0
+            || virt_addr >= USER_SPACE_END
+            || (virt_addr & (PAGE_SIZE - 1)) != 0
+            || (phys.as_usize() & (PAGE_SIZE - 1)) != 0
+        {
+            return Err(AddressSpaceError::InvalidUserAddress);
+        }
+
+        unsafe {
+            let root = page_table_from_phys_mut(self.root_frame);
+            let p3 = self.ensure_next_table(root.get_entry_mut(virt.p4_index()))?;
+            let p2 = self.ensure_next_table(p3.get_entry_mut(virt.p3_index()))?;
+            let p1 = self.ensure_next_table(p2.get_entry_mut(virt.p2_index()))?;
+            p1.get_entry_mut(virt.p1_index())
+                .set(phys, flags | PageFlags::PRESENT | PageFlags::USER);
+        }
+
+        Ok(())
+    }
+
+    pub unsafe fn activate(&self) -> ActiveAddressSpace {
+        let previous_cr3 = read_cr3();
+        write_cr3(self.root_frame.as_usize());
+        ActiveAddressSpace { previous_cr3 }
+    }
+
+    unsafe fn ensure_next_table(
+        &mut self,
+        entry: &mut PageTableEntry,
+    ) -> Result<&'static mut PageTable, AddressSpaceError> {
+        if !entry.is_unused() {
+            if entry.flags().contains(PageFlags::HUGE) {
+                return Err(AddressSpaceError::HugePageInPath);
+            }
+            if !entry.flags().contains(PageFlags::USER) {
+                entry.entry |= PageFlags::USER.bits();
+            }
+            return Ok(page_table_from_phys_mut(entry.addr()));
+        }
+
+        let pmm = get_pmm().ok_or(AddressSpaceError::NoPhysicalMemoryManager)?;
+        let frame = pmm.alloc_frame().ok_or(AddressSpaceError::OutOfMemory)?;
+        let table = page_table_from_phys_mut(frame);
+        table.zero();
+        entry.set(frame, PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER);
+        self.page_table_frames.push(frame);
+        Ok(table)
+    }
+}
+
+impl Drop for AddressSpace {
+    fn drop(&mut self) {
+        if let Some(pmm) = get_pmm() {
+            for frame in self.user_frames.iter().copied() {
+                pmm.free_frame(frame);
+            }
+            for frame in self.page_table_frames.iter().copied() {
+                pmm.free_frame(frame);
+            }
+        }
+    }
+}
+
+pub struct ActiveAddressSpace {
+    previous_cr3: usize,
+}
+
+impl Drop for ActiveAddressSpace {
+    fn drop(&mut self) {
+        unsafe {
+            write_cr3(self.previous_cr3);
+        }
+    }
+}
+
+pub fn run_address_space_smoke() -> bool {
+    super::serial_write("[ADDRSPACE-TEST] START\r\n");
+
+    let previous_cr3 = unsafe { read_cr3() };
+    let mut address_space = match AddressSpace::new() {
+        Ok(address_space) => address_space,
+        Err(_) => {
+            super::serial_write("[ADDRSPACE-TEST] create failed\r\n");
+            return false;
+        }
+    };
+
+    let user_page = VirtualAddress::from_usize(0x0040_0000);
+    if address_space
+        .map_user_page(user_page, PageFlags::WRITABLE)
+        .is_err()
+    {
+        super::serial_write("[ADDRSPACE-TEST] map failed\r\n");
+        return false;
+    }
+
+    unsafe {
+        let _active = address_space.activate();
+        super::serial_write("[ADDRSPACE-TEST] switched\r\n");
+
+        let ptr = user_page.as_usize() as *mut u64;
+        core::ptr::write_volatile(ptr, 0x4455_4E49_544F_5341);
+        if core::ptr::read_volatile(ptr) != 0x4455_4E49_544F_5341 {
+            super::serial_write("[ADDRSPACE-TEST] user page check failed\r\n");
+            return false;
+        }
+    }
+
+    if unsafe { read_cr3() } != previous_cr3 {
+        super::serial_write("[ADDRSPACE-TEST] restore failed\r\n");
+        return false;
+    }
+
+    super::serial_write("[ADDRSPACE-TEST] OK\r\n");
+    true
+}
+
+fn copy_kernel_half_from_active(new_root: &mut PageTable) -> Result<(), AddressSpaceError> {
+    let active_root = unsafe { page_table_from_phys_mut(PhysicalAddress(read_cr3())) };
+    for idx in PML4_KERNEL_START..512 {
+        new_root.entries[idx] = active_root.entries[idx];
+    }
+    Ok(())
+}
+
+unsafe fn page_table_from_phys_mut(phys: PhysicalAddress) -> &'static mut PageTable {
+    &mut *(phys_to_virt(phys.as_usize()) as *mut PageTable)
+}
+
+unsafe fn read_cr3() -> usize {
+    let cr3: usize;
+    core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
+    cr3 & !(PAGE_SIZE - 1)
+}
+
+unsafe fn write_cr3(cr3: usize) {
+    core::arch::asm!("mov cr3, {}", in(reg) cr3, options(nostack, preserves_flags));
 }
 
 pub struct VirtualMemoryManager {

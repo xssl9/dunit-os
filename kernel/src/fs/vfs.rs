@@ -5,6 +5,8 @@ use core::fmt;
 
 use super::memfs::MemFs;
 
+static ELF_DEMO_BYTES: &[u8] = include_bytes!("../../../build/userspace/elf_demo");
+
 pub type FileDescriptor = u32;
 pub type FileHandle = usize;
 
@@ -402,6 +404,10 @@ pub fn init() -> Result<()> {
     serial_log(b"[VFS] init START\r\n\0");
     unsafe {
         let mut vfs = VirtualFileSystem::new();
+
+        let mut elf_demo = Vec::new();
+        elf_demo.extend_from_slice(ELF_DEMO_BYTES);
+        ROOT_MEMFS.add_file("/app/elf_demo", elf_demo);
 
         vfs.mount("/", &mut ROOT_MEMFS)?;
         serial_log(b"[MEMFS] mounted as /\r\n\0");

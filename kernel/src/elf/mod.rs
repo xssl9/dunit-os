@@ -149,7 +149,7 @@ impl<'a> Iterator for ProgramHeaderIterator<'a> {
     }
 }
 
-use crate::memory::pmm::{PhysicalAddress, PhysicalMemoryManager};
+use crate::memory::pmm::PhysicalMemoryManager;
 use crate::memory::vmm::{VirtualAddress, VirtualMemoryManager, PageFlags};
 use crate::process::{Process, ProcessId};
 
@@ -264,4 +264,233 @@ impl<'a> ElfLoader<'a> {
 
         Ok(process)
     }
+}
+
+const PAGE_SIZE: usize = 4096;
+const PAGE_PRESENT: u64 = 1 << 0;
+const PAGE_WRITABLE: u64 = 1 << 1;
+const PAGE_USER: u64 = 1 << 2;
+const PAGE_HUGE: u64 = 1 << 7;
+
+fn align_down(value: usize, align: usize) -> usize {
+    value & !(align - 1)
+}
+
+fn align_up(value: usize, align: usize) -> Option<usize> {
+    value.checked_add(align - 1).map(|v| v & !(align - 1))
+}
+
+pub fn run_demo_elf(data: &[u8]) -> bool {
+    let parser = match ElfParser::new(data) {
+        Ok(parser) => parser,
+        Err(_) => {
+            crate::memory::serial_write("[ELF-TEST] parse failed\r\n");
+            return false;
+        }
+    };
+
+    if unsafe { load_into_current_address_space(&parser).is_err() } {
+        crate::memory::serial_write("[ELF-TEST] load failed\r\n");
+        return false;
+    }
+
+    crate::memory::serial_write("[ELF-TEST] userspace app started\r\n");
+    crate::syscall::begin_elf_test();
+
+    unsafe {
+        crate::hal::run_user_syscall_smoke(parser.entry_point(), USER_STACK_TOP as u64);
+    }
+
+    crate::syscall::finish_elf_test()
+}
+
+unsafe fn load_into_current_address_space(parser: &ElfParser) -> Result<(), ElfError> {
+    for ph in parser.program_headers()? {
+        if ph.p_type != PT_LOAD {
+            continue;
+        }
+        load_segment_current(parser.data, &ph)?;
+    }
+
+    let pmm = crate::memory::pmm::get_pmm().ok_or(ElfError::InvalidProgramHeader)?;
+    let hhdm = crate::memory::vmm::get_hhdm_offset() as usize;
+    if hhdm == 0 {
+        return Err(ElfError::InvalidProgramHeader);
+    }
+
+    for page in 1..=(USER_STACK_SIZE / PAGE_SIZE) {
+        let virt = USER_STACK_TOP - (page * PAGE_SIZE);
+        let phys = pmm
+            .alloc_frame()
+            .ok_or(ElfError::InvalidProgramHeader)?
+            .as_usize();
+        core::ptr::write_bytes((phys + hhdm) as *mut u8, 0, PAGE_SIZE);
+        map_current_user_page(virt, phys)?;
+    }
+
+    Ok(())
+}
+
+unsafe fn load_segment_current(data: &[u8], ph: &ProgramHeader) -> Result<(), ElfError> {
+    if ph.p_memsz < ph.p_filesz {
+        return Err(ElfError::InvalidProgramHeader);
+    }
+
+    let virt_start = ph.p_vaddr as usize;
+    let mem_size = ph.p_memsz as usize;
+    let file_size = ph.p_filesz as usize;
+    let file_start = ph.p_offset as usize;
+    let virt_end = virt_start
+        .checked_add(mem_size)
+        .ok_or(ElfError::InvalidProgramHeader)?;
+    let file_end = file_start
+        .checked_add(file_size)
+        .ok_or(ElfError::InvalidProgramHeader)?;
+
+    if file_end > data.len() {
+        return Err(ElfError::InvalidProgramHeader);
+    }
+
+    let page_start = align_down(virt_start, PAGE_SIZE);
+    let page_end = align_up(virt_end, PAGE_SIZE).ok_or(ElfError::InvalidProgramHeader)?;
+    let pmm = crate::memory::pmm::get_pmm().ok_or(ElfError::InvalidProgramHeader)?;
+    let hhdm = crate::memory::vmm::get_hhdm_offset() as usize;
+    if hhdm == 0 {
+        return Err(ElfError::InvalidProgramHeader);
+    }
+
+    for page_addr in (page_start..page_end).step_by(PAGE_SIZE) {
+        let (phys, newly_allocated) = match current_mapping_phys(page_addr)? {
+            Some(phys) => (phys, false),
+            None => {
+                let phys = pmm
+                    .alloc_frame()
+                    .ok_or(ElfError::InvalidProgramHeader)?
+                    .as_usize();
+                map_current_user_page(page_addr, phys)?;
+                (phys, true)
+            }
+        };
+        let dst_page = (phys + hhdm) as *mut u8;
+        if newly_allocated {
+            core::ptr::write_bytes(dst_page, 0, PAGE_SIZE);
+        }
+
+        let copy_start = page_addr.max(virt_start);
+        let copy_end = (page_addr + PAGE_SIZE).min(virt_start + file_size);
+        if copy_start < copy_end {
+            let src_offset = file_start + (copy_start - virt_start);
+            let dst_offset = copy_start - page_addr;
+            let copy_len = copy_end - copy_start;
+            core::ptr::copy_nonoverlapping(
+                data.as_ptr().add(src_offset),
+                dst_page.add(dst_offset),
+                copy_len,
+            );
+        }
+    }
+
+    Ok(())
+}
+
+unsafe fn current_mapping_phys(virt: usize) -> Result<Option<usize>, ElfError> {
+    let hhdm = crate::memory::vmm::get_hhdm_offset() as usize;
+    if hhdm == 0 {
+        return Err(ElfError::InvalidProgramHeader);
+    }
+
+    let mut cr3: usize;
+    core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
+    let pml4 = ((cr3 & !0xfff) + hhdm) as *mut u64;
+
+    let p4 = (virt >> 39) & 0x1ff;
+    let p3 = (virt >> 30) & 0x1ff;
+    let p2 = (virt >> 21) & 0x1ff;
+    let p1 = (virt >> 12) & 0x1ff;
+
+    let pml4e = core::ptr::read_volatile(pml4.add(p4));
+    if pml4e & PAGE_PRESENT == 0 || pml4e & PAGE_HUGE != 0 {
+        return Ok(None);
+    }
+    let pdpt = (((pml4e as usize) & !0xfff) + hhdm) as *mut u64;
+
+    let pdpte = core::ptr::read_volatile(pdpt.add(p3));
+    if pdpte & PAGE_PRESENT == 0 {
+        return Ok(None);
+    }
+    if pdpte & PAGE_HUGE != 0 {
+        return Ok(Some((pdpte as usize & !0x3fff_ffff) + (virt & 0x3fff_ffff)));
+    }
+    let pd = (((pdpte as usize) & !0xfff) + hhdm) as *mut u64;
+
+    let pde = core::ptr::read_volatile(pd.add(p2));
+    if pde & PAGE_PRESENT == 0 {
+        return Ok(None);
+    }
+    if pde & PAGE_HUGE != 0 {
+        return Ok(Some((pde as usize & !0x1f_ffff) + (virt & 0x1f_ffff)));
+    }
+    let pt = (((pde as usize) & !0xfff) + hhdm) as *mut u64;
+
+    let pte = core::ptr::read_volatile(pt.add(p1));
+    if pte & PAGE_PRESENT == 0 {
+        return Ok(None);
+    }
+
+    Ok(Some((pte as usize) & !0xfff))
+}
+
+unsafe fn map_current_user_page(virt: usize, phys: usize) -> Result<(), ElfError> {
+    if virt & 0xfff != 0 || phys & 0xfff != 0 {
+        return Err(ElfError::InvalidProgramHeader);
+    }
+
+    let hhdm = crate::memory::vmm::get_hhdm_offset() as usize;
+    if hhdm == 0 {
+        return Err(ElfError::InvalidProgramHeader);
+    }
+
+    let mut cr3: usize;
+    core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
+    let pml4 = ((cr3 & !0xfff) + hhdm) as *mut u64;
+
+    let p4 = (virt >> 39) & 0x1ff;
+    let p3 = (virt >> 30) & 0x1ff;
+    let p2 = (virt >> 21) & 0x1ff;
+    let p1 = (virt >> 12) & 0x1ff;
+
+    let pdpt = ensure_next_table(pml4.add(p4), hhdm)?;
+    let pd = ensure_next_table(pdpt.add(p3), hhdm)?;
+    let pt = ensure_next_table(pd.add(p2), hhdm)?;
+    core::ptr::write_volatile(pt.add(p1), (phys as u64) | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+    flush_user_mapping(virt);
+    Ok(())
+}
+
+unsafe fn ensure_next_table(entry: *mut u64, hhdm: usize) -> Result<*mut u64, ElfError> {
+    let mut value = core::ptr::read_volatile(entry);
+    if value & PAGE_PRESENT != 0 {
+        if value & PAGE_HUGE != 0 {
+            return Err(ElfError::InvalidProgramHeader);
+        }
+        if value & (PAGE_USER | PAGE_WRITABLE) != (PAGE_USER | PAGE_WRITABLE) {
+            value |= PAGE_USER | PAGE_WRITABLE;
+            core::ptr::write_volatile(entry, value);
+        }
+        return Ok((((value as usize) & !0xfff) + hhdm) as *mut u64);
+    }
+
+    let pmm = crate::memory::pmm::get_pmm().ok_or(ElfError::InvalidProgramHeader)?;
+    let frame = pmm
+        .alloc_frame()
+        .ok_or(ElfError::InvalidProgramHeader)?
+        .as_usize();
+    let table = (frame + hhdm) as *mut u64;
+    core::ptr::write_bytes(table as *mut u8, 0, PAGE_SIZE);
+    core::ptr::write_volatile(entry, (frame as u64) | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+    Ok(table)
+}
+
+unsafe fn flush_user_mapping(virt: usize) {
+    core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
 }

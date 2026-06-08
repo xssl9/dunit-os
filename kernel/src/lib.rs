@@ -331,6 +331,62 @@ fn terminal_write_file(
     }
 }
 
+fn read_vfs_file(cwd: &str, path: &str) -> Result<alloc::vec::Vec<u8>, fs::vfs::VfsError> {
+    let vfs = fs::vfs::get_vfs().ok_or(fs::vfs::VfsError::IoError)?;
+    let fd = vfs.open_at(cwd, path, fs::vfs::OpenFlags::READ)?;
+    let mut data = alloc::vec::Vec::new();
+    let mut buf = [0u8; 512];
+
+    loop {
+        match vfs.read(fd, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => data.extend_from_slice(&buf[..n]),
+            Err(error) => {
+                let _ = vfs.close(fd);
+                return Err(error);
+            }
+        }
+    }
+
+    vfs.close(fd)?;
+    Ok(data)
+}
+
+fn terminal_exec(console: &mut terminal::FbConsole, cwd: &str, path: &str) {
+    if path.is_empty() {
+        console.write_str("exec: missing path\n");
+        return;
+    }
+
+    let normalized = match fs::vfs::normalize_path(path, cwd) {
+        Ok(path) => path,
+        Err(error) => {
+            write_vfs_error(console, "exec", error);
+            return;
+        }
+    };
+
+    serial_write("[EXEC] loading ");
+    serial_write(&normalized);
+    serial_write("\r\n");
+
+    match read_vfs_file(cwd, path) {
+        Ok(data) => {
+            if elf::run_demo_elf(&data) {
+                serial_write("[EXEC] ");
+                serial_write(&normalized);
+                serial_write(" returned\r\n");
+                console.write_str("exec: ");
+                console.write_str(&normalized);
+                console.write_str(" returned\n");
+            } else {
+                console.write_str("exec: ELF launch failed\n");
+            }
+        }
+        Err(error) => write_vfs_error(console, "exec", error),
+    }
+}
+
 fn terminal_tree_path(
     console: &mut terminal::FbConsole,
     vfs: &mut fs::vfs::VirtualFileSystem,
@@ -374,6 +430,12 @@ fn terminal_handle_fs_command(console: &mut terminal::FbConsole, cmd_str: &str) 
 
     if trimmed == "dufetch" {
         terminal_dufetch(console);
+        return true;
+    }
+
+    if trimmed == "exec" || trimmed.starts_with("exec ") {
+        let path = trimmed.strip_prefix("exec").unwrap_or("").trim();
+        terminal_exec(console, cwd, path);
         return true;
     }
 
@@ -868,7 +930,7 @@ pub extern "C" fn kernel_main(
     } else {
         screen_log("[FAIL] Userspace syscall smoke failed", true);
     }
-    
+
     screen_log("[ .. ] Configuring interrupt handlers", false);
     screen_log("[ OK ] IRQ 1: Keyboard interrupt enabled", false);
     screen_log("[ OK ] IRQ 0/12 masked for terminal mode", false);
