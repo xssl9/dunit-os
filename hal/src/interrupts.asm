@@ -75,7 +75,12 @@ isr_common_stub:
     push r15
     
     mov rdi, rsp
+    mov rax, rsp
+    and rsp, -16
+    sub rsp, 16
+    mov [rsp], rax
     call interrupt_handler
+    mov rsp, [rsp]
     
     pop r15
     pop r14

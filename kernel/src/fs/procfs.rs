@@ -1,7 +1,6 @@
 use super::vfs::{
     DirEntry, FileSystem, FileHandle, FileStat, FileType, OpenFlags, Result, VfsError,
 };
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -48,11 +47,21 @@ impl FileSystem for ProcFs {
         }
 
         let mut entries = Vec::new();
-        entries.push(DirEntry {
-            name: String::from("1"),
-            file_type: FileType::File,
-        });
+        entries.push(DirEntry::new("1", FileType::File));
         Ok(entries)
+    }
+
+    fn readdir_into(&mut self, path: &str, entries: &mut [DirEntry]) -> Result<usize> {
+        if !path.is_empty() {
+            return Err(VfsError::NotADirectory);
+        }
+
+        if !entries.is_empty() {
+            entries[0] = DirEntry::new("1", FileType::File);
+            Ok(1)
+        } else {
+            Ok(0)
+        }
     }
 
     fn create(&mut self, _path: &str) -> Result<()> {
@@ -60,6 +69,14 @@ impl FileSystem for ProcFs {
     }
 
     fn mkdir(&mut self, _path: &str) -> Result<()> {
+        Err(VfsError::Unsupported)
+    }
+
+    fn remove(&mut self, _path: &str) -> Result<()> {
+        Err(VfsError::Unsupported)
+    }
+
+    fn truncate(&mut self, _path: &str) -> Result<()> {
         Err(VfsError::Unsupported)
     }
 

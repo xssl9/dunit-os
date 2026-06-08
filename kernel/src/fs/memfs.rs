@@ -118,9 +118,16 @@ impl FileSystem for MemFs {
             FileType::Directory => Err(VfsError::IsADirectory),
             FileType::File => {
                 let handle = self.next_handle.fetch_add(1, Ordering::SeqCst);
+                let offset = if flags == OpenFlags::Append {
+                    self.node_index(path)
+                        .map(|idx| self.nodes[idx].data.len())
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
                 self.open_handles.push((handle, OpenMemHandle {
                     path: String::from(Self::clean(path)),
-                    offset: 0,
+                    offset,
                     flags,
                 }));
                 Ok(handle)
@@ -182,32 +189,52 @@ impl FileSystem for MemFs {
     }
 
     fn readdir(&mut self, path: &str) -> Result<Vec<DirEntry>> {
-        if self.node_type(path) != Some(FileType::Directory) {
-            return Err(VfsError::NotADirectory);
-        }
-
+        let mut buffer = [DirEntry::empty(); 16];
+        let count = self.readdir_into(path, &mut buffer)?;
         let mut entries = Vec::new();
+        for entry in buffer.iter().take(count) {
+            entries.push(*entry);
+        }
+        Ok(entries)
+    }
+
+    fn readdir_into(&mut self, path: &str, entries: &mut [DirEntry]) -> Result<usize> {
+        let mut count = 0;
         let clean = Self::clean(path);
 
         if clean.is_empty() {
-            for dir in BASE_DIRS.iter() {
-                entries.push(DirEntry {
-                    name: String::from(*dir),
-                    file_type: FileType::Directory,
-                });
+            for base_dir in BASE_DIRS.iter() {
+                if count < entries.len() {
+                    entries[count] = DirEntry::new(base_dir, FileType::Directory);
+                    count += 1;
+                }
             }
+
+            for node in self.nodes.iter() {
+                if Self::is_direct_child("", &node.path) && !Self::is_base_dir(&node.path) {
+                    if count < entries.len() {
+                        entries[count] = DirEntry::new(Self::basename(&node.path), node.file_type);
+                        count += 1;
+                    }
+                }
+            }
+            return Ok(count);
+        }
+
+        if self.node_type(clean) != Some(FileType::Directory) {
+            return Err(VfsError::NotADirectory);
         }
 
         for node in self.nodes.iter() {
             if Self::is_direct_child(clean, &node.path) {
-                entries.push(DirEntry {
-                    name: String::from(Self::basename(&node.path)),
-                    file_type: node.file_type,
-                });
+                if count < entries.len() {
+                    entries[count] = DirEntry::new(Self::basename(&node.path), node.file_type);
+                    count += 1;
+                }
             }
         }
 
-        Ok(entries)
+        Ok(count)
     }
 
     fn create(&mut self, path: &str) -> Result<()> {
@@ -247,6 +274,33 @@ impl FileSystem for MemFs {
             file_type: FileType::Directory,
             data: Vec::new(),
         });
+        Ok(())
+    }
+
+    fn remove(&mut self, path: &str) -> Result<()> {
+        let clean = Self::clean(path);
+        if clean.is_empty() {
+            return Err(VfsError::InvalidPath);
+        }
+        let idx = self.node_index(clean).ok_or(VfsError::NotFound)?;
+        if self.nodes[idx].file_type != FileType::File {
+            return Err(VfsError::IsADirectory);
+        }
+        self.nodes.remove(idx);
+        self.open_handles.retain(|(_, handle)| handle.path != clean);
+        Ok(())
+    }
+
+    fn truncate(&mut self, path: &str) -> Result<()> {
+        let clean = Self::clean(path);
+        if clean.is_empty() {
+            return Err(VfsError::InvalidPath);
+        }
+        let idx = self.node_index(clean).ok_or(VfsError::NotFound)?;
+        if self.nodes[idx].file_type != FileType::File {
+            return Err(VfsError::IsADirectory);
+        }
+        self.nodes[idx].data.clear();
         Ok(())
     }
 

@@ -85,12 +85,24 @@ impl FileSystem for DevFs {
 
         let mut entries = Vec::new();
         for name in self.devices.keys() {
-            entries.push(DirEntry {
-                name: name.clone(),
-                file_type: FileType::Device,
-            });
+            entries.push(DirEntry::new(name, FileType::Device));
         }
         Ok(entries)
+    }
+
+    fn readdir_into(&mut self, path: &str, entries: &mut [DirEntry]) -> Result<usize> {
+        if !path.is_empty() {
+            return Err(VfsError::NotADirectory);
+        }
+
+        let mut count = 0;
+        for name in self.devices.keys() {
+            if count < entries.len() {
+                entries[count] = DirEntry::new(name, FileType::Device);
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 
     fn create(&mut self, _path: &str) -> Result<()> {
@@ -98,6 +110,14 @@ impl FileSystem for DevFs {
     }
 
     fn mkdir(&mut self, _path: &str) -> Result<()> {
+        Err(VfsError::Unsupported)
+    }
+
+    fn remove(&mut self, _path: &str) -> Result<()> {
+        Err(VfsError::Unsupported)
+    }
+
+    fn truncate(&mut self, _path: &str) -> Result<()> {
         Err(VfsError::Unsupported)
     }
 

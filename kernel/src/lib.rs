@@ -29,8 +29,31 @@ use core::panic::PanicInfo;
 
 #[cfg(not(test))]
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    loop {}
+fn panic(info: &PanicInfo) -> ! {
+    use core::fmt::Write;
+
+    struct SerialPanicWriter;
+
+    impl core::fmt::Write for SerialPanicWriter {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            serial_write(s);
+            Ok(())
+        }
+    }
+
+    unsafe {
+        hal::hal_disable_interrupts();
+    }
+
+    serial_write("\r\n[PANIC] ");
+    let _ = write!(SerialPanicWriter, "{}", info);
+    serial_write("\r\n");
+
+    loop {
+        unsafe {
+            core::arch::asm!("hlt", options(nomem, nostack));
+        }
+    }
 }
 
 #[repr(C)]
@@ -60,6 +83,7 @@ static mut HISTORY_INDEX: usize = 0;
 static mut HISTORY_POSITION: isize = -1;
 static mut TERMINAL_CWD: [u8; 256] = [0; 256];
 static mut TERMINAL_CWD_LEN: usize = 0;
+static mut TERMINAL_DIR_ENTRIES: [fs::vfs::DirEntry; 16] = [fs::vfs::DirEntry::empty(); 16];
 
 fn serial_write(s: &str) {
     for byte in s.bytes() {
@@ -98,7 +122,7 @@ fn write_vfs_error(console: &mut terminal::FbConsole, command: &str, error: fs::
     console.write_str(command);
     console.write_str(": ");
     console.write_str(match error {
-        fs::vfs::VfsError::NotFound => "not found",
+        fs::vfs::VfsError::NotFound => "file not found",
         fs::vfs::VfsError::PermissionDenied => "permission denied",
         fs::vfs::VfsError::InvalidDescriptor => "invalid descriptor",
         fs::vfs::VfsError::AlreadyExists => "already exists",
@@ -109,6 +133,105 @@ fn write_vfs_error(console: &mut terminal::FbConsole, command: &str, error: fs::
         fs::vfs::VfsError::IoError => "I/O error",
     });
     console.write_str("\n");
+}
+
+fn terminal_write_file(
+    console: &mut terminal::FbConsole,
+    cwd: &str,
+    path: &str,
+    text: &str,
+    append: bool,
+) {
+    if path.is_empty() {
+        console.write_str("echo: missing output file\n");
+        return;
+    }
+
+    if let Some(vfs) = fs::vfs::get_vfs() {
+        match vfs.stat_at(cwd, path) {
+            Ok(stat) if stat.file_type == fs::vfs::FileType::Directory => {
+                console.write_str("echo: is a directory\n");
+                return;
+            }
+            Ok(_) => {}
+            Err(fs::vfs::VfsError::NotFound) => {
+                if let Err(error) = vfs.create_at(cwd, path) {
+                    write_vfs_error(console, "echo", error);
+                    return;
+                }
+            }
+            Err(error) => {
+                write_vfs_error(console, "echo", error);
+                return;
+            }
+        }
+
+        if !append {
+            if let Err(error) = vfs.truncate_at(cwd, path) {
+                write_vfs_error(console, "echo", error);
+                return;
+            }
+        }
+
+        let flags = if append {
+            fs::vfs::OpenFlags::Append
+        } else {
+            fs::vfs::OpenFlags::WriteOnly
+        };
+
+        match vfs.open_at(cwd, path, flags) {
+            Ok(fd) => {
+                let mut data = alloc::vec::Vec::new();
+                data.extend_from_slice(text.as_bytes());
+                data.push(b'\n');
+
+                if let Err(error) = vfs.write(fd, &data) {
+                    write_vfs_error(console, "echo", error);
+                }
+                let _ = vfs.close(fd);
+            }
+            Err(error) => write_vfs_error(console, "echo", error),
+        }
+    } else {
+        console.write_str("echo: VFS not initialized\n");
+    }
+}
+
+fn terminal_tree_path(
+    console: &mut terminal::FbConsole,
+    vfs: &mut fs::vfs::VirtualFileSystem,
+    path: &str,
+    depth: usize,
+) {
+    if depth > 16 {
+        return;
+    }
+
+    let mut entries = [fs::vfs::DirEntry::empty(); 16];
+    match vfs.readdir_into_at("/", path, &mut entries) {
+        Ok(count) => {
+            for entry in entries.iter().take(count) {
+                for _ in 0..depth {
+                    console.write_str("  ");
+                }
+                console.write_str(entry.name());
+                if entry.file_type == fs::vfs::FileType::Directory {
+                    console.write_str("/");
+                }
+                console.write_str("\n");
+
+                if entry.file_type == fs::vfs::FileType::Directory {
+                    let mut child_path = alloc::string::String::from(path);
+                    if !child_path.ends_with('/') {
+                        child_path.push('/');
+                    }
+                    child_path.push_str(entry.name());
+                    terminal_tree_path(console, vfs, &child_path, depth + 1);
+                }
+            }
+        }
+        Err(error) => write_vfs_error(console, "tree", error),
+    }
 }
 
 fn terminal_handle_fs_command(console: &mut terminal::FbConsole, cmd_str: &str) -> bool {
@@ -125,13 +248,14 @@ fn terminal_handle_fs_command(console: &mut terminal::FbConsole, cmd_str: &str) 
         let path = trimmed.strip_prefix("ls").unwrap_or("").trim();
         let path = if path.is_empty() { "." } else { path };
         if let Some(vfs) = fs::vfs::get_vfs() {
-            match vfs.readdir_at(cwd, path) {
-                Ok(entries) => {
-                    for (idx, entry) in entries.iter().enumerate() {
+            let entries = unsafe { &mut TERMINAL_DIR_ENTRIES };
+            match vfs.readdir_into_at(cwd, path, entries) {
+                Ok(count) => {
+                    for (idx, entry) in entries.iter().take(count).enumerate() {
                         if idx > 0 {
                             console.write_str("  ");
                         }
-                        console.write_str(&entry.name);
+                        console.write_str(entry.name());
                     }
                     console.write_str("\n");
                 }
@@ -233,8 +357,52 @@ fn terminal_handle_fs_command(console: &mut terminal::FbConsole, cmd_str: &str) 
         return true;
     }
 
+    if trimmed.starts_with("rm ") {
+        let path = trimmed[3..].trim();
+        if path.is_empty() {
+            console.write_str("rm: missing operand\n");
+        } else if let Some(vfs) = fs::vfs::get_vfs() {
+            if let Err(error) = vfs.remove_at(cwd, path) {
+                write_vfs_error(console, "rm", error);
+            }
+        } else {
+            console.write_str("rm: VFS not initialized\n");
+        }
+        return true;
+    }
+
+    if trimmed == "tree" || trimmed.starts_with("tree ") {
+        let path = trimmed.strip_prefix("tree").unwrap_or("").trim();
+        let path = if path.is_empty() { "." } else { path };
+        if let Some(vfs) = fs::vfs::get_vfs() {
+            match vfs.normalize_at(cwd, path) {
+                Ok(root) => {
+                    console.write_str(&root);
+                    console.write_str("\n");
+                    terminal_tree_path(console, vfs, &root, 1);
+                }
+                Err(error) => write_vfs_error(console, "tree", error),
+            }
+        } else {
+            console.write_str("tree: VFS not initialized\n");
+        }
+        return true;
+    }
+
     if trimmed == "echo" || trimmed.starts_with("echo ") {
         let text = trimmed.strip_prefix("echo").unwrap_or("").trim_start();
+        if let Some(idx) = text.find(">>") {
+            let value = text[..idx].trim_end();
+            let path = text[idx + 2..].trim();
+            terminal_write_file(console, cwd, path, value, true);
+            return true;
+        }
+        if let Some(idx) = text.find('>') {
+            let value = text[..idx].trim_end();
+            let path = text[idx + 1..].trim();
+            terminal_write_file(console, cwd, path, value, false);
+            return true;
+        }
         console.write_str(text);
         console.write_str("\n");
         return true;
@@ -554,10 +722,9 @@ pub extern "C" fn kernel_main(
     }
     
     screen_log("[ .. ] Configuring interrupt handlers", false);
-    screen_log("[ OK ] IRQ 0: Timer interrupt configured", false);
-    screen_log("[ OK ] IRQ 1: Keyboard interrupt configured", false);
-    screen_log("[ OK ] IRQ 12: Mouse interrupt configured", false);
-    screen_log("[ OK ] Hardware interrupts enabled", false);
+    screen_log("[ OK ] IRQ 1: Keyboard interrupt enabled", false);
+    screen_log("[ OK ] IRQ 0/12 masked for terminal mode", false);
+    screen_log("[ OK ] Hardware interrupts configured", false);
     
     screen_log("[ OK ] System initialization complete", false);
     screen_log("[ OK ] Dunit OS (Green Tea) ready", false);
@@ -731,7 +898,7 @@ pub extern "C" fn kernel_main(
                                                 ""
                                             } else {
                                                 match cmd_str {
-                                        "help" => "Available commands:\n  help     - Show this help\n  ls       - List files\n  pwd      - Print working directory\n  cd       - Change directory\n  mkdir    - Create directory\n  touch    - Create file\n  cat      - Display file contents\n  echo     - Print text\n  exec     - Execute userspace program\n  ps       - Process list\n  kill     - Kill process\n  top      - Process monitor\n  uname    - System information\n  date     - Show date and time\n  whoami   - Current user\n  uptime   - System uptime\n  free     - Memory usage\n  exit     - Halt system",
+                                        "help" => "Available commands:\n  help     - Show this help\n  ls       - List files\n  pwd      - Print working directory\n  cd       - Change directory\n  mkdir    - Create directory\n  touch    - Create file\n  cat      - Display file contents\n  echo     - Print text\n  rm       - Remove file\n  tree     - Show directory tree\n  exec     - Execute userspace program\n  ps       - Process list\n  kill     - Kill process\n  top      - Process monitor\n  uname    - System information\n  date     - Show date and time\n  whoami   - Current user\n  uptime   - System uptime\n  free     - Memory usage\n  exit     - Halt system",
                                         "uname" => "Dunit OS",
                                         "uname -a" => "Dunit OS 1.0 Green Tea x86_64",
                                         "date" => "Tue May 5 12:00:00 UTC 2026",

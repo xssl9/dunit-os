@@ -14,6 +14,7 @@ pub enum OpenFlags {
     WriteOnly,
     ReadWrite,
     Create,
+    Append,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,10 +24,42 @@ pub enum FileType {
     Device,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirEntry {
-    pub name: String,
+    name: [u8; 64],
+    name_len: usize,
     pub file_type: FileType,
+}
+
+impl DirEntry {
+    pub const fn empty() -> Self {
+        Self {
+            name: [0; 64],
+            name_len: 0,
+            file_type: FileType::File,
+        }
+    }
+
+    pub fn new(name: &str, file_type: FileType) -> Self {
+        let mut entry = Self {
+            name: [0; 64],
+            name_len: 0,
+            file_type,
+        };
+        let bytes = name.as_bytes();
+        let len = bytes.len().min(entry.name.len());
+        let mut idx = 0;
+        while idx < len {
+            entry.name[idx] = bytes[idx];
+            idx += 1;
+        }
+        entry.name_len = len;
+        entry
+    }
+
+    pub fn name(&self) -> &str {
+        core::str::from_utf8(&self.name[..self.name_len]).unwrap_or("<invalid>")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,8 +105,11 @@ pub trait FileSystem: Send {
     fn write(&mut self, handle: FileHandle, buf: &[u8]) -> Result<usize>;
     fn close(&mut self, handle: FileHandle) -> Result<()>;
     fn readdir(&mut self, path: &str) -> Result<Vec<DirEntry>>;
+    fn readdir_into(&mut self, path: &str, entries: &mut [DirEntry]) -> Result<usize>;
     fn create(&mut self, path: &str) -> Result<()>;
     fn mkdir(&mut self, path: &str) -> Result<()>;
+    fn remove(&mut self, path: &str) -> Result<()>;
+    fn truncate(&mut self, path: &str) -> Result<()>;
     fn stat(&mut self, path: &str) -> Result<FileStat>;
 }
 
@@ -139,17 +175,22 @@ impl VirtualFileSystem {
         }
     }
 
-    fn resolve_path(&self, path: &str, cwd: &str) -> Result<(*mut dyn FileSystem, String)> {
-        let normalized = normalize_path(path, cwd)?;
+    fn resolve_path<'a>(
+        &self,
+        path: &str,
+        cwd: &str,
+        buffer: &'a mut [u8; 256],
+    ) -> Result<(*mut dyn FileSystem, &'a str)> {
+        let normalized = normalize_path_into(path, cwd, buffer)?;
         let fs = self.root_fs.ok_or(VfsError::NotFound)?;
-        let relative = normalized.trim_start_matches('/').into();
+        let relative = normalized.trim_start_matches('/');
 
         Ok((fs, relative))
     }
 
     pub fn open_at(&mut self, cwd: &str, path: &str, flags: OpenFlags) -> Result<FileDescriptor> {
-        let (fs, relative_path) = self.resolve_path(path, cwd)?;
-        let handle = unsafe { (&mut *fs).open(&relative_path, flags)? };
+        let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut VFS_PATH_BUFFER)? };
+        let handle = unsafe { (&mut *fs).open(relative_path, flags)? };
 
         let fd = self.next_fd;
         self.next_fd += 1;
@@ -181,23 +222,43 @@ impl VirtualFileSystem {
     }
 
     pub fn readdir_at(&mut self, cwd: &str, path: &str) -> Result<Vec<DirEntry>> {
-        let (fs, relative_path) = self.resolve_path(path, cwd)?;
-        unsafe { (&mut *fs).readdir(&relative_path) }
+        let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut VFS_PATH_BUFFER)? };
+        unsafe { (&mut *fs).readdir(relative_path) }
+    }
+
+    pub fn readdir_into_at(
+        &mut self,
+        cwd: &str,
+        path: &str,
+        entries: &mut [DirEntry],
+    ) -> Result<usize> {
+        let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut VFS_PATH_BUFFER)? };
+        unsafe { (&mut *fs).readdir_into(relative_path, entries) }
     }
 
     pub fn create_at(&mut self, cwd: &str, path: &str) -> Result<()> {
-        let (fs, relative_path) = self.resolve_path(path, cwd)?;
-        unsafe { (&mut *fs).create(&relative_path) }
+        let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut VFS_PATH_BUFFER)? };
+        unsafe { (&mut *fs).create(relative_path) }
     }
 
     pub fn mkdir_at(&mut self, cwd: &str, path: &str) -> Result<()> {
-        let (fs, relative_path) = self.resolve_path(path, cwd)?;
-        unsafe { (&mut *fs).mkdir(&relative_path) }
+        let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut VFS_PATH_BUFFER)? };
+        unsafe { (&mut *fs).mkdir(relative_path) }
+    }
+
+    pub fn remove_at(&mut self, cwd: &str, path: &str) -> Result<()> {
+        let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut VFS_PATH_BUFFER)? };
+        unsafe { (&mut *fs).remove(relative_path) }
+    }
+
+    pub fn truncate_at(&mut self, cwd: &str, path: &str) -> Result<()> {
+        let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut VFS_PATH_BUFFER)? };
+        unsafe { (&mut *fs).truncate(relative_path) }
     }
 
     pub fn stat_at(&mut self, cwd: &str, path: &str) -> Result<FileStat> {
-        let (fs, relative_path) = self.resolve_path(path, cwd)?;
-        unsafe { (&mut *fs).stat(&relative_path) }
+        let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut VFS_PATH_BUFFER)? };
+        unsafe { (&mut *fs).stat(relative_path) }
     }
 
     pub fn normalize_at(&self, cwd: &str, path: &str) -> Result<String> {
@@ -212,44 +273,79 @@ impl Default for VirtualFileSystem {
 }
 
 pub fn normalize_path(path: &str, cwd: &str) -> Result<String> {
+    let mut buffer = [0u8; 256];
+    let normalized = normalize_path_into(path, cwd, &mut buffer)?;
+    Ok(String::from(normalized))
+}
+
+pub fn normalize_path_into<'a>(
+    path: &str,
+    cwd: &str,
+    out: &'a mut [u8; 256],
+) -> Result<&'a str> {
+    let mut len = 1;
+    out[0] = b'/';
+
     if path.is_empty() {
-        return normalize_path(cwd, "/");
-    }
-
-    let mut combined = String::new();
-    if path.starts_with('/') {
-        combined.push_str(path);
+        append_path_components(cwd, out, &mut len)?;
+    } else if !path.starts_with('/') {
+        append_path_components(cwd, out, &mut len)?;
+        append_path_components(path, out, &mut len)?;
     } else {
-        combined.push_str(if cwd.is_empty() { "/" } else { cwd });
-        if !combined.ends_with('/') {
-            combined.push('/');
-        }
-        combined.push_str(path);
+        append_path_components(path, out, &mut len)?;
     }
 
-    let mut parts: Vec<&str> = Vec::new();
-    for part in combined.split('/') {
+    core::str::from_utf8(&out[..len]).map_err(|_| VfsError::InvalidPath)
+}
+
+fn append_path_components(path: &str, out: &mut [u8; 256], len: &mut usize) -> Result<()> {
+    for part in path.split('/') {
         match part {
             "" | "." => {}
-            ".." => {
-                parts.pop();
-            }
-            _ => parts.push(part),
+            ".." => pop_path_component(out, len),
+            _ => push_path_component(part, out, len)?,
         }
     }
 
-    let mut normalized = String::from("/");
-    for (idx, part) in parts.iter().enumerate() {
-        if idx > 0 {
-            normalized.push('/');
-        }
-        normalized.push_str(part);
+    Ok(())
+}
+
+fn push_path_component(part: &str, out: &mut [u8; 256], len: &mut usize) -> Result<()> {
+    let part_bytes = part.as_bytes();
+    let needs_slash = *len > 1;
+    let required = part_bytes.len() + if needs_slash { 1 } else { 0 };
+
+    if *len + required > out.len() {
+        return Err(VfsError::InvalidPath);
     }
-    Ok(normalized)
+
+    if needs_slash {
+        out[*len] = b'/';
+        *len += 1;
+    }
+
+    out[*len..*len + part_bytes.len()].copy_from_slice(part_bytes);
+    *len += part_bytes.len();
+    Ok(())
+}
+
+fn pop_path_component(out: &[u8; 256], len: &mut usize) {
+    if *len <= 1 {
+        *len = 1;
+        return;
+    }
+
+    let mut idx = *len - 1;
+    while idx > 0 && out[idx] != b'/' {
+        idx -= 1;
+    }
+
+    *len = if idx == 0 { 1 } else { idx };
 }
 
 static mut VFS_INSTANCE: Option<VirtualFileSystem> = None;
 static mut ROOT_MEMFS: MemFs = MemFs::empty();
+static mut VFS_PATH_BUFFER: [u8; 256] = [0; 256];
 
 extern "C" {
     fn serial_write(s: *const u8);

@@ -193,6 +193,7 @@ impl FbConsole {
     }
 
     pub fn write_str(&mut self, s: &str) {
+        serial_write_text(s);
         for c in s.chars() {
             self.draw_char(c);
         }
@@ -327,6 +328,38 @@ static mut CONSOLE_INITIALIZED: bool = false;
 extern "C" {
     fn serial_write(s: *const u8);
     fn screen_log_c(text: *const u8, is_error: bool);
+}
+
+fn serial_write_byte(byte: u8) {
+    unsafe {
+        loop {
+            let mut status: u8;
+            core::arch::asm!(
+                "in al, dx",
+                out("al") status,
+                in("dx") 0x3FDu16,
+                options(nomem, nostack)
+            );
+            if (status & 0x20) != 0 {
+                break;
+            }
+        }
+        core::arch::asm!(
+            "out dx, al",
+            in("dx") 0x3F8u16,
+            in("al") byte,
+            options(nomem, nostack)
+        );
+    }
+}
+
+fn serial_write_text(text: &str) {
+    for byte in text.bytes() {
+        if byte == b'\n' {
+            serial_write_byte(b'\r');
+        }
+        serial_write_byte(byte);
+    }
 }
 
 pub fn init(fb_addr: *mut u32, width: usize, height: usize, pitch: usize) {

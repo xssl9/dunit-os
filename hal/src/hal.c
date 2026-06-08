@@ -25,8 +25,10 @@ void hal_init(void) {
     hal_outb(0xA1, 0x02);
     hal_outb(0x21, 0x01);
     hal_outb(0xA1, 0x01);
-    hal_outb(0x21, 0x0);
-    hal_outb(0xA1, 0x0);
+    /* Only PS/2 keyboard IRQ is needed this early. Keep timer and other
+       devices masked until their paths are explicitly hardened. */
+    hal_outb(0x21, 0xFD);
+    hal_outb(0xA1, 0xFF);
     
     hal_enable_interrupts();
 }
