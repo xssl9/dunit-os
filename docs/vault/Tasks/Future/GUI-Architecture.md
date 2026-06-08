@@ -1,74 +1,61 @@
-# 🔮 GUI Architecture — Display Server
+# GUI Architecture - Display Server
 
-**Статус:** 🔮 Будущее  
-**Источник идеи:** [[../../Origin/VISION|VISION]] (.kiro) + Redox Orbital  
-**Смотри сначала:** [[../InProgress/GUI-Improvements|GUI Improvements (текущее)]]  
-**Требования:** [[../../Origin/REQUIREMENTS|REQ-8, REQ-9]]
-
----
-
-## Проблема текущего подхода
-
-Сейчас GUI рисует напрямую в framebuffer — это как inline стили в HTML.  
-Цель — сделать **Display Server** (аналог CSS-классов / layout engine):
-приложения не знают про пиксели, только про окна и события.
+**Status:** PLANNED  
+**Source idea:** [[../../Origin/VISION|VISION]] + Redox Orbital-style architecture  
+**See first:** [[../InProgress/GUI-Improvements|GUI Improvements]]  
+**Related requirements:** [[../../Origin/REQUIREMENTS|REQ-8, REQ-9]]
 
 ---
 
-## Референс — Redox Orbital
+## Current State
 
-Redox решил это через:
-- **Orbital** — display server, работает как userspace процесс
-- Приложения открывают файл `/scheme/orbital` через VFS
-- Получают "окно" — буфер + события (mouse, keyboard)
-- Нет X11, нет wayland — своя минимальная схема
+The current GUI path draws directly through framebuffer-oriented kernel code. That is acceptable for experiments, boot visuals, and early demos, but it is not the final application model.
 
-Брать код напрямую нельзя (другой IPC), но **архитектура** — хороший референс.
+The reliable user-facing environment today is [[../Completed/Terminal-Mode|Terminal Mode]].
 
 ---
 
-## Наш план
+## Target Direction
 
-```
-Приложение
-    │ syscall / IPC
-    ▼
-Display Server (userspace, Ring 3)
-    │ shared memory (window buffer)
-    │ message: RenderFrame
-    ▼
-Video Driver (userspace, Ring 3)
-    │ blit
-    ▼
-Framebuffer (физическая память)
+Long term, GUI should move toward a display-server model:
+
+```text
+Application
+    -> syscall / IPC
+Display Server (userspace)
+    -> window buffers + events
+Video / framebuffer backend
+    -> physical framebuffer
 ```
 
----
-
-## Чеклист
-
-- [ ] Определить IPC протокол (message types)
-- [ ] Реализовать shared memory для window buffers
-- [ ] Display Server: create_window / destroy_window
-- [ ] Display Server: compositor (z-order)
-- [ ] Интеграция egui для рендера рамок/декораций
-- [ ] Video Driver: double buffering + swap
-- [ ] Mouse cursor через Display Server
-- [ ] Focus management
+This would keep applications away from raw pixels and allow windows, focus, events, and composition to become explicit system contracts.
 
 ---
 
-## Зависимости
+## Planned Work
 
-- [[../InProgress/Drivers|Drivers]] — нужен IPC в ядре
-- [[../Future/Filesystem|Filesystem]] — для `/scheme/orbital`-подобного механизма (опционально)
+- Define IPC message types.
+- Define window create/destroy API.
+- Define event delivery for keyboard/mouse.
+- Add shared-memory or buffer handoff strategy.
+- Add compositor with z-order and focus.
+- Add a minimal userspace display server process.
+- Connect GUI apps after ELF exec/userspace process launch is real.
 
 ---
 
-## Скриншоты / Мокапы
+## Blockers
 
-> Место для скринов и набросков
+- IPC is still a skeleton.
+- Userspace app execution is not a general runtime yet.
+- Scheduler/process model is still minimal.
+- No shared-memory API.
+- No userspace display server.
 
-## Заметки
+---
 
-_Место для заметок команды_
+## Links
+
+- [[../Completed/Syscall-ABI|Syscall ABI]]
+- [[../Completed/Process-FD-Model|Process + FD Model]]
+- [[../InProgress/GUI-Improvements|GUI Improvements]]

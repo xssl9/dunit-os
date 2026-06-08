@@ -1,26 +1,46 @@
-# 🔮 Advanced Features
+# Advanced Features
 
-**Статус:** 🔮 Будущее  
-**Из плана:** [[../../ROADMAP|ROADMAP]] → Task 10
+**Status:** PLANNED  
+**Roadmap:** [[../../ROADMAP|ROADMAP]]
 
 ---
 
-## Чеклист
+## Current State
 
-- [ ] **Multi-core (SMP)** — APIC, CPU affinity, spinlocks
-- [ ] **Power management (ACPI)** — suspend, shutdown
-- [ ] **Swap support** — swapfile / swap partition
-- [ ] **Kernel modules** — динамическая загрузка .ko
-- [ ] **GDB stub** — удалённая отладка через serial
+These items are deliberately out of scope for the current VFS/syscall/process foundation work. They should stay planned until the kernel has stable process execution, persistent storage, and better driver coverage.
 
-## Заметки
+---
+
+## Planned Items
+
+- SMP / multi-core support.
+- ACPI power management.
+- Swap support.
+- Kernel modules.
+- GDB remote stub.
+- More complete panic/fault diagnostics.
+- Better tracing/profiling hooks.
+
+---
+
+## Notes
 
 ### SMP
-Нужен LAPIC (Local APIC) вместо PIC, BSP инициализирует AP через SIPI.
 
-### GDB stub
-Serial port уже используется для stdio в QEMU (`-serial stdio`) — можно использовать для GDB remote protocol.
+Requires APIC/LAPIC work, per-CPU state, locking strategy, and careful scheduler changes. This should not be mixed into the current single-core process/syscall work.
 
-## Скриншоты
+### Swap
 
-> Место для скринов
+Requires persistent storage and a more mature virtual memory model.
+
+### GDB Stub
+
+Serial output is already important for logs and smoke tests. A GDB stub can reuse serial concepts later, but it needs a deliberate debug protocol boundary.
+
+---
+
+## Dependencies
+
+- [[../InProgress/Drivers|Drivers]]
+- [[../Future/Filesystem|Persistent dunitFS]]
+- Scheduler/process model maturity.

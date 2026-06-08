@@ -1,58 +1,66 @@
-# 🔧 Drivers
+# Drivers
 
-**Статус:** 🔧 В процессе  
-**Из плана:** [[../../ROADMAP|ROADMAP]] → Task 5  
-**Требования:** [[../../Origin/REQUIREMENTS|REQ-7, REQ-12]]
-
----
-
-## Чеклист
-
-- [ ] **PCI enumeration** ← стартовая точка, нужна для остального
-- [ ] **ACPI support**
-- [ ] Disk driver (ATA/AHCI)
-- [ ] Network driver (RTL8139 / E1000)
-- [ ] Sound driver (AC97 / Intel HDA)
-- [ ] USB driver (UHCI/OHCI/EHCI/xHCI)
+**Status:** PARTIAL / in progress  
+**Roadmap:** [[../../ROADMAP|ROADMAP]]  
+**Related requirements:** [[../../Origin/REQUIREMENTS|REQ-7, REQ-12]]
 
 ---
 
-## Порядок реализации
+## Current State
 
-```
+Dunit OS has enough low-level hardware support to boot, draw to the framebuffer, receive keyboard input, initialize timer/PIC paths, and run the kernel terminal. This is enough for the current VFS/MemFS and syscall smoke workflows.
+
+What is still missing is a general driver model and real hardware/storage/network drivers.
+
+---
+
+## Working
+
+- Framebuffer output for boot UI, terminal mode, and experimental GUI mode.
+- Keyboard input for terminal interaction and automated QEMU command injection.
+- Serial output used by logs and userspace stdout/stderr smoke checks.
+- Basic port IO support through the HAL layer.
+- Timer/PIC initialization paths used by the boot flow.
+
+---
+
+## Skeleton / Planned
+
+- PCI enumeration.
+- ACPI support.
+- Disk driver, initially ATA/AHCI or a simpler QEMU-friendly target.
+- Network driver, likely E1000 or RTL8139 first.
+- USB stack.
+- Sound driver.
+- A cleaner device registration layer for future DevFS integration.
+
+---
+
+## Development Order
+
+```text
 PCI enumeration
-    └── Disk (ATA/AHCI)
-    └── Network (E1000) → [[../Future/Network-Stack|Network Stack]]
-    └── Sound (AC97)
-    └── USB
-ACPI → power management
+    -> disk driver
+    -> network driver -> [[../Future/Network-Stack|Network Stack]]
+    -> USB / sound later
+
+ACPI
+    -> power management
+    -> SMP groundwork later
 ```
 
 ---
 
-## PCI — заметки
+## Blockers
 
-PCI enumeration — перебор bus/device/function через I/O порты `0xCF8`/`0xCFC`. Уже есть `ports.c` в [[../Completed/HAL|HAL]].
-
-```rust
-// Базовый скелет
-fn pci_read(bus: u8, device: u8, func: u8, offset: u8) -> u32 {
-    let addr = 0x80000000u32
-        | (bus as u32) << 16
-        | (device as u32) << 11
-        | (func as u32) << 8
-        | (offset & 0xFC) as u32;
-    // outl(0xCF8, addr); inl(0xCFC)
-}
-```
+- Persistent dunitFS needs a block device abstraction before it can leave MemFS/RAM.
+- Networking needs a real NIC driver before a TCP/IP stack is useful.
+- DevFS is still a skeleton, so devices are not exposed through VFS yet.
 
 ---
 
-## Скриншоты
+## Links
 
-> Место для скринов
-
-## Зависимости
-
-- [[../Completed/HAL|HAL]] — порты уже есть
-- [[../Future/Filesystem|Filesystem]] — нужна для disk driver
+- [[../Completed/HAL|HAL]]
+- [[../Completed/VFS-MemFS|VFS + MemFS]]
+- [[../Future/Filesystem|Persistent dunitFS]]

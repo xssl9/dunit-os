@@ -1,32 +1,57 @@
-# ✅ Terminal Mode
+# Terminal Mode
 
-**Статус:** ✅ Выполнено  
-**Из плана:** [[../../ROADMAP|ROADMAP]]
+**Status:** Done / working kernel terminal  
+**Links:** [[../../STATUS|STATUS]] · [[../InProgress/Terminal-Improvements|Terminal Improvements]] · [[Dufetch|dufetch]]
 
 ---
 
-## Что сделано
+## What Works
 
-- [x] Framebuffer console (вывод текста напрямую в fb)
-- [x] Полный набор команд
-- [x] `exec` — запуск userspace программ
-- [x] История команд (↑ ↓)
-- [x] Tab autocomplete
+- Framebuffer console.
+- Login-style terminal header.
+- Command history.
+- Tab autocomplete.
+- VFS-backed filesystem commands.
+- `dufetch` system summary.
+- Basic process/system demo commands.
 
-## Команды
+---
 
-| Команда | Описание |
+## VFS-backed Commands
+
+| Command | Status |
 |---|---|
-| `help` | список команд |
-| `exec <path>` | запустить ELF |
-| `ps` | список процессов |
-| `kill <pid>` | убить процесс |
-| `clear` | очистить экран |
+| `pwd` | working |
+| `ls` | working through VFS `readdir` |
+| `cd` | working with terminal cwd |
+| `mkdir` | working through VFS |
+| `touch` | working through VFS |
+| `cat` | working through VFS |
+| `echo text > file` | working |
+| `echo text >> file` | working |
+| `rm file` | working for files |
+| `tree` | working |
 
-## Скриншоты
+---
 
-> Место для скринов
+## Demo Commands
 
-## В процессе
+| Command | Status |
+|---|---|
+| `dufetch` | working |
+| `uname` / `uname -a` | simple static output |
+| `free` | static/demo output |
+| `ps` / `top` | static/demo output |
+| `whoami` | static/demo output |
 
-→ [[../InProgress/Terminal-Improvements|Terminal Improvements]] — алиасы, env vars, pipe, редиректы
+---
+
+## Important Separation
+
+Kernel terminal cwd is separate from future process cwd. The current process cwd exists for VFS syscalls, but terminal `cd` does not yet become a userspace shell `chdir`.
+
+---
+
+## Remaining Terminal Work
+
+→ [[../InProgress/Terminal-Improvements|Terminal Improvements]]

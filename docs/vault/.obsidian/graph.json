@@ -8,10 +8,24 @@
   "collapse-color-groups": false,
   "colorGroups": [
     {
-      "query": "path:Origin",
+      "query": "file:STATUS",
       "color": {
         "a": 1,
-        "rgb": 4740122
+        "rgb": 3447003
+      }
+    },
+    {
+      "query": "file:ROADMAP",
+      "color": {
+        "a": 1,
+        "rgb": 15548733
+      }
+    },
+    {
+      "query": "path:AI-Context",
+      "color": {
+        "a": 1,
+        "rgb": 10040012
       }
     },
     {
@@ -25,7 +39,7 @@
       "query": "path:Tasks/InProgress",
       "color": {
         "a": 1,
-        "rgb": 16744272
+        "rgb": 16755200
       }
     },
     {
@@ -34,18 +48,25 @@
         "a": 1,
         "rgb": 6710886
       }
+    },
+    {
+      "query": "path:Origin",
+      "color": {
+        "a": 1,
+        "rgb": 4740122
+      }
     }
   ],
   "collapse-display": false,
   "showArrow": true,
   "textFadeMultiplier": 0,
-  "nodeSizeMultiplier": 1.2,
-  "lineSizeMultiplier": 1,
+  "nodeSizeMultiplier": 1.25,
+  "lineSizeMultiplier": 1.1,
   "collapse-forces": false,
   "centerStrength": 0.518,
   "repelStrength": 10,
   "linkStrength": 1,
   "linkDistance": 250,
-  "scale": 1.0534979423868265,
+  "scale": 1.0534979423868243,
   "close": false
 }

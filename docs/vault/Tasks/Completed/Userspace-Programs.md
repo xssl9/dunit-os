@@ -1,50 +1,59 @@
-# ✅ Userspace Programs
+# Userspace Program Builds
 
-**Статус:** ✅ Компилируются и запускаются  
-**Из плана:** [[../../ROADMAP|ROADMAP]]
+**Status:** Done / build pipeline works  
+**Links:** [[../../STATUS|STATUS]] · [[Userspace-VFS-Syscalls|Userspace VFS Syscalls]]
 
 ---
 
-## Программы
+## Programs Built Into The ISO
 
-| Программа | Статус | Описание |
+| Program | Build status | Runtime status |
 |---|---|---|
-| `plank` | ✅ | Dock / taskbar |
-| `terminal` | ✅ | Терминальное приложение |
-| `file_manager` | ✅ | Файловый менеджер |
-| `text_editor` | ✅ | Текстовый редактор |
-| `settings` | ✅ | Настройки системы |
-| `system_monitor` | ✅ | Монитор системы |
+| `plank` | builds | GUI/runtime integration is experimental |
+| `terminal` | builds | not yet the main shell |
+| `file_manager` | builds | UI/demo stage |
+| `text_editor` | builds | UI/demo stage |
+| `settings` | builds | UI/demo stage |
+| `system_monitor` | builds | UI/demo stage |
 
-## Таргет
+---
 
-Все бинари собираются под кастомный таргет:
-```
+## Runtime Foundation Now Available
+
+Userspace has more than just builds now:
+
+- libdunit syscall wrappers.
+- hardened syscall register ABI.
+- userspace `open/read/write/close`.
+- userspace stdout/stderr helpers.
+- CPL3 smoke path that returns to kernel.
+
+See:
+
+- [[Syscall-ABI|Syscall ABI + Safe User Copy]]
+- [[Userspace-VFS-Syscalls|Userspace VFS Syscalls]]
+- [[Stdio-FD|Minimal Stdio FDs]]
+
+---
+
+## Target
+
+All binaries build for:
+
+```text
 userspace/x86_64-unknown-none.json
 ```
 
-## Расположение
+Output directory:
 
-```
+```text
 build/userspace/
-├── plank
-├── terminal
-├── file_manager
-├── text_editor
-├── settings
-└── system_monitor
 ```
 
-## Запуск из терминала
+---
 
-```bash
-exec /boot/userspace/terminal
-```
+## Not Done
 
-## Скриншоты
-
-> Место для скринов
-
-## Заметки
-
-_Место для заметок_
+- Real ELF exec flow for these apps.
+- Per-process address spaces.
+- Full userspace terminal.

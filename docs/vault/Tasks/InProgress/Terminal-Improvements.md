@@ -1,37 +1,38 @@
-# 🔧 Terminal Improvements
+# Terminal Improvements
 
-**Статус:** 🔧 В процессе  
-**Из плана:** [[../../ROADMAP|ROADMAP]] → Task 4  
-**Предыдущий таск:** [[../Completed/Terminal-Mode|Terminal Mode ✅]]
+**Status:** In progress  
+**Previous:** [[../Completed/Terminal-Mode|Terminal Mode]]
 
 ---
 
-## Чеклист
+## Done In Kernel Terminal
 
-- [x] История команд (↑ ↓)
+- [x] Command history
 - [x] Tab autocomplete
-- [x] `exec` команда
-- [ ] Алиасы команд (`alias ll='ls -la'`)
-- [ ] Переменные окружения (`$PATH`, `$HOME`)
-- [ ] Pipe поддержка (`cmd1 | cmd2`)
-- [ ] Редиректы (`>`, `>>`, `<`)
+- [x] VFS-backed filesystem commands
+- [x] `echo >` and `echo >>`
+- [x] `tree`
+- [x] `dufetch`
 
 ---
 
-## Заметки по реализации
+## Still To Do
 
-### Pipe
-Нужен межпроцессный канал — зависит от [[../Future/Filesystem|VFS]] или простой ring buffer в ядре.
-
-### ENV vars
-Хранить в структуре процесса, передавать при `exec`.
+- [ ] Aliases, for example `alias ll='ls -la'`
+- [ ] Environment variables: `$PATH`, `$HOME`
+- [ ] Pipes: `cmd1 | cmd2`
+- [ ] Input redirection: `<`
+- [ ] Real userspace terminal process
+- [ ] Keyboard-backed stdin for userspace
 
 ---
 
-## Скриншоты
+## Notes
 
-> Место для скринов
+The kernel terminal is usable, but it is still not the final shell architecture. The next major step is a userspace terminal that talks through stdio and VFS syscalls.
 
-## Блокеры / зависимости
+Related completed foundations:
 
-- Pipe → нужна минимальная IPC реализация
+- [[../Completed/Stdio-FD|Minimal Stdio FDs]]
+- [[../Completed/Userspace-VFS-Syscalls|Userspace VFS Syscalls]]
+- [[../Completed/Process-FD-Model|Current Process + FD Table]]

@@ -1,60 +1,88 @@
-# 🚦 ROADMAP
+# ROADMAP
 
-> Текущий план проекта. Вырос из [[Origin/VISION|VISION]] (.kiro).
-> Каждый таск — отдельная нода в графе.
+> The vault is the project task graph. Completed nodes are under `Tasks/Completed`, active work under `Tasks/InProgress`, and future architecture under `Tasks/Future`.
 
 ---
 
-## ✅ Выполнено
+## Done / Working
 
-- [x] [[Tasks/Completed/HAL|Microkernel OS с HAL (C/Assembly) и Kernel (Rust)]]
-- [x] [[Tasks/Completed/Bootloader|Limine bootloader с GUI и Terminal режимами]]
-- [x] [[Tasks/Completed/Terminal-Mode|Framebuffer console для Terminal Mode]]
+- [x] [[Tasks/Completed/Bootloader|Limine bootloader with GUI and terminal boot modes]]
+- [x] [[Tasks/Completed/HAL|HAL foundation: GDT, IDT, interrupts, syscall entry]]
 - [x] [[Tasks/Completed/Keyboard-Driver|Interrupt-based keyboard driver]]
-- [x] [[Tasks/Completed/Terminal-Mode|Полный набор команд в Terminal Mode]]
-- [x] [[Tasks/Completed/Userspace-Programs|Компиляция userspace программ (plank, terminal, file_manager, text_editor, settings, system_monitor)]]
+- [x] [[Tasks/Completed/Terminal-Mode|Kernel terminal mode with framebuffer console]]
+- [x] [[Tasks/Completed/VFS-MemFS|Runtime VFS + root MemFS]]
+- [x] [[Tasks/Completed/Syscall-ABI|Syscall ABI hardening + bounded user copy]]
+- [x] [[Tasks/Completed/Process-FD-Model|Minimal current process, PID, cwd, fd table]]
+- [x] [[Tasks/Completed/Userspace-VFS-Syscalls|Userspace Open/Read/Write/Close through VFS]]
+- [x] [[Tasks/Completed/Stdio-FD|Minimal stdin/stdout/stderr fd reservation]]
+- [x] [[Tasks/Completed/Dufetch|dufetch terminal system summary]]
+- [x] [[Tasks/Completed/Userspace-Programs|Userspace program build pipeline]]
 
 ---
 
-## 🔧 В процессе
+## In Progress
 
-### Task 4: Terminal Improvements
+### Terminal Improvements
+
 → [[Tasks/InProgress/Terminal-Improvements|Terminal Improvements]]
 
-- [x] История команд (↑↓)
+- [x] Command history
 - [x] Tab autocomplete
-- [x] Команда `exec` для запуска userspace
-- [ ] Алиасы команд
-- [ ] Переменные окружения
-- [ ] Pipe поддержка (`|`)
-- [ ] Редиректы (`>`, `>>`)
+- [x] Real VFS-backed `ls/pwd/cd/mkdir/touch/cat/echo/rm/tree`
+- [x] `dufetch`
+- [x] Basic `echo > file` and `echo >> file`
+- [ ] Aliases
+- [ ] Environment variables
+- [ ] Pipes
+- [ ] Full stdin input model for userspace terminal
 
-### Task 5: Drivers
+### Drivers
+
 → [[Tasks/InProgress/Drivers|Drivers]]
 
-- [ ] Sound driver (AC97 / Intel HDA)
-- [ ] USB driver (UHCI/OHCI/EHCI/xHCI)
-- [ ] Disk driver (ATA/AHCI)
-- [ ] Network driver (RTL8139 / E1000)
+- [x] PS/2 keyboard path for terminal mode
 - [ ] PCI enumeration
+- [ ] Disk driver: ATA/AHCI
+- [ ] Network driver: RTL8139/E1000
+- [ ] USB driver
+- [ ] Sound driver
 - [ ] ACPI support
 
-### Task 6: GUI Improvements
+### GUI Improvements
+
 → [[Tasks/InProgress/GUI-Improvements|GUI Improvements]]
 
-- [ ] Window animations (fade in/out, minimize/maximize)
+- [ ] Window animations
 - [ ] Multiple themes
-- [ ] Settings app для смены темы
 - [ ] Drag and drop
-- [ ] Context menus (right-click)
-- [ ] Notifications system
+- [ ] Context menus
+- [ ] Notifications
 - [ ] System tray
 
 ---
 
-## 🔮 Будущее
+## Planned
 
-### Task 7: Network Stack
+### Persistent Filesystem
+
+→ [[Tasks/Future/Filesystem|Persistent dunitFS / block-backed FS]]
+
+- [ ] Block device abstraction
+- [ ] Persistent dunitFS design
+- [ ] Mount table beyond root MemFS
+- [ ] File permissions
+- [ ] Symlinks
+- [ ] ext2/FAT32 compatibility research
+
+### Userspace Execution
+
+- [ ] Real ELF exec path for applications
+- [ ] Per-process address spaces
+- [ ] Per-process kernel stacks
+- [ ] Scheduler integration beyond current-process foundation
+
+### Network Stack
+
 → [[Tasks/Future/Network-Stack|Network Stack]]
 
 - [ ] Ethernet layer
@@ -64,50 +92,39 @@
 - [ ] DNS resolver
 - [ ] HTTP client
 
-### Task 8: Package Manager
+### Package Manager
+
 → [[Tasks/Future/Package-Manager|Package Manager]]
 
-- [ ] dpkg implementation
-- [ ] Package repository
+- [ ] Package metadata format
+- [ ] Repository format
 - [ ] Dependency resolution
 
-### Task 9: Filesystem
-→ [[Tasks/Future/Filesystem|Filesystem]]
+### Advanced Features
 
-- [ ] ext2/ext3
-- [ ] FAT32
-- [ ] File permissions
-- [ ] Symbolic links
-- [ ] Mount/unmount
-
-### Task 10: Advanced Features
 → [[Tasks/Future/Advanced-Features|Advanced Features]]
 
-- [ ] Multi-core (SMP)
-- [ ] Power management (ACPI)
-- [ ] Swap support
+- [ ] SMP
+- [ ] Power management
+- [ ] Swap
 - [ ] Kernel modules
 - [ ] GDB stub
 
-### GUI Architecture (Display Server)
-→ [[Tasks/Future/GUI-Architecture|GUI Architecture]]
-
-- [ ] Display Server как отдельный процесс
-- [ ] Orbital-подобный WM (референс: Redox)
-- [ ] IPC между приложениями и Display Server
-- [ ] egui интеграция
-
 ---
 
-## Build
+## Build / Test
+
+Preferred autonomous workflow on Windows:
+
+```powershell
+python build_and_run_multipass.py --qemu-timeout 40 --qemu-log qemu_test.log --qemu-test-commands "dufetch;pwd;ls"
+```
+
+Classic Make targets inside Linux build environment:
 
 ```bash
 make clean
 make all
-make run          # GUI mode
-make run-terminal # Terminal mode
+make run
+make run-terminal
 ```
-
-## Userspace бинари
-
-`build/userspace/`: plank, terminal, file_manager, text_editor, settings, system_monitor

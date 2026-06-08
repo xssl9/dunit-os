@@ -1,36 +1,51 @@
-# 🔧 GUI Improvements
+# GUI Improvements
 
-**Статус:** 🔧 В процессе  
-**Из плана:** [[../../ROADMAP|ROADMAP]] → Task 6  
-**Смотри также:** [[../Future/GUI-Architecture|GUI Architecture (Display Server)]]
-
----
-
-## Чеклист
-
-- [ ] Window animations (fade in/out, minimize/maximize)
-- [ ] Multiple themes
-- [ ] Settings app для смены темы
-- [ ] Drag and drop
-- [ ] Context menus (right-click)
-- [ ] Notifications system
-- [ ] System tray
+**Status:** PARTIAL / in progress  
+**Roadmap:** [[../../ROADMAP|ROADMAP]]  
+**See also:** [[../Future/GUI-Architecture|GUI Architecture]]
 
 ---
 
-## Важно — архитектура GUI
+## Current State
 
-Текущий GUI идёт через framebuffer напрямую.  
-Будущая цель → **Display Server** как отдельный процесс (Orbital-стиль из Redox).
+Dunit OS can initialize the framebuffer and has an experimental GUI path. The reliable interactive mode today is still **kernel terminal mode**, not GUI mode.
 
-Детали архитектуры: [[../Future/GUI-Architecture|GUI Architecture]]
+The GUI should be treated as an experimental surface until process execution, IPC, input routing, and a display-server model are designed.
 
 ---
 
-## Скриншоты текущего состояния
+## Working
 
-> Место для скринов GUI
+- Framebuffer is available.
+- Boot UI and terminal rendering work on top of framebuffer output.
+- GUI code exists as an experimental direction.
 
-## Заметки
+---
 
-_Место для заметок_
+## Not Ready Yet
+
+- Window manager is still a skeleton.
+- GUI applications are not real userspace processes.
+- No userspace display server.
+- No GUI IPC contract.
+- No window/event protocol.
+- No persistent user configuration for themes/settings.
+
+---
+
+## Future Work
+
+- Window create/destroy primitives.
+- Input focus and event routing.
+- Basic compositor and z-order.
+- Context menus and notifications.
+- Theme/settings storage after persistent filesystem exists.
+
+---
+
+## Dependencies
+
+- [[../Completed/Syscall-ABI|Syscall ABI]]
+- [[../Completed/Process-FD-Model|Process + FD Model]]
+- [[../Future/GUI-Architecture|GUI Architecture]]
+- IPC foundation before real userspace GUI apps.

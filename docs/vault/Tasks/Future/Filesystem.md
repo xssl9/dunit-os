@@ -1,33 +1,50 @@
-# 🔮 Filesystem
+# Persistent dunitFS / Block-backed Filesystem
 
-**Статус:** 🔮 Будущее  
-**Из плана:** [[../../ROADMAP|ROADMAP]] → Task 9  
-**Требования:** [[../../Origin/REQUIREMENTS|REQ-10]]  
-**Зависит от:** [[../InProgress/Drivers|Disk Driver (ATA/AHCI)]]
+**Status:** Future  
+**Depends on:** [[../Completed/VFS-MemFS|VFS + MemFS Runtime Layer]] · [[../InProgress/Drivers|Disk Driver]]
 
 ---
 
-## Чеклист
+## What Is Already Done
 
-- [ ] ext2/ext3 поддержка
-- [ ] FAT32 поддержка
-- [ ] File permissions
-- [ ] Symbolic links
-- [ ] Mount/unmount
+The first runtime filesystem stage is complete:
 
-## VFS структура (из design doc)
+- VFS contract.
+- Root MemFS mounted as `/`.
+- Runtime file/directory operations.
+- Kernel terminal filesystem commands through VFS.
+- Userspace `open/read/write/close` syscalls through VFS.
 
-```
-/
-├── dev/   (fb0, kbd, mouse)
-├── bin/   (init, netsurf, terminal)
-└── proc/  (1/, 2/, ...)
-```
+See [[../Completed/VFS-MemFS|VFS + MemFS Runtime Layer]] and [[../Completed/Userspace-VFS-Syscalls|Userspace VFS Syscalls]].
 
-## Скриншоты
+---
 
-> Место для скринов
+## What This Future Node Means Now
 
-## Заметки
+This node is no longer "filesystem from zero". It now tracks persistent storage work:
 
-_Место для заметок_
+- block device abstraction
+- disk driver integration
+- persistent dunitFS design
+- on-disk inode/node format
+- mount table beyond root MemFS
+- file permissions
+- symlinks
+- optional ext2/FAT32 research
+
+---
+
+## Blockers
+
+- No block device layer.
+- No ATA/AHCI driver.
+- No persistent allocation model.
+- No crash/recovery story.
+
+---
+
+## Non-goals For Next Step
+
+- Do not replace MemFS.
+- Do not add journaling yet.
+- Do not implement ext2/FAT32 before block device basics.

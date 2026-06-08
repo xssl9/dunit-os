@@ -11,10 +11,14 @@
             "id": "8e42ca6d33575100",
             "type": "leaf",
             "state": {
-              "type": "graph",
-              "state": {},
-              "icon": "lucide-git-fork",
-              "title": "Граф"
+              "type": "markdown",
+              "state": {
+                "file": "Tasks/InProgress/GUI-Improvements.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "GUI-Improvements"
             }
           }
         ]
@@ -178,8 +182,12 @@
   },
   "active": "8e42ca6d33575100",
   "lastOpenFiles": [
-    "HOME.md",
+    "STATUS.md",
+    "Tasks/Completed/Process-FD-Model.md",
+    "Tasks/InProgress/Drivers.md",
+    "Tasks/Future/Filesystem.md",
     "ROADMAP.md",
+    "HOME.md",
     "Tasks/Completed/Bootloader.md",
     "Tasks/Completed/Userspace-Programs.md",
     "Origin/VISION.md",
