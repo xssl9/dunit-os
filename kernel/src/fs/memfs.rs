@@ -110,18 +110,28 @@ impl MemFs {
 
 impl FileSystem for MemFs {
     fn open(&mut self, path: &str, flags: OpenFlags) -> Result<FileHandle> {
-        if self.node_type(path).is_none() && flags == OpenFlags::Create {
+        if !flags.is_valid() {
+            return Err(VfsError::InvalidPath);
+        }
+
+        if self.node_type(path).is_none() && flags.create() {
             self.create(path)?;
         }
 
         match self.node_type(path).ok_or(VfsError::NotFound)? {
             FileType::Directory => Err(VfsError::IsADirectory),
             FileType::File => {
+                let nidx = self.node_index(path).ok_or(VfsError::NotFound)?;
+                if flags.trunc() {
+                    if !flags.can_write() {
+                        return Err(VfsError::PermissionDenied);
+                    }
+                    self.nodes[nidx].data.clear();
+                }
+
                 let handle = self.next_handle.fetch_add(1, Ordering::SeqCst);
-                let offset = if flags == OpenFlags::Append {
-                    self.node_index(path)
-                        .map(|idx| self.nodes[idx].data.len())
-                        .unwrap_or(0)
+                let offset = if flags.append() {
+                    self.nodes[nidx].data.len()
                 } else {
                     0
                 };
@@ -138,6 +148,10 @@ impl FileSystem for MemFs {
 
     fn read(&mut self, handle: FileHandle, buf: &mut [u8]) -> Result<usize> {
         let hidx = self.handle_index(handle).ok_or(VfsError::InvalidDescriptor)?;
+        if !self.open_handles[hidx].1.flags.can_read() {
+            return Err(VfsError::PermissionDenied);
+        }
+
         let path = self.open_handles[hidx].1.path.clone();
         let offset = self.open_handles[hidx].1.offset;
         let nidx = self.node_index(&path).ok_or(VfsError::NotFound)?;
@@ -161,24 +175,28 @@ impl FileSystem for MemFs {
 
     fn write(&mut self, handle: FileHandle, buf: &[u8]) -> Result<usize> {
         let hidx = self.handle_index(handle).ok_or(VfsError::InvalidDescriptor)?;
-        if self.open_handles[hidx].1.flags == OpenFlags::ReadOnly {
+        if !self.open_handles[hidx].1.flags.can_write() {
             return Err(VfsError::PermissionDenied);
         }
 
         let path = self.open_handles[hidx].1.path.clone();
-        let offset = self.open_handles[hidx].1.offset;
         let nidx = self.node_index(&path).ok_or(VfsError::NotFound)?;
 
         if self.nodes[nidx].file_type != FileType::File {
             return Err(VfsError::IsADirectory);
         }
 
+        let offset = if self.open_handles[hidx].1.flags.append() {
+            self.nodes[nidx].data.len()
+        } else {
+            self.open_handles[hidx].1.offset
+        };
         let end = offset + buf.len();
         if end > self.nodes[nidx].data.len() {
             self.nodes[nidx].data.resize(end, 0);
         }
         self.nodes[nidx].data[offset..end].copy_from_slice(buf);
-        self.open_handles[hidx].1.offset += buf.len();
+        self.open_handles[hidx].1.offset = end;
         Ok(buf.len())
     }
 

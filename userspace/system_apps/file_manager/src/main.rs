@@ -12,13 +12,43 @@ struct FbInfo { addr: u64, width: u32, height: u32, pitch: u32 }
 
 fn syscall0(num: usize) -> isize {
     let ret: isize;
-    unsafe { core::arch::asm!("syscall", in("rax") num, lateout("rax") ret, options(nostack)); }
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") num,
+            lateout("rax") ret,
+            lateout("rdi") _,
+            lateout("rsi") _,
+            lateout("rdx") _,
+            lateout("r8") _,
+            lateout("r9") _,
+            lateout("r10") _,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack)
+        );
+    }
     ret
 }
 
 fn syscall1(num: usize, a1: usize) -> isize {
     let ret: isize;
-    unsafe { core::arch::asm!("syscall", in("rax") num, in("rdi") a1, lateout("rax") ret, options(nostack)); }
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") num,
+            inlateout("rdi") a1 => _,
+            lateout("rax") ret,
+            lateout("rsi") _,
+            lateout("rdx") _,
+            lateout("r8") _,
+            lateout("r9") _,
+            lateout("r10") _,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack)
+        );
+    }
     ret
 }
 

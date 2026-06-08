@@ -85,6 +85,50 @@ static mut TERMINAL_CWD: [u8; 256] = [0; 256];
 static mut TERMINAL_CWD_LEN: usize = 0;
 static mut TERMINAL_DIR_ENTRIES: [fs::vfs::DirEntry; 16] = [fs::vfs::DirEntry::empty(); 16];
 
+const DUFETCH_LOGO_WIDTH: usize = 80;
+const DUFETCH_LOGO: [&str; 40] = [
+    "",
+    "",
+    "",
+    "",
+    "                                .=**************:.",
+    "                           .*************************-",
+    "                        -********************************",
+    "                     :.  -*********************************=",
+    "                   -====.  -*********************************=",
+    "                  -=======.  -****+..       ..*****************.",
+    "                :===========.  .                 .+*************+",
+    "               -============.                       .*************",
+    "              -===========.                           -************",
+    "             :===========           .-+***--            ***********=",
+    "             ==========-         -*************.         ***********",
+    "            ===========        .****-       =****.       .***********",
+    "            ----------.       :===            -===        :==========",
+    "        ::::::::::::.   .::::     ::::: :::::     .::::  ::::. :::::::::::::.",
+    "       +@@@@@@@@@@@@@@..@@@@+    =@@@@  @@@@@@-  .@@@@+ @@@@@ @@@@@@@@@@@@@@",
+    "      :@@@@      @@@@- @@@@#    -@@@@# @@@@@@@@= @@@@# =@@@@#     @@@@@",
+    "     .@@@@%     %@@@@ *@@@@    .@@@@% @@@@@.@@@@@@@@@ =@@@@#     @@@@@.",
+    "     @@@@@@@@@@@@@@@.*@@@@@@@@@@@@@@ #@@@@.  %@@@@@@: @@@@@     #@@@@:",
+    "    =@@@@@@@@@@@@%:   *@@@@@@@@@@#. .@@@@=    #@@@@= %@@@@     .@@@@@",
+    "",
+    "            ==-========:       -***-         +***:       =**********",
+    "             --=========:       .******+=******-        :***********",
+    "              ===========-         .-*******-.         =***********",
+    "              :============.                         .************",
+    "               :=============:                      +************",
+    "                 -==============.               .==   +*********",
+    "                  :====================:..===========   +*****=",
+    "                    -==================================   +*=",
+    "                      :==================================",
+    "                         ===============================",
+    "                            .=======================.",
+    "                                 ..-=========-..",
+    "",
+    "",
+    "",
+    "",
+];
+
 fn serial_write(s: &str) {
     for byte in s.bytes() {
         unsafe {
@@ -115,6 +159,94 @@ fn terminal_cwd() -> &'static str {
             terminal_set_cwd("/");
         }
         core::str::from_utf8(&TERMINAL_CWD[..TERMINAL_CWD_LEN]).unwrap_or("/")
+    }
+}
+
+struct TerminalConsoleWriter<'a> {
+    console: &'a mut terminal::FbConsole,
+}
+
+impl core::fmt::Write for TerminalConsoleWriter<'_> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        self.console.write_str(s);
+        Ok(())
+    }
+}
+
+fn terminal_write_padded(console: &mut terminal::FbConsole, text: &str, width: usize) {
+    console.write_str(text);
+    let mut written = text.len();
+    while written < width {
+        console.write_str(" ");
+        written += 1;
+    }
+}
+
+fn terminal_dufetch(console: &mut terminal::FbConsole) {
+    use core::fmt::Write;
+
+    let cwd = terminal_cwd();
+    let pid = process::current_process()
+        .map(|process| process.pid.0)
+        .unwrap_or(0);
+
+    let mut memory_available_kib = 0usize;
+    let mut memory_total_kib = 0usize;
+    if let Some(pmm) = memory::pmm::get_pmm() {
+        memory_available_kib = pmm.available_memory() / 1024;
+        memory_total_kib = pmm.total_memory() / 1024;
+    }
+
+    let info: [&str; 9] = [
+        "OS: Dunit OS",
+        "Kernel: 1.0.0 Green Tea",
+        "Arch: x86_64",
+        "Mode: Terminal",
+        "Shell: Dunit Terminal",
+        "FS: MemFS over VFS",
+        "PID:",
+        "CWD:",
+        "Memory:",
+    ];
+
+    for idx in 0..DUFETCH_LOGO.len() {
+        terminal_write_padded(console, DUFETCH_LOGO[idx], DUFETCH_LOGO_WIDTH);
+        console.write_str("  ");
+
+        match idx {
+            4 => console.write_str(info[0]),
+            5 => console.write_str(info[1]),
+            6 => console.write_str(info[2]),
+            7 => console.write_str(info[3]),
+            8 => console.write_str(info[4]),
+            9 => console.write_str(info[5]),
+            10 => {
+                let _ = write!(TerminalConsoleWriter { console: &mut *console }, "{} {}", info[6], pid);
+            }
+            11 => {
+                console.write_str(info[7]);
+                console.write_str(" ");
+                console.write_str(cwd);
+            }
+            12 => {
+                if memory_total_kib > 0 {
+                    let used_kib = memory_total_kib.saturating_sub(memory_available_kib);
+                    let _ = write!(
+                        TerminalConsoleWriter { console: &mut *console },
+                        "{} {} KiB / {} KiB",
+                        info[8],
+                        used_kib,
+                        memory_total_kib
+                    );
+                } else {
+                    console.write_str("Memory: available");
+                }
+            }
+            13 => console.write_str("Display: Framebuffer"),
+            _ => {}
+        }
+
+        console.write_str("\n");
     }
 }
 
@@ -174,9 +306,11 @@ fn terminal_write_file(
         }
 
         let flags = if append {
-            fs::vfs::OpenFlags::Append
+            fs::vfs::OpenFlags::from_bits(
+                fs::vfs::OpenFlags::WRITE.bits() | fs::vfs::OpenFlags::APPEND.bits(),
+            )
         } else {
-            fs::vfs::OpenFlags::WriteOnly
+            fs::vfs::OpenFlags::WRITE
         };
 
         match vfs.open_at(cwd, path, flags) {
@@ -237,6 +371,11 @@ fn terminal_tree_path(
 fn terminal_handle_fs_command(console: &mut terminal::FbConsole, cmd_str: &str) -> bool {
     let trimmed = cmd_str.trim();
     let cwd = terminal_cwd();
+
+    if trimmed == "dufetch" {
+        terminal_dufetch(console);
+        return true;
+    }
 
     if trimmed == "pwd" {
         console.write_str(cwd);
@@ -327,7 +466,7 @@ fn terminal_handle_fs_command(console: &mut terminal::FbConsole, cmd_str: &str) 
         if path.is_empty() {
             console.write_str("cat: missing operand\n");
         } else if let Some(vfs) = fs::vfs::get_vfs() {
-            match vfs.open_at(cwd, path, fs::vfs::OpenFlags::ReadOnly) {
+            match vfs.open_at(cwd, path, fs::vfs::OpenFlags::READ) {
                 Ok(fd) => {
                     let mut buf = [0u8; 512];
                     loop {
@@ -630,6 +769,8 @@ pub extern "C" fn kernel_main(
     memory::init();
     serial_write("[KERNEL] memory OK\r\n");
     screen_log("[ OK ] Memory management subsystem operational", false);
+
+    process::init_current_kernel_process();
     
     if terminal_mode == 0 {
         screen_log("[ .. ] Initializing process management", false);
@@ -719,6 +860,13 @@ pub extern "C" fn kernel_main(
         serial_write("[DRV] keyboard::init() returned\r\n");
         screen_log("[ OK ] [DRV] keyboard::init() returned", false);
         screen_log("[ OK ] Keyboard driver ready", false);
+    }
+
+    screen_log("[ .. ] Running userspace syscall smoke test", false);
+    if syscall::run_userspace_syscall_smoke() {
+        screen_log("[ OK ] Userspace syscall smoke passed", false);
+    } else {
+        screen_log("[FAIL] Userspace syscall smoke failed", true);
     }
     
     screen_log("[ .. ] Configuring interrupt handlers", false);
@@ -898,7 +1046,7 @@ pub extern "C" fn kernel_main(
                                                 ""
                                             } else {
                                                 match cmd_str {
-                                        "help" => "Available commands:\n  help     - Show this help\n  ls       - List files\n  pwd      - Print working directory\n  cd       - Change directory\n  mkdir    - Create directory\n  touch    - Create file\n  cat      - Display file contents\n  echo     - Print text\n  rm       - Remove file\n  tree     - Show directory tree\n  exec     - Execute userspace program\n  ps       - Process list\n  kill     - Kill process\n  top      - Process monitor\n  uname    - System information\n  date     - Show date and time\n  whoami   - Current user\n  uptime   - System uptime\n  free     - Memory usage\n  exit     - Halt system",
+                                        "help" => "Available commands:\n  help     - Show this help\n  dufetch  - Show Dunit OS system summary\n  ls       - List files\n  pwd      - Print working directory\n  cd       - Change directory\n  mkdir    - Create directory\n  touch    - Create file\n  cat      - Display file contents\n  echo     - Print text\n  rm       - Remove file\n  tree     - Show directory tree\n  exec     - Execute userspace program\n  ps       - Process list\n  kill     - Kill process\n  top      - Process monitor\n  uname    - System information\n  date     - Show date and time\n  whoami   - Current user\n  uptime   - System uptime\n  free     - Memory usage\n  exit     - Halt system",
                                         "uname" => "Dunit OS",
                                         "uname -a" => "Dunit OS 1.0 Green Tea x86_64",
                                         "date" => "Tue May 5 12:00:00 UTC 2026",
@@ -976,7 +1124,7 @@ pub extern "C" fn kernel_main(
                                     let input = core::str::from_utf8(&INPUT_BUFFER[..INPUT_LEN]).unwrap_or("");
                                     
                                     let commands = [
-                                        "help", "ls", "pwd", "cd", "mkdir", "touch", "cat", 
+                                        "help", "dufetch", "ls", "pwd", "cd", "mkdir", "touch", "cat", 
                                         "echo", "exec", "ps", "kill", "top", "uname", "date", 
                                         "whoami", "uptime", "free", "exit", "killall"
                                     ];

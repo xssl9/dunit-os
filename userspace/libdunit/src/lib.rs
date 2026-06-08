@@ -3,6 +3,8 @@
 pub const SYSCALL_EXIT: usize = 0;
 pub const SYSCALL_READ: usize = 3;
 pub const SYSCALL_WRITE: usize = 4;
+pub const SYSCALL_OPEN: usize = 5;
+pub const SYSCALL_CLOSE: usize = 6;
 pub const SYSCALL_GET_FRAMEBUFFER: usize = 10;
 pub const SYSCALL_DRAW_PIXEL: usize = 11;
 pub const SYSCALL_DRAW_RECT: usize = 12;
@@ -12,6 +14,14 @@ pub const SYSCALL_SPAWN_PROCESS: usize = 15;
 pub const SYSCALL_GET_PID: usize = 17;
 pub const SYSCALL_KILL_PROCESS: usize = 18;
 pub const SYSCALL_SLEEP: usize = 19;
+pub const SYSCALL_DEBUG_LOG: usize = 20;
+
+pub const OPEN_READ: usize = 1 << 0;
+pub const OPEN_WRITE: usize = 1 << 1;
+pub const OPEN_CREATE: usize = 1 << 2;
+pub const OPEN_TRUNC: usize = 1 << 3;
+pub const OPEN_APPEND: usize = 1 << 4;
+pub const OPEN_READ_WRITE: usize = OPEN_READ | OPEN_WRITE;
 
 #[repr(C)]
 pub struct FbInfo {
@@ -29,6 +39,12 @@ pub fn syscall0(num: usize) -> isize {
             "syscall",
             in("rax") num,
             lateout("rax") ret,
+            lateout("rdi") _,
+            lateout("rsi") _,
+            lateout("rdx") _,
+            lateout("r8") _,
+            lateout("r9") _,
+            lateout("r10") _,
             lateout("rcx") _,
             lateout("r11") _,
             options(nostack)
@@ -44,8 +60,35 @@ pub fn syscall1(num: usize, a1: usize) -> isize {
         core::arch::asm!(
             "syscall",
             in("rax") num,
-            in("rdi") a1,
+            inlateout("rdi") a1 => _,
             lateout("rax") ret,
+            lateout("rsi") _,
+            lateout("rdx") _,
+            lateout("r8") _,
+            lateout("r9") _,
+            lateout("r10") _,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack)
+        );
+    }
+    ret
+}
+
+#[inline(always)]
+pub fn syscall2(num: usize, a1: usize, a2: usize) -> isize {
+    let ret: isize;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") num,
+            inlateout("rdi") a1 => _,
+            inlateout("rsi") a2 => _,
+            lateout("rax") ret,
+            lateout("rdx") _,
+            lateout("r8") _,
+            lateout("r9") _,
+            lateout("r10") _,
             lateout("rcx") _,
             lateout("r11") _,
             options(nostack)
@@ -61,10 +104,13 @@ pub fn syscall3(num: usize, a1: usize, a2: usize, a3: usize) -> isize {
         core::arch::asm!(
             "syscall",
             in("rax") num,
-            in("rdi") a1,
-            in("rsi") a2,
-            in("rdx") a3,
+            inlateout("rdi") a1 => _,
+            inlateout("rsi") a2 => _,
+            inlateout("rdx") a3 => _,
             lateout("rax") ret,
+            lateout("r8") _,
+            lateout("r9") _,
+            lateout("r10") _,
             lateout("rcx") _,
             lateout("r11") _,
             options(nostack)
@@ -80,11 +126,42 @@ pub fn syscall5(num: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usiz
         core::arch::asm!(
             "syscall",
             in("rax") num,
-            in("rdi") a1,
-            in("rsi") a2,
-            in("rdx") a3,
-            in("r10") a4,
-            in("r8") a5,
+            inlateout("rdi") a1 => _,
+            inlateout("rsi") a2 => _,
+            inlateout("rdx") a3 => _,
+            inlateout("r10") a4 => _,
+            inlateout("r8") a5 => _,
+            lateout("rax") ret,
+            lateout("r9") _,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack)
+        );
+    }
+    ret
+}
+
+#[inline(always)]
+pub fn syscall6(
+    num: usize,
+    a1: usize,
+    a2: usize,
+    a3: usize,
+    a4: usize,
+    a5: usize,
+    a6: usize,
+) -> isize {
+    let ret: isize;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") num,
+            inlateout("rdi") a1 => _,
+            inlateout("rsi") a2 => _,
+            inlateout("rdx") a3 => _,
+            inlateout("r10") a4 => _,
+            inlateout("r8") a5 => _,
+            inlateout("r9") a6 => _,
             lateout("rax") ret,
             lateout("rcx") _,
             lateout("r11") _,
@@ -101,6 +178,18 @@ pub fn exit(code: i32) -> ! {
 
 pub fn write(fd: usize, buf: &[u8]) -> isize {
     syscall3(SYSCALL_WRITE, fd, buf.as_ptr() as usize, buf.len())
+}
+
+pub fn open(path: &str, flags: usize) -> isize {
+    syscall3(SYSCALL_OPEN, path.as_ptr() as usize, path.len(), flags)
+}
+
+pub fn read(fd: usize, buf: &mut [u8]) -> isize {
+    syscall3(SYSCALL_READ, fd, buf.as_mut_ptr() as usize, buf.len())
+}
+
+pub fn close(fd: usize) -> isize {
+    syscall1(SYSCALL_CLOSE, fd)
 }
 
 pub fn print(s: &str) {
@@ -144,7 +233,11 @@ pub fn kill(pid: u32) {
 }
 
 pub fn spawn(path: &str) -> isize {
-    syscall1(SYSCALL_SPAWN_PROCESS, path.as_ptr() as usize)
+    syscall2(SYSCALL_SPAWN_PROCESS, path.as_ptr() as usize, path.len())
+}
+
+pub fn debug_log(code: usize) -> isize {
+    syscall1(SYSCALL_DEBUG_LOG, code)
 }
 
 pub fn scancode_to_char(sc: u8) -> Option<char> {

@@ -9,12 +9,65 @@ pub type FileDescriptor = u32;
 pub type FileHandle = usize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OpenFlags {
-    ReadOnly,
-    WriteOnly,
-    ReadWrite,
-    Create,
-    Append,
+pub struct OpenFlags {
+    bits: u32,
+}
+
+impl OpenFlags {
+    pub const READ: Self = Self { bits: 1 << 0 };
+    pub const WRITE: Self = Self { bits: 1 << 1 };
+    pub const CREATE: Self = Self { bits: 1 << 2 };
+    pub const TRUNC: Self = Self { bits: 1 << 3 };
+    pub const APPEND: Self = Self { bits: 1 << 4 };
+    pub const READ_WRITE: Self = Self {
+        bits: Self::READ.bits | Self::WRITE.bits,
+    };
+
+    const VALID_BITS: u32 = Self::READ.bits
+        | Self::WRITE.bits
+        | Self::CREATE.bits
+        | Self::TRUNC.bits
+        | Self::APPEND.bits;
+
+    pub const fn from_bits(bits: u32) -> Self {
+        Self { bits }
+    }
+
+    pub const fn bits(self) -> u32 {
+        self.bits
+    }
+
+    pub const fn contains(self, other: Self) -> bool {
+        (self.bits & other.bits) == other.bits
+    }
+
+    pub const fn can_read(self) -> bool {
+        self.contains(Self::READ)
+    }
+
+    pub const fn can_write(self) -> bool {
+        self.contains(Self::WRITE)
+    }
+
+    pub const fn create(self) -> bool {
+        self.contains(Self::CREATE)
+    }
+
+    pub const fn trunc(self) -> bool {
+        self.contains(Self::TRUNC)
+    }
+
+    pub const fn append(self) -> bool {
+        self.contains(Self::APPEND)
+    }
+
+    pub const fn is_valid(self) -> bool {
+        let has_unknown = (self.bits & !Self::VALID_BITS) != 0;
+        let has_access_mode = self.can_read() || self.can_write();
+        let write_only_modifiers_ok = (!self.trunc() && !self.append()) || self.can_write();
+
+        !has_unknown && has_access_mode && write_only_modifiers_ok
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,7 +169,6 @@ pub trait FileSystem: Send {
 pub struct OpenFile {
     fs: *mut dyn FileSystem,
     handle: FileHandle,
-    position: usize,
 }
 
 impl OpenFile {
@@ -124,24 +176,15 @@ impl OpenFile {
         Self {
             fs,
             handle,
-            position: 0,
         }
     }
 
     pub fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        let bytes_read = unsafe { (&mut *self.fs).read(self.handle, buf)? };
-        self.position += bytes_read;
-        Ok(bytes_read)
+        unsafe { (&mut *self.fs).read(self.handle, buf) }
     }
 
     pub fn write(&mut self, buf: &[u8]) -> Result<usize> {
-        let bytes_written = unsafe { (&mut *self.fs).write(self.handle, buf)? };
-        self.position += bytes_written;
-        Ok(bytes_written)
-    }
-
-    pub fn position(&self) -> usize {
-        self.position
+        unsafe { (&mut *self.fs).write(self.handle, buf) }
     }
 }
 

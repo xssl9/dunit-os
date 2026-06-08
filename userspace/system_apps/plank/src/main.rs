@@ -24,7 +24,20 @@ mod sys {
     pub fn syscall0(num: usize) -> isize {
         let ret: isize;
         unsafe {
-            core::arch::asm!("syscall", in("rax") num, lateout("rax") ret, options(nostack));
+            core::arch::asm!(
+                "syscall",
+                in("rax") num,
+                lateout("rax") ret,
+                lateout("rdi") _,
+                lateout("rsi") _,
+                lateout("rdx") _,
+                lateout("r8") _,
+                lateout("r9") _,
+                lateout("r10") _,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack)
+            );
         }
         ret
     }
@@ -33,7 +46,42 @@ mod sys {
     pub fn syscall1(num: usize, a1: usize) -> isize {
         let ret: isize;
         unsafe {
-            core::arch::asm!("syscall", in("rax") num, in("rdi") a1, lateout("rax") ret, options(nostack));
+            core::arch::asm!(
+                "syscall",
+                in("rax") num,
+                inlateout("rdi") a1 => _,
+                lateout("rax") ret,
+                lateout("rsi") _,
+                lateout("rdx") _,
+                lateout("r8") _,
+                lateout("r9") _,
+                lateout("r10") _,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack)
+            );
+        }
+        ret
+    }
+
+    #[inline(always)]
+    pub fn syscall2(num: usize, a1: usize, a2: usize) -> isize {
+        let ret: isize;
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") num,
+                inlateout("rdi") a1 => _,
+                inlateout("rsi") a2 => _,
+                lateout("rax") ret,
+                lateout("rdx") _,
+                lateout("r8") _,
+                lateout("r9") _,
+                lateout("r10") _,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack)
+            );
         }
         ret
     }
@@ -42,7 +90,20 @@ mod sys {
     pub fn syscall3(num: usize, a1: usize, a2: usize, a3: usize) -> isize {
         let ret: isize;
         unsafe {
-            core::arch::asm!("syscall", in("rax") num, in("rdi") a1, in("rsi") a2, in("rdx") a3, lateout("rax") ret, options(nostack));
+            core::arch::asm!(
+                "syscall",
+                in("rax") num,
+                inlateout("rdi") a1 => _,
+                inlateout("rsi") a2 => _,
+                inlateout("rdx") a3 => _,
+                lateout("rax") ret,
+                lateout("r8") _,
+                lateout("r9") _,
+                lateout("r10") _,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack)
+            );
         }
         ret
     }
@@ -51,7 +112,20 @@ mod sys {
     pub fn syscall5(num: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> isize {
         let ret: isize;
         unsafe {
-            core::arch::asm!("syscall", in("rax") num, in("rdi") a1, in("rsi") a2, in("rdx") a3, in("r10") a4, in("r8") a5, lateout("rax") ret, options(nostack));
+            core::arch::asm!(
+                "syscall",
+                in("rax") num,
+                inlateout("rdi") a1 => _,
+                inlateout("rsi") a2 => _,
+                inlateout("rdx") a3 => _,
+                inlateout("r10") a4 => _,
+                inlateout("r8") a5 => _,
+                lateout("rax") ret,
+                lateout("r9") _,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack)
+            );
         }
         ret
     }
@@ -248,7 +322,7 @@ pub extern "C" fn _start() -> ! {
         if btn_pressed && !prev_btn {
             if let Some(idx) = icon_at(fb.width, fb.height, mx, my) {
                 let path = APPS[idx].2;
-                syscall1(SYSCALL_SPAWN_PROCESS, path.as_ptr() as usize);
+                syscall2(SYSCALL_SPAWN_PROCESS, path.as_ptr() as usize, path.len());
             }
         }
         prev_btn = btn_pressed;

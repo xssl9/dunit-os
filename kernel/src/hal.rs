@@ -14,6 +14,7 @@ extern "C" {
     pub fn hal_inw(port: u16) -> u16;
     pub fn hal_outl(port: u16, value: u32);
     pub fn hal_inl(port: u16) -> u32;
+    pub fn run_user_syscall_smoke(entry: u64, stack_top: u64);
 }
 
 #[no_mangle]
