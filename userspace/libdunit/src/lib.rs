@@ -180,6 +180,14 @@ pub fn write(fd: usize, buf: &[u8]) -> isize {
     syscall3(SYSCALL_WRITE, fd, buf.as_ptr() as usize, buf.len())
 }
 
+pub fn write_stdout(s: &str) -> isize {
+    write(1, s.as_bytes())
+}
+
+pub fn write_stderr(s: &str) -> isize {
+    write(2, s.as_bytes())
+}
+
 pub fn open(path: &str, flags: usize) -> isize {
     syscall3(SYSCALL_OPEN, path.as_ptr() as usize, path.len(), flags)
 }
@@ -193,7 +201,12 @@ pub fn close(fd: usize) -> isize {
 }
 
 pub fn print(s: &str) {
-    write(1, s.as_bytes());
+    write_stdout(s);
+}
+
+pub fn println(s: &str) {
+    write_stdout(s);
+    write_stdout("\n");
 }
 
 pub fn get_framebuffer(info: &mut FbInfo) -> bool {

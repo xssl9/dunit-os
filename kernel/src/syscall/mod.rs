@@ -103,10 +103,12 @@ const SMOKE_USER_WRITE: usize = SMOKE_USER_PAGE + 64;
 const SMOKE_USER_READ: usize = SMOKE_USER_PAGE + 128;
 const SMOKE_USER_APPEND_A: usize = SMOKE_USER_PAGE + 192;
 const SMOKE_USER_APPEND_B: usize = SMOKE_USER_PAGE + 256;
+const SMOKE_USER_STDOUT: usize = SMOKE_USER_PAGE + 320;
 const SMOKE_FS_PATH: &[u8] = b"/tmp/syscall-smoke.txt";
 const SMOKE_FS_DATA: &[u8] = b"hello";
 const SMOKE_APPEND_A: &[u8] = b"A";
 const SMOKE_APPEND_B: &[u8] = b"B";
+const SMOKE_STDOUT_DATA: &[u8] = b"[STDOUT-TEST] hello from userspace\n";
 
 static SYSCALL_SMOKE_OK: AtomicBool = AtomicBool::new(false);
 static SYSCALL_FS_SMOKE_OK: AtomicBool = AtomicBool::new(false);
@@ -342,6 +344,13 @@ fn sys_read(fd: u32, buf: *mut u8, count: usize) -> i64 {
         return error;
     }
 
+    match crate::process::get_fd(fd).map(|entry| entry.target) {
+        Some(crate::process::FdTarget::Stdin) => return ENOSYS,
+        Some(crate::process::FdTarget::Stdout | crate::process::FdTarget::Stderr) => return EBADF,
+        Some(crate::process::FdTarget::Vfs(_)) => {}
+        None => return EBADF,
+    }
+
     let vfs_fd = match process_vfs_fd(fd) {
         Ok(vfs_fd) => vfs_fd,
         Err(error) => return error,
@@ -378,6 +387,20 @@ fn sys_write(fd: u32, buf: *const u8, count: usize) -> i64 {
         Ok(data) => data,
         Err(error) => return error,
     };
+
+    match crate::process::get_fd(fd).map(|entry| entry.target) {
+        Some(crate::process::FdTarget::Stdout) => {
+            write_stdio("STDOUT", &data);
+            return data.len() as i64;
+        }
+        Some(crate::process::FdTarget::Stderr) => {
+            write_stdio("STDERR", &data);
+            return data.len() as i64;
+        }
+        Some(crate::process::FdTarget::Stdin) => return EBADF,
+        Some(crate::process::FdTarget::Vfs(_)) => {}
+        None => return EBADF,
+    }
 
     let vfs_fd = match process_vfs_fd(fd) {
         Ok(vfs_fd) => vfs_fd,
@@ -439,6 +462,9 @@ fn sys_close(fd: u32) -> i64 {
     };
 
     match entry.target {
+        crate::process::FdTarget::Stdin
+        | crate::process::FdTarget::Stdout
+        | crate::process::FdTarget::Stderr => EOPNOTSUPP,
         crate::process::FdTarget::Vfs(vfs_fd) => {
             if let Err(error) = crate::fs::vfs::get_vfs()
                 .ok_or(EIO)
@@ -452,6 +478,17 @@ fn sys_close(fd: u32) -> i64 {
                 Err(error) => process_error_to_errno(error),
             }
         }
+    }
+}
+
+fn write_stdio(label: &str, data: &[u8]) {
+    syscall_log!("[{}] ", label);
+    for byte in data {
+        let ch = *byte as char;
+        syscall_log!("{}", ch);
+    }
+    if data.last().copied() != Some(b'\n') {
+        syscall_log!("\r\n");
     }
 }
 
@@ -479,6 +516,11 @@ fn open_flags_from_u32(flags: u32) -> Result<crate::fs::vfs::OpenFlags, i64> {
 fn process_vfs_fd(fd: u32) -> Result<crate::fs::vfs::FileDescriptor, i64> {
     match crate::process::get_fd(fd).map(|entry| entry.target) {
         Some(crate::process::FdTarget::Vfs(vfs_fd)) => Ok(vfs_fd),
+        Some(
+            crate::process::FdTarget::Stdin
+            | crate::process::FdTarget::Stdout
+            | crate::process::FdTarget::Stderr,
+        ) => Err(EBADF),
         None => Err(EBADF),
     }
 }
@@ -736,6 +778,15 @@ extern "C" fn user_syscall_smoke_entry() -> ! {
             "mov rdi, 1",
             "syscall",
 
+            // stdio stdout smoke path
+            "mov rax, 4",
+            "mov rdi, 1",
+            "mov rsi, {stdout_buf}",
+            "mov rdx, {stdout_len}",
+            "syscall",
+            "cmp rax, {stdout_len}",
+            "jne 9f",
+
             // create/write/read/close success path
             "mov rax, 5",
             "mov rdi, {path}",
@@ -947,6 +998,8 @@ extern "C" fn user_syscall_smoke_entry() -> ! {
             data_len = const SMOKE_FS_DATA.len(),
             append_a = const SMOKE_USER_APPEND_A,
             append_b = const SMOKE_USER_APPEND_B,
+            stdout_buf = const SMOKE_USER_STDOUT,
+            stdout_len = const SMOKE_STDOUT_DATA.len(),
             read = const crate::fs::vfs::OpenFlags::READ.bits(),
             write = const crate::fs::vfs::OpenFlags::WRITE.bits(),
             write_trunc = const (crate::fs::vfs::OpenFlags::WRITE.bits()
@@ -976,6 +1029,7 @@ unsafe fn prepare_user_fs_smoke_page() -> Result<(), ()> {
     core::ptr::copy_nonoverlapping(SMOKE_FS_DATA.as_ptr(), page.add(64), SMOKE_FS_DATA.len());
     core::ptr::copy_nonoverlapping(SMOKE_APPEND_A.as_ptr(), page.add(192), SMOKE_APPEND_A.len());
     core::ptr::copy_nonoverlapping(SMOKE_APPEND_B.as_ptr(), page.add(256), SMOKE_APPEND_B.len());
+    core::ptr::copy_nonoverlapping(SMOKE_STDOUT_DATA.as_ptr(), page.add(320), SMOKE_STDOUT_DATA.len());
 
     map_current_user_page(SMOKE_USER_PAGE, page_frame)?;
     Ok(())

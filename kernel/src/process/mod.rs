@@ -83,7 +83,7 @@ pub struct Process {
 
 impl Process {
     pub fn new(pid: ProcessId) -> Self {
-        Self {
+        let mut process = Self {
             pid,
             state: ProcessState::Ready,
             context: CpuContext::new(),
@@ -91,11 +91,13 @@ impl Process {
             cwd: String::from("/"),
             fd_table: BTreeMap::new(),
             next_fd: FIRST_PROCESS_FD,
-        }
+        };
+        process.reserve_stdio();
+        process
     }
 
     pub fn new_kernel(pid: ProcessId) -> Self {
-        Self {
+        let mut process = Self {
             pid,
             state: ProcessState::Ready,
             context: CpuContext::new(),
@@ -103,7 +105,9 @@ impl Process {
             cwd: String::from("/"),
             fd_table: BTreeMap::new(),
             next_fd: FIRST_PROCESS_FD,
-        }
+        };
+        process.reserve_stdio();
+        process
     }
 
     pub fn terminate(&mut self) {
@@ -138,6 +142,12 @@ impl Process {
     pub fn fd_count(&self) -> usize {
         self.fd_table.len()
     }
+
+    fn reserve_stdio(&mut self) {
+        self.fd_table.insert(0, FdEntry::stdin());
+        self.fd_table.insert(1, FdEntry::stdout());
+        self.fd_table.insert(2, FdEntry::stderr());
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +159,9 @@ pub enum ProcessError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FdTarget {
+    Stdin,
+    Stdout,
+    Stderr,
     Vfs(crate::fs::vfs::FileDescriptor),
 }
 
@@ -158,6 +171,24 @@ pub struct FdEntry {
 }
 
 impl FdEntry {
+    pub const fn stdin() -> Self {
+        Self {
+            target: FdTarget::Stdin,
+        }
+    }
+
+    pub const fn stdout() -> Self {
+        Self {
+            target: FdTarget::Stdout,
+        }
+    }
+
+    pub const fn stderr() -> Self {
+        Self {
+            target: FdTarget::Stderr,
+        }
+    }
+
     pub const fn vfs(fd: crate::fs::vfs::FileDescriptor) -> Self {
         Self {
             target: FdTarget::Vfs(fd),
