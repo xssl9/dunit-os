@@ -75,6 +75,59 @@ impl WindowManager {
         self.windows[..self.window_count].iter().filter_map(|w| w.as_ref())
     }
 
+    pub fn close_at(&mut self, x: usize, y: usize) -> bool {
+        for i in (0..self.window_count).rev() {
+            if let Some(ref mut window) = self.windows[i] {
+                if !window.visible {
+                    continue;
+                }
+
+                let close_x = window.x + window.width.saturating_sub(25);
+                let close_y = window.y + 11;
+                if x >= close_x && x < close_x + 10 && y >= close_y && y < close_y + 10 {
+                    window.visible = false;
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    pub fn begin_drag_at(&self, x: usize, y: usize) -> Option<(usize, usize, usize)> {
+        for i in (0..self.window_count).rev() {
+            if let Some(window) = self.windows[i] {
+                if !window.visible {
+                    continue;
+                }
+
+                let inside_x = x >= window.x && x < window.x + window.width;
+                let inside_title = y >= window.y && y < window.y + 32;
+                let close_x = window.x + window.width.saturating_sub(25);
+                let over_close = x >= close_x && x < close_x + 10 && y >= window.y + 11 && y < window.y + 21;
+
+                if inside_x && inside_title && !over_close {
+                    return Some((i, x - window.x, y - window.y));
+                }
+            }
+        }
+
+        None
+    }
+
+    pub fn drag_window(&mut self, idx: usize, x: usize, y: usize, screen_width: usize, screen_height: usize) {
+        if idx >= self.window_count {
+            return;
+        }
+
+        if let Some(ref mut window) = self.windows[idx] {
+            let max_x = screen_width.saturating_sub(window.width);
+            let max_y = screen_height.saturating_sub(window.height);
+            window.x = x.min(max_x);
+            window.y = y.min(max_y).max(42);
+        }
+    }
+
     pub fn move_window(&mut self, idx: usize, x: usize, y: usize) {
         if idx < self.window_count {
             if let Some(ref mut window) = self.windows[idx] {

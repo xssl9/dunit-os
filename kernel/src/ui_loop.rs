@@ -1,445 +1,459 @@
 use crate::drivers::mouse;
 use crate::window_manager::{self, AppType};
 
-fn get_pixel_color(x: usize, y: usize, width: usize, height: usize) -> u32 {
-    let bg_color = 0x002b36u32;
-    let panel_color = 0x073642u32;
-    let plank_color = 0x1c1c1cu32;
-    let icon_color = 0xffffffu32;
-    
-    let plank_height = 64;
-    let plank_y = height - plank_height;
-    let icon_size = 48;
-    let icon_spacing = 8;
-    let plank_start_x = (width - (5 * (icon_size + icon_spacing))) / 2;
-    
-    if y < 40 {
-        return panel_color;
+const BG: u32 = 0x122025;
+const BG_ALT: u32 = 0x172a31;
+const PANEL: u32 = 0x1f353d;
+const PANEL_DARK: u32 = 0x0f1a1f;
+const TEXT: u32 = 0xd9e7e7;
+const MUTED: u32 = 0x8fa7a9;
+const ACCENT: u32 = 0x5cc8ff;
+const GREEN: u32 = 0x7bd88f;
+const YELLOW: u32 = 0xffcc66;
+const RED: u32 = 0xff6b6b;
+const PURPLE: u32 = 0xb79cff;
+const ORANGE: u32 = 0xffb86c;
+
+fn put_pixel(fb: *mut u32, width: usize, height: usize, x: usize, y: usize, color: u32) {
+    if x < width && y < height {
+        unsafe {
+            core::ptr::write_volatile(fb.add(y * width + x), color);
+        }
     }
-    
+}
+
+fn draw_rect(fb: *mut u32, width: usize, height: usize, x: usize, y: usize, w: usize, h: usize, color: u32) {
+    let x_end = x.saturating_add(w).min(width);
+    let y_end = y.saturating_add(h).min(height);
+    for py in y..y_end {
+        for px in x..x_end {
+            put_pixel(fb, width, height, px, py, color);
+        }
+    }
+}
+
+fn draw_rect_border(fb: *mut u32, width: usize, height: usize, x: usize, y: usize, w: usize, h: usize, color: u32) {
+    if w == 0 || h == 0 {
+        return;
+    }
+    draw_rect(fb, width, height, x, y, w, 1, color);
+    draw_rect(fb, width, height, x, y + h.saturating_sub(1), w, 1, color);
+    draw_rect(fb, width, height, x, y, 1, h, color);
+    draw_rect(fb, width, height, x + w.saturating_sub(1), y, 1, h, color);
+}
+
+fn glyph(ch: u8) -> [u8; 5] {
+    match ch {
+        b'A' => [0x7C, 0x12, 0x11, 0x12, 0x7C],
+        b'B' => [0x7F, 0x49, 0x49, 0x49, 0x36],
+        b'C' => [0x3E, 0x41, 0x41, 0x41, 0x22],
+        b'D' => [0x7F, 0x41, 0x41, 0x22, 0x1C],
+        b'E' => [0x7F, 0x49, 0x49, 0x49, 0x41],
+        b'F' => [0x7F, 0x09, 0x09, 0x09, 0x01],
+        b'G' => [0x3E, 0x41, 0x49, 0x49, 0x7A],
+        b'H' => [0x7F, 0x08, 0x08, 0x08, 0x7F],
+        b'I' => [0x00, 0x41, 0x7F, 0x41, 0x00],
+        b'J' => [0x20, 0x40, 0x41, 0x3F, 0x01],
+        b'K' => [0x7F, 0x08, 0x14, 0x22, 0x41],
+        b'L' => [0x7F, 0x40, 0x40, 0x40, 0x40],
+        b'M' => [0x7F, 0x02, 0x0C, 0x02, 0x7F],
+        b'N' => [0x7F, 0x04, 0x08, 0x10, 0x7F],
+        b'O' => [0x3E, 0x41, 0x41, 0x41, 0x3E],
+        b'P' => [0x7F, 0x09, 0x09, 0x09, 0x06],
+        b'R' => [0x7F, 0x09, 0x19, 0x29, 0x46],
+        b'S' => [0x46, 0x49, 0x49, 0x49, 0x31],
+        b'T' => [0x01, 0x01, 0x7F, 0x01, 0x01],
+        b'U' => [0x3F, 0x40, 0x40, 0x40, 0x3F],
+        b'V' => [0x1F, 0x20, 0x40, 0x20, 0x1F],
+        b'W' => [0x3F, 0x40, 0x38, 0x40, 0x3F],
+        b'X' => [0x63, 0x14, 0x08, 0x14, 0x63],
+        b'Y' => [0x07, 0x08, 0x70, 0x08, 0x07],
+        b'Z' => [0x61, 0x51, 0x49, 0x45, 0x43],
+        b'a' => [0x20, 0x54, 0x54, 0x54, 0x78],
+        b'b' => [0x7F, 0x48, 0x44, 0x44, 0x38],
+        b'c' => [0x38, 0x44, 0x44, 0x44, 0x20],
+        b'd' => [0x38, 0x44, 0x44, 0x48, 0x7F],
+        b'e' => [0x38, 0x54, 0x54, 0x54, 0x18],
+        b'f' => [0x08, 0x7E, 0x09, 0x01, 0x02],
+        b'g' => [0x0C, 0x52, 0x52, 0x52, 0x3E],
+        b'h' => [0x7F, 0x08, 0x04, 0x04, 0x78],
+        b'i' => [0x00, 0x44, 0x7D, 0x40, 0x00],
+        b'j' => [0x20, 0x40, 0x44, 0x3D, 0x00],
+        b'k' => [0x7F, 0x10, 0x28, 0x44, 0x00],
+        b'l' => [0x00, 0x41, 0x7F, 0x40, 0x00],
+        b'm' => [0x7C, 0x04, 0x18, 0x04, 0x78],
+        b'n' => [0x7C, 0x08, 0x04, 0x04, 0x78],
+        b'o' => [0x38, 0x44, 0x44, 0x44, 0x38],
+        b'p' => [0x7C, 0x14, 0x14, 0x14, 0x08],
+        b'q' => [0x08, 0x14, 0x14, 0x18, 0x7C],
+        b'r' => [0x7C, 0x08, 0x04, 0x04, 0x08],
+        b's' => [0x48, 0x54, 0x54, 0x54, 0x20],
+        b't' => [0x04, 0x3F, 0x44, 0x40, 0x20],
+        b'u' => [0x3C, 0x40, 0x40, 0x20, 0x7C],
+        b'v' => [0x1C, 0x20, 0x40, 0x20, 0x1C],
+        b'w' => [0x3C, 0x40, 0x30, 0x40, 0x3C],
+        b'x' => [0x44, 0x28, 0x10, 0x28, 0x44],
+        b'y' => [0x0C, 0x50, 0x50, 0x50, 0x3C],
+        b'z' => [0x44, 0x64, 0x54, 0x4C, 0x44],
+        b'0' => [0x3E, 0x51, 0x49, 0x45, 0x3E],
+        b'1' => [0x00, 0x42, 0x7F, 0x40, 0x00],
+        b'2' => [0x42, 0x61, 0x51, 0x49, 0x46],
+        b'3' => [0x21, 0x41, 0x45, 0x4B, 0x31],
+        b'4' => [0x18, 0x14, 0x12, 0x7F, 0x10],
+        b'5' => [0x27, 0x45, 0x45, 0x45, 0x39],
+        b'6' => [0x3C, 0x4A, 0x49, 0x49, 0x30],
+        b'7' => [0x01, 0x71, 0x09, 0x05, 0x03],
+        b'8' => [0x36, 0x49, 0x49, 0x49, 0x36],
+        b'9' => [0x06, 0x49, 0x49, 0x29, 0x1E],
+        b' ' => [0x00, 0x00, 0x00, 0x00, 0x00],
+        b'.' => [0x00, 0x60, 0x60, 0x00, 0x00],
+        b':' => [0x00, 0x36, 0x36, 0x00, 0x00],
+        b'-' => [0x08, 0x08, 0x08, 0x08, 0x08],
+        b'/' => [0x20, 0x10, 0x08, 0x04, 0x02],
+        b'%' => [0x62, 0x64, 0x08, 0x13, 0x23],
+        _ => [0x00, 0x00, 0x00, 0x00, 0x00],
+    }
+}
+
+fn draw_char(fb: *mut u32, width: usize, height: usize, x: usize, y: usize, ch: u8, color: u32) {
+    let font = glyph(ch);
+    for dx in 0..5 {
+        let col = font[dx];
+        for dy in 0..8 {
+            if (col >> dy) & 1 == 1 {
+                put_pixel(fb, width, height, x + dx, y + dy, color);
+            }
+        }
+    }
+}
+
+fn draw_text(fb: *mut u32, width: usize, height: usize, x: usize, y: usize, text: &str, color: u32) {
+    for (i, ch) in text.bytes().enumerate() {
+        draw_char(fb, width, height, x + i * 6, y, ch, color);
+    }
+}
+
+fn dock_layout(width: usize, height: usize) -> (usize, usize, usize, usize, usize) {
+    let icon_size = 48;
+    let icon_spacing = 12;
+    let dock_width = 5 * icon_size + 4 * icon_spacing + 48;
+    let dock_x = width.saturating_sub(dock_width) / 2;
+    let dock_y = height.saturating_sub(82);
+    (dock_x, dock_y, dock_width, icon_size, icon_spacing)
+}
+
+fn scene_pixel(x: usize, y: usize, width: usize, height: usize) -> u32 {
+    if y < 42 {
+        return PANEL_DARK;
+    }
+
     if let Some(wm) = window_manager::get_wm() {
         for window in wm.get_windows() {
             if window.visible && x >= window.x && x < window.x + window.width && y >= window.y && y < window.y + window.height {
                 let dx = x - window.x;
                 let dy = y - window.y;
-                if dy < 30 {
-                    return 0x268bd2;
-                } else if dx == 0 || dx == window.width - 1 || dy == 0 || dy == window.height - 1 {
-                    return 0x586e75;
-                } else if window.app_type == AppType::Terminal {
-                    return 0x000000;
-                } else {
-                    return 0xfdf6e3;
+                if dy < 32 {
+                    return PANEL;
                 }
-            }
-        }
-    }
-    
-    if y >= plank_y && y < height {
-        let plank_start = plank_start_x.saturating_sub(20);
-        let plank_end = plank_start_x + 5 * (icon_size + icon_spacing) + 20;
-        
-        if x >= plank_start && x < plank_end {
-            let icon_colors = [0x268bd2u32, 0x859900u32, 0xb58900u32, 0xdc322fu32, 0x6c71c4u32];
-            
-            for i in 0..5 {
-                let icon_x = plank_start_x + i * (icon_size + icon_spacing);
-                let icon_y = plank_y + 8;
-                
-                if x >= icon_x && x < icon_x + icon_size && y >= icon_y && y < icon_y + icon_size {
-                    let dx = x - icon_x;
-                    let dy = y - icon_y;
-                    let is_border = dx < 2 || dx >= icon_size - 2 || dy < 2 || dy >= icon_size - 2;
-                    if is_border {
-                        return 0x2c2c2cu32;
-                    }
-                    
-                    let cx = icon_x + icon_size / 2;
-                    let cy = icon_y + icon_size / 2;
-                    let in_symbol = match i {
-                        0 => {
-                            (y >= cy - 8 && y < cy - 8 + 3 && x >= cx - 10 && x < cx + 10) ||
-                            (y >= cy && y < cy + 3 && x >= cx - 10 && x < cx + 10) ||
-                            (y >= cy + 8 && y < cy + 11 && x >= cx - 10 && x < cx + 10) ||
-                            (x >= cx - 10 && x < cx - 7 && y >= cy - 8 && y < cy + 8) ||
-                            (x >= cx + 7 && x < cx + 10 && y >= cy - 8 && y < cy + 8)
-                        },
-                        1 => {
-                            (x >= cx - 8 && x < cx - 5 && y >= cy - 8 && y < cy + 8) ||
-                            (x >= cx + 2 && x < cx + 5 && y >= cy - 4 && y < cy + 8) ||
-                            (y >= cy - 8 && y < cy - 5 && x >= cx - 8 && x < cx + 2)
-                        },
-                        2 => {
-                            let rdx = (x as i32 - cx as i32).abs();
-                            let rdy = (y as i32 - cy as i32).abs();
-                            let dist = rdx * rdx + rdy * rdy;
-                            dist >= 49 && dist <= 81
-                        },
-                        3 => {
-                            (y >= cy - 10 && y < cy + 10 && x >= cx - 1 && x < cx + 2) ||
-                            (x >= cx - 8 && x < cx + 8 && y >= cy - 1 && y < cy + 2)
-                        },
-                        4 => {
-                            (y >= cy - 8 && y < cy - 5 && x >= cx - 6 && x < cx + 6) ||
-                            (x >= cx - 6 && x < cx - 3 && y >= cy - 8 && y < cy + 8) ||
-                            (x >= cx + 3 && x < cx + 6 && y >= cy - 8 && y < cy + 8) ||
-                            (y >= cy - 2 && y < cy + 4 && x >= cx - 2 && x < cx + 1)
-                        },
-                        _ => false
-                    };
-                    
-                    return if in_symbol { icon_color } else { icon_colors[i] };
+                if dx == 0 || dx == window.width - 1 || dy == 0 || dy == window.height - 1 {
+                    return ACCENT;
                 }
-            }
-            
-            return plank_color;
-        }
-    }
-    
-    bg_color
-}
-
-fn draw_char(fb: *mut u32, width: usize, x: usize, y: usize, ch: u8, color: u32) {
-    let font: &[u8] = match ch {
-        b'A' => &[0x7C, 0x12, 0x11, 0x12, 0x7C],
-        b'B' => &[0x7F, 0x49, 0x49, 0x49, 0x36],
-        b'C' => &[0x3E, 0x41, 0x41, 0x41, 0x22],
-        b'D' => &[0x7F, 0x41, 0x41, 0x22, 0x1C],
-        b'E' => &[0x7F, 0x49, 0x49, 0x49, 0x41],
-        b'F' => &[0x7F, 0x09, 0x09, 0x09, 0x01],
-        b'G' => &[0x3E, 0x41, 0x49, 0x49, 0x7A],
-        b'H' => &[0x7F, 0x08, 0x08, 0x08, 0x7F],
-        b'I' => &[0x00, 0x41, 0x7F, 0x41, 0x00],
-        b'J' => &[0x20, 0x40, 0x41, 0x3F, 0x01],
-        b'K' => &[0x7F, 0x08, 0x14, 0x22, 0x41],
-        b'L' => &[0x7F, 0x40, 0x40, 0x40, 0x40],
-        b'M' => &[0x7F, 0x02, 0x0C, 0x02, 0x7F],
-        b'N' => &[0x7F, 0x04, 0x08, 0x10, 0x7F],
-        b'O' => &[0x3E, 0x41, 0x41, 0x41, 0x3E],
-        b'P' => &[0x7F, 0x09, 0x09, 0x09, 0x06],
-        b'Q' => &[0x3E, 0x41, 0x51, 0x21, 0x5E],
-        b'R' => &[0x7F, 0x09, 0x19, 0x29, 0x46],
-        b'S' => &[0x46, 0x49, 0x49, 0x49, 0x31],
-        b'T' => &[0x01, 0x01, 0x7F, 0x01, 0x01],
-        b'U' => &[0x3F, 0x40, 0x40, 0x40, 0x3F],
-        b'V' => &[0x1F, 0x20, 0x40, 0x20, 0x1F],
-        b'W' => &[0x3F, 0x40, 0x38, 0x40, 0x3F],
-        b'X' => &[0x63, 0x14, 0x08, 0x14, 0x63],
-        b'Y' => &[0x07, 0x08, 0x70, 0x08, 0x07],
-        b'Z' => &[0x61, 0x51, 0x49, 0x45, 0x43],
-        b'a' => &[0x20, 0x54, 0x54, 0x54, 0x78],
-        b'b' => &[0x7F, 0x48, 0x44, 0x44, 0x38],
-        b'c' => &[0x38, 0x44, 0x44, 0x44, 0x20],
-        b'd' => &[0x38, 0x44, 0x44, 0x48, 0x7F],
-        b'e' => &[0x38, 0x54, 0x54, 0x54, 0x18],
-        b'f' => &[0x08, 0x7E, 0x09, 0x01, 0x02],
-        b'g' => &[0x0C, 0x52, 0x52, 0x52, 0x3E],
-        b'h' => &[0x7F, 0x08, 0x04, 0x04, 0x78],
-        b'i' => &[0x00, 0x44, 0x7D, 0x40, 0x00],
-        b'j' => &[0x20, 0x40, 0x44, 0x3D, 0x00],
-        b'k' => &[0x7F, 0x10, 0x28, 0x44, 0x00],
-        b'l' => &[0x00, 0x41, 0x7F, 0x40, 0x00],
-        b'm' => &[0x7C, 0x04, 0x18, 0x04, 0x78],
-        b'n' => &[0x7C, 0x08, 0x04, 0x04, 0x78],
-        b'o' => &[0x38, 0x44, 0x44, 0x44, 0x38],
-        b'p' => &[0x7C, 0x14, 0x14, 0x14, 0x08],
-        b'q' => &[0x08, 0x14, 0x14, 0x18, 0x7C],
-        b'r' => &[0x7C, 0x08, 0x04, 0x04, 0x08],
-        b's' => &[0x48, 0x54, 0x54, 0x54, 0x20],
-        b't' => &[0x04, 0x3F, 0x44, 0x40, 0x20],
-        b'u' => &[0x3C, 0x40, 0x40, 0x20, 0x7C],
-        b'v' => &[0x1C, 0x20, 0x40, 0x20, 0x1C],
-        b'w' => &[0x3C, 0x40, 0x30, 0x40, 0x3C],
-        b'x' => &[0x44, 0x28, 0x10, 0x28, 0x44],
-        b'y' => &[0x0C, 0x50, 0x50, 0x50, 0x3C],
-        b'z' => &[0x44, 0x64, 0x54, 0x4C, 0x44],
-        b'0' => &[0x3E, 0x51, 0x49, 0x45, 0x3E],
-        b'1' => &[0x00, 0x42, 0x7F, 0x40, 0x00],
-        b'2' => &[0x42, 0x61, 0x51, 0x49, 0x46],
-        b'3' => &[0x21, 0x41, 0x45, 0x4B, 0x31],
-        b'4' => &[0x18, 0x14, 0x12, 0x7F, 0x10],
-        b'5' => &[0x27, 0x45, 0x45, 0x45, 0x39],
-        b'6' => &[0x3C, 0x4A, 0x49, 0x49, 0x30],
-        b'7' => &[0x01, 0x71, 0x09, 0x05, 0x03],
-        b'8' => &[0x36, 0x49, 0x49, 0x49, 0x36],
-        b'9' => &[0x06, 0x49, 0x49, 0x29, 0x1E],
-        b' ' => &[0x00, 0x00, 0x00, 0x00, 0x00],
-        b'.' => &[0x00, 0x60, 0x60, 0x00, 0x00],
-        b':' => &[0x00, 0x36, 0x36, 0x00, 0x00],
-        b'$' => &[0x24, 0x2A, 0x7F, 0x2A, 0x12],
-        b'-' => &[0x08, 0x08, 0x08, 0x08, 0x08],
-        b'/' => &[0x20, 0x10, 0x08, 0x04, 0x02],
-        b'(' => &[0x00, 0x1C, 0x22, 0x41, 0x00],
-        b')' => &[0x00, 0x41, 0x22, 0x1C, 0x00],
-        _ => &[0x00, 0x00, 0x00, 0x00, 0x00],
-    };
-    
-    unsafe {
-        for dx in 0..5 {
-            let col = font[dx];
-            for dy in 0..8 {
-                if (col >> dy) & 1 == 1 {
-                    let px = x + dx;
-                    let py = y + dy;
-                    if px < width {
-                        *fb.add(py * width + px) = color;
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn draw_text(fb: *mut u32, width: usize, x: usize, y: usize, text: &str, color: u32) {
-    for (i, ch) in text.bytes().enumerate() {
-        draw_char(fb, width, x + i * 6, y, ch, color);
-    }
-}
-
-fn draw_window(fb_addr: *mut u32, width: usize, height: usize, x: usize, y: usize, w: usize, h: usize, title: &str, app_type: AppType) {
-    unsafe {
-        for dy in 0..h {
-            for dx in 0..w {
-                let px = x + dx;
-                let py = y + dy;
-                if px < width && py < height {
-                    let offset = py * width + px;
-                    let color = if dy < 30 {
-                        0x268bd2
-                    } else if dx == 0 || dx == w-1 || dy == 0 || dy == h-1 {
-                        0x586e75
-                    } else if app_type == AppType::Terminal {
-                        0x000000
-                    } else {
-                        0xfdf6e3
-                    };
-                    *fb_addr.add(offset) = color;
-                }
-            }
-        }
-        
-        draw_text(fb_addr, width, x + 10, y + 10, title, 0xfdf6e3);
-    }
-}
-
-fn redraw_full_screen(fb_addr: *mut u32, width: usize, height: usize) {
-    let bg_color = 0x002b36u32;
-    let panel_color = 0x073642u32;
-    let plank_color = 0x1c1c1cu32;
-    
-    unsafe {
-        for y in 0..height {
-            for x in 0..width {
-                let color = if y < 40 {
-                    panel_color
-                } else if y >= height - 64 {
-                    bg_color
-                } else {
-                    bg_color
+                return match window.app_type {
+                    AppType::Terminal => 0x05090b,
+                    _ => 0x18282f,
                 };
-                *fb_addr.add(y * width + x) = color;
             }
         }
-        
-        draw_text(fb_addr, width, 10, 15, "Workspace 1", 0x93a1a1);
-        draw_text(fb_addr, width, width - 60, 15, "13:37", 0x93a1a1);
-        
-        let plank_height = 64;
-        let plank_y = height - plank_height;
-        let icon_size = 48;
-        let icon_spacing = 8;
-        let plank_start_x = (width - (5 * (icon_size + icon_spacing))) / 2;
-        
-        for y in plank_y..height {
-            for x in (plank_start_x - 20)..(plank_start_x + 5 * (icon_size + icon_spacing) + 20) {
-                if x < width {
-                    *fb_addr.add(y * width + x) = plank_color;
-                }
-            }
-        }
-        
-        let icon_colors = [0x268bd2u32, 0x859900u32, 0xb58900u32, 0xdc322fu32, 0x6c71c4u32];
+    }
+
+    let (dock_x, dock_y, dock_width, icon_size, icon_spacing) = dock_layout(width, height);
+    if x >= dock_x && x < dock_x + dock_width && y >= dock_y && y < dock_y + 68 {
+        let first_icon_x = dock_x + 24;
+        let colors = [ACCENT, GREEN, YELLOW, RED, PURPLE];
         for i in 0..5 {
-            let icon_x = plank_start_x + i * (icon_size + icon_spacing);
-            let icon_y = plank_y + 8;
-            
-            for dy in 0..icon_size {
-                for dx in 0..icon_size {
-                    let px = icon_x + dx;
-                    let py = icon_y + dy;
-                    if px < width && py < height {
-                        let is_border = dx < 2 || dx >= icon_size - 2 || dy < 2 || dy >= icon_size - 2;
-                        let color = if is_border { 0x2c2c2cu32 } else { icon_colors[i] };
-                        *fb_addr.add(py * width + px) = color;
-                    }
-                }
+            let icon_x = first_icon_x + i * (icon_size + icon_spacing);
+            let icon_y = dock_y + 10;
+            if x >= icon_x && x < icon_x + icon_size && y >= icon_y && y < icon_y + icon_size {
+                return colors[i];
             }
-            
-            let cx = icon_x + icon_size / 2;
-            let cy = icon_y + icon_size / 2;
-            let icon_color = 0xffffffu32;
-            
-            match i {
-                0 => {
-                    for j in 0..3 {
-                        for k in 0..20 {
-                            *fb_addr.add((cy - 8 + j * 8) * width + cx - 10 + k) = icon_color;
-                        }
-                    }
-                    for j in 0..16 {
-                        *fb_addr.add((cy - 8 + j) * width + cx - 10) = icon_color;
-                        *fb_addr.add((cy - 8 + j) * width + cx + 9) = icon_color;
-                    }
-                },
-                1 => {
-                    for j in 0..16 {
-                        for k in 0..3 {
-                            *fb_addr.add((cy - 8 + j) * width + cx - 8 + k) = icon_color;
-                        }
-                    }
-                    for j in 0..12 {
-                        for k in 0..3 {
-                            *fb_addr.add((cy - 4 + j) * width + cx + 2 + k) = icon_color;
-                        }
-                    }
-                    for k in 0..10 {
-                        for j in 0..3 {
-                            *fb_addr.add((cy - 8 + j) * width + cx - 8 + k) = icon_color;
-                        }
-                    }
-                },
-                2 => {
-                    for j in 0..8 {
-                        for k in 0..8 {
-                            let dx = j as i32 - 4;
-                            let dy = k as i32 - 4;
-                            if dx * dx + dy * dy >= 9 && dx * dx + dy * dy <= 25 {
-                                *fb_addr.add((cy - 4 + k) * width + cx - 4 + j) = icon_color;
-                            }
-                        }
-                    }
-                },
-                3 => {
-                    for j in 0..20 {
-                        for k in 0..3 {
-                            *fb_addr.add((cy - 10 + j) * width + cx - 1 + k) = icon_color;
-                        }
-                    }
-                    for j in 0..3 {
-                        for k in 0..16 {
-                            *fb_addr.add((cy - 1 + j) * width + cx - 8 + k) = icon_color;
-                        }
-                    }
-                },
-                4 => {
-                    for j in 0..16 {
-                        for k in 0..12 {
-                            if j < 3 || k < 3 || k >= 9 {
-                                *fb_addr.add((cy - 8 + j) * width + cx - 6 + k) = icon_color;
-                            }
-                        }
-                    }
-                    for j in 0..6 {
-                        for k in 0..3 {
-                            *fb_addr.add((cy - 2 + j) * width + cx - 2 + k) = icon_color;
-                        }
-                    }
-                },
-                _ => {}
-            }
+        }
+        return PANEL;
+    }
+
+    if ((x / 28) + (y / 28)) % 2 == 0 {
+        BG
+    } else {
+        BG_ALT
+    }
+}
+
+fn draw_icon_symbol(fb: *mut u32, width: usize, height: usize, x: usize, y: usize, app_type: AppType) {
+    let cx = x + 24;
+    let cy = y + 24;
+    match app_type {
+        AppType::Terminal => {
+            draw_text(fb, width, height, cx - 13, cy - 4, ">_", 0xffffff);
+        }
+        AppType::Files => {
+            draw_rect(fb, width, height, cx - 13, cy - 8, 26, 17, 0xffffff);
+            draw_rect(fb, width, height, cx - 13, cy - 12, 13, 5, 0xffffff);
+        }
+        AppType::Settings => {
+            draw_rect_border(fb, width, height, cx - 10, cy - 10, 20, 20, 0xffffff);
+            draw_rect(fb, width, height, cx - 2, cy - 2, 5, 5, 0xffffff);
+        }
+        AppType::Monitor => {
+            draw_rect(fb, width, height, cx - 12, cy + 5, 5, 8, 0xffffff);
+            draw_rect(fb, width, height, cx - 3, cy - 6, 5, 19, 0xffffff);
+            draw_rect(fb, width, height, cx + 6, cy - 12, 5, 25, 0xffffff);
+        }
+        AppType::Editor => {
+            draw_rect_border(fb, width, height, cx - 11, cy - 12, 22, 25, 0xffffff);
+            draw_rect(fb, width, height, cx - 6, cy - 5, 12, 2, 0xffffff);
+            draw_rect(fb, width, height, cx - 6, cy + 1, 12, 2, 0xffffff);
         }
     }
 }
 
-fn draw_windows(fb_addr: *mut u32, width: usize, height: usize) {
+fn draw_dock(fb: *mut u32, width: usize, height: usize) {
+    let (dock_x, dock_y, dock_width, icon_size, icon_spacing) = dock_layout(width, height);
+    draw_rect(fb, width, height, dock_x, dock_y, dock_width, 68, PANEL);
+    draw_rect_border(fb, width, height, dock_x, dock_y, dock_width, 68, 0x38535d);
+
+    let apps = [
+        (AppType::Terminal, ACCENT, "Term"),
+        (AppType::Files, GREEN, "Files"),
+        (AppType::Settings, YELLOW, "Prefs"),
+        (AppType::Monitor, RED, "Stats"),
+        (AppType::Editor, PURPLE, "Edit"),
+    ];
+
+    let first_icon_x = dock_x + 24;
+    for i in 0..apps.len() {
+        let icon_x = first_icon_x + i * (icon_size + icon_spacing);
+        let icon_y = dock_y + 10;
+        draw_rect(fb, width, height, icon_x, icon_y, icon_size, icon_size, apps[i].1);
+        draw_rect_border(fb, width, height, icon_x, icon_y, icon_size, icon_size, 0xeef7f7);
+        draw_icon_symbol(fb, width, height, icon_x, icon_y, apps[i].0);
+        draw_text(fb, width, height, icon_x + 8, icon_y + icon_size + 5, apps[i].2, MUTED);
+    }
+}
+
+fn draw_window(fb: *mut u32, width: usize, height: usize, window: &window_manager::Window) {
+    draw_rect(fb, width, height, window.x, window.y, window.width, window.height, 0x18282f);
+    draw_rect(fb, width, height, window.x, window.y, window.width, 32, PANEL);
+    draw_rect_border(fb, width, height, window.x, window.y, window.width, window.height, ACCENT);
+    draw_text(fb, width, height, window.x + 12, window.y + 12, window.title, TEXT);
+    draw_rect(fb, width, height, window.x + window.width.saturating_sub(25), window.y + 11, 10, 10, RED);
+
+    let x = window.x + 18;
+    let y = window.y + 50;
+    match window.app_type {
+        AppType::Terminal => {
+            draw_rect(fb, width, height, window.x + 8, window.y + 40, window.width.saturating_sub(16), window.height.saturating_sub(50), 0x05090b);
+            draw_text(fb, width, height, x, y, "root@dunit:~# dufetch", GREEN);
+            draw_text(fb, width, height, x, y + 20, "Dunit OS  Green Tea", TEXT);
+            draw_text(fb, width, height, x, y + 40, "VFS MemFS userspace runtime", MUTED);
+        }
+        AppType::Files => {
+            draw_text(fb, width, height, x, y, "/app", TEXT);
+            draw_text(fb, width, height, x, y + 24, "[bin] elf_demo", ACCENT);
+            draw_text(fb, width, height, x, y + 44, "[bin] fs_test", GREEN);
+            draw_text(fb, width, height, x, y + 64, "[dir] tmp", YELLOW);
+        }
+        AppType::Settings => {
+            draw_text(fb, width, height, x, y, "Mode       GUI", TEXT);
+            draw_text(fb, width, height, x, y + 24, "Theme      Deep Green", MUTED);
+            draw_text(fb, width, height, x, y + 48, "Runtime    Single task", MUTED);
+        }
+        AppType::Monitor => {
+            draw_text(fb, width, height, x, y, "CPU", TEXT);
+            draw_rect(fb, width, height, x + 42, y, 180, 10, PANEL_DARK);
+            draw_rect(fb, width, height, x + 42, y, 34, 10, GREEN);
+            draw_text(fb, width, height, x + 235, y, "18%", GREEN);
+            draw_text(fb, width, height, x, y + 28, "RAM", TEXT);
+            draw_rect(fb, width, height, x + 42, y + 28, 180, 10, PANEL_DARK);
+            draw_rect(fb, width, height, x + 42, y + 28, 52, 10, YELLOW);
+            draw_text(fb, width, height, x + 235, y + 28, "512MB", YELLOW);
+        }
+        AppType::Editor => {
+            draw_text(fb, width, height, x, y, "notes.txt", ACCENT);
+            draw_text(fb, width, height, x, y + 24, "Dunit GUI mode is alive.", TEXT);
+            draw_text(fb, width, height, x, y + 44, "Cursor and dock are kernel builtins.", MUTED);
+        }
+    }
+}
+
+fn draw_windows(fb: *mut u32, width: usize, height: usize) {
     if let Some(wm) = window_manager::get_wm() {
         for window in wm.get_windows() {
             if window.visible {
-                draw_window(fb_addr, width, height, window.x, window.y, window.width, window.height, window.title, window.app_type);
+                draw_window(fb, width, height, window);
             }
         }
     }
 }
 
+fn redraw_full_screen(fb: *mut u32, width: usize, height: usize) {
+    for y in 0..height {
+        for x in 0..width {
+            put_pixel(fb, width, height, x, y, scene_pixel(x, y, width, height));
+        }
+    }
+
+    draw_rect(fb, width, height, 0, 0, width, 42, PANEL_DARK);
+    draw_rect(fb, width, height, 0, 41, width, 1, 0x39525b);
+    draw_text(fb, width, height, 14, 14, "Dunit OS", TEXT);
+    draw_text(fb, width, height, 104, 14, "GUI Mode", ACCENT);
+    draw_text(fb, width, height, width.saturating_sub(190), 14, "Single-task runtime", MUTED);
+
+    draw_text(fb, width, height, 60, 92, "Dunit Desktop", TEXT);
+    draw_text(fb, width, height, 60, 116, "VFS / MemFS / ELF exec ready", MUTED);
+
+    draw_rect(fb, width, height, 60, 158, 220, 86, PANEL);
+    draw_rect_border(fb, width, height, 60, 158, 220, 86, 0x39525b);
+    draw_text(fb, width, height, 78, 178, "Runtime", ACCENT);
+    draw_text(fb, width, height, 78, 204, "single process", TEXT);
+
+    draw_rect(fb, width, height, 304, 158, 220, 86, PANEL);
+    draw_rect_border(fb, width, height, 304, 158, 220, 86, 0x39525b);
+    draw_text(fb, width, height, 322, 178, "Filesystem", GREEN);
+    draw_text(fb, width, height, 322, 204, "MemFS over VFS", TEXT);
+
+    draw_rect(fb, width, height, 548, 158, 220, 86, PANEL);
+    draw_rect_border(fb, width, height, 548, 158, 220, 86, 0x39525b);
+    draw_text(fb, width, height, 566, 178, "Pointer", ORANGE);
+    draw_text(fb, width, height, 566, 204, "PS/2 packet sync", TEXT);
+
+    draw_windows(fb, width, height);
+    draw_dock(fb, width, height);
+}
+
+fn restore_cursor_area(fb: *mut u32, width: usize, height: usize, x: i32, y: i32) {
+    let start_x = x.max(0) as usize;
+    let start_y = y.max(0) as usize;
+    for dy in 0..22 {
+        for dx in 0..16 {
+            let px = start_x + dx;
+            let py = start_y + dy;
+            put_pixel(fb, width, height, px, py, scene_pixel(px, py, width, height));
+        }
+    }
+}
+
+fn draw_cursor(fb: *mut u32, width: usize, height: usize, x: i32, y: i32) {
+    let x = x.max(0) as usize;
+    let y = y.max(0) as usize;
+    for dy in 0..18 {
+        for dx in 0..12 {
+            let inside = dx <= dy / 2 || (dy > 10 && dx > 4 && dx < 8 && dy - dx < 10);
+            let outline = dx == 0 || dx == dy / 2 || (dy > 10 && (dx == 4 || dx == 8));
+            if inside {
+                let color = if outline { 0x05090b } else { 0xf6ffff };
+                put_pixel(fb, width, height, x + dx, y + dy, color);
+            }
+        }
+    }
+    draw_rect(fb, width, height, x + 7, y + 14, 4, 4, ACCENT);
+}
+
+fn handle_dock_click(mx: usize, my: usize, width: usize, height: usize) -> bool {
+    let (dock_x, dock_y, _dock_width, icon_size, icon_spacing) = dock_layout(width, height);
+    if my < dock_y || my >= dock_y + 68 {
+        return false;
+    }
+
+    let first_icon_x = dock_x + 24;
+    for i in 0..5 {
+        let icon_x = first_icon_x + i * (icon_size + icon_spacing);
+        let icon_y = dock_y + 10;
+        if mx >= icon_x && mx < icon_x + icon_size && my >= icon_y && my < icon_y + icon_size {
+            if let Some(wm) = window_manager::get_wm() {
+                let app_type = match i {
+                    0 => AppType::Terminal,
+                    1 => AppType::Files,
+                    2 => AppType::Settings,
+                    3 => AppType::Monitor,
+                    4 => AppType::Editor,
+                    _ => AppType::Terminal,
+                };
+                wm.toggle_window(app_type);
+            }
+            return true;
+        }
+    }
+
+    false
+}
+
 pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize) -> ! {
-    let plank_height = 64;
-    let plank_y = height - plank_height;
-    let icon_size = 48;
-    let icon_spacing = 8;
-    let plank_start_x = (width - (5 * (icon_size + icon_spacing))) / 2;
-    
-    let mut old_mouse_x = 512;
-    let mut old_mouse_y = 384;
-    let mut old_buttons = 0u8;
-    
+    mouse::set_bounds(width, height);
+    mouse::set_position((width / 2) as i32, (height / 2) as i32);
+
+    redraw_full_screen(fb_addr, width, height);
+
+    let (mut old_mouse_x, mut old_mouse_y) = mouse::get_position();
+    let mut old_buttons = mouse::get_buttons();
+    let mut dragging: Option<(usize, usize, usize)> = None;
+    draw_cursor(fb_addr, width, height, old_mouse_x, old_mouse_y);
+
     loop {
         mouse::update();
         let (mouse_x, mouse_y) = mouse::get_position();
         let buttons = mouse::get_buttons();
-        
-        if (buttons & 0x01) != 0 && (old_buttons & 0x01) == 0 {
+        let pressed = (buttons & 0x01) != 0;
+        let was_pressed = (old_buttons & 0x01) != 0;
+        let mut redraw = mouse_x != old_mouse_x || mouse_y != old_mouse_y;
+
+        if pressed && !was_pressed {
             let mx = mouse_x as usize;
             let my = mouse_y as usize;
-            
-            if my >= plank_y && my < height {
-                for i in 0..5 {
-                    let icon_x = plank_start_x + i * (icon_size + icon_spacing);
-                    let icon_y = plank_y + 8;
-                    
-                    if mx >= icon_x && mx < icon_x + icon_size && my >= icon_y && my < icon_y + icon_size {
-                        if let Some(wm) = window_manager::get_wm() {
-                            let app_type = match i {
-                                0 => AppType::Terminal,
-                                1 => AppType::Files,
-                                2 => AppType::Settings,
-                                3 => AppType::Monitor,
-                                4 => AppType::Editor,
-                                _ => AppType::Terminal,
-                            };
-                            wm.toggle_window(app_type);
-                            draw_windows(fb_addr, width, height);
-                        }
-                        break;
-                    }
-                }
+
+            let closed = window_manager::get_wm()
+                .map(|wm| wm.close_at(mx, my))
+                .unwrap_or(false);
+
+            if closed {
+                dragging = None;
+                redraw = true;
+            } else if handle_dock_click(mx, my, width, height) {
+                dragging = None;
+                redraw = true;
+            } else {
+                dragging = window_manager::get_wm()
+                    .and_then(|wm| wm.begin_drag_at(mx, my));
             }
         }
-        
-        if mouse_x != old_mouse_x || mouse_y != old_mouse_y {
-            unsafe {
-                for dy in 0..16 {
-                    for dx in 0..10 {
-                        if dx < 10 - dy / 2 {
-                            let px = old_mouse_x as usize + dx;
-                            let py = old_mouse_y as usize + dy;
-                            if px < width && py < height {
-                                let color = get_pixel_color(px, py, width, height);
-                                *fb_addr.add(py * width + px) = color;
-                            }
-                        }
-                    }
-                }
-                
-                for dy in 0..16 {
-                    for dx in 0..10 {
-                        if dx < 10 - dy / 2 {
-                            let px = mouse_x as usize + dx;
-                            let py = mouse_y as usize + dy;
-                            if px < width && py < height {
-                                *fb_addr.add(py * width + px) = 0xFFFFFF;
-                            }
-                        }
-                    }
+
+        if pressed {
+            if let Some((idx, offset_x, offset_y)) = dragging {
+                if let Some(wm) = window_manager::get_wm() {
+                    let mx = mouse_x.max(0) as usize;
+                    let my = mouse_y.max(0) as usize;
+                    wm.drag_window(
+                        idx,
+                        mx.saturating_sub(offset_x),
+                        my.saturating_sub(offset_y),
+                        width,
+                        height,
+                    );
+                    redraw = true;
                 }
             }
-            
-            old_mouse_x = mouse_x;
-            old_mouse_y = mouse_y;
+        } else {
+            dragging = None;
         }
-        
+
+        if redraw {
+            redraw_full_screen(fb_addr, width, height);
+            draw_cursor(fb_addr, width, height, mouse_x, mouse_y);
+        }
+
+        old_mouse_x = mouse_x;
+        old_mouse_y = mouse_y;
         old_buttons = buttons;
-        
-        for _ in 0..1000 {
+
+        for _ in 0..3000 {
             unsafe { core::arch::asm!("pause"); }
         }
     }

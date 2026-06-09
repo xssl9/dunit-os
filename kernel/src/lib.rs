@@ -1273,7 +1273,7 @@ pub extern "C" fn kernel_main(
                 }
             }
             
-            serial_write("[RENDER] Drawing Plank icons...\r\n");
+            serial_write("[RENDER] Drawing built-in dock icons...\r\n");
             
             let icon_colors = [
                 (0x268bd2u32, "Terminal"),
@@ -1401,27 +1401,9 @@ pub extern "C" fn kernel_main(
         
         serial_write("\r\n[UI] Starting interactive UI loop...\r\n");
         
-        screen_log("[ OK ] Starting Plank dock", false);
-        serial_write("[PLANK] Loading plank from embedded binary\r\n");
-        
-        static PLANK_ELF: &[u8] = include_bytes!("../../build/userspace/plank");
-        
-        match crate::elf::ElfParser::new(PLANK_ELF) {
-            Ok(parser) => {
-                serial_write("[PLANK] ELF parsed successfully\r\n");
-                let entry = parser.entry_point();
-                serial_write("[PLANK] Jumping to plank entry point\r\n");
-                
-                unsafe {
-                    let entry_fn: extern "C" fn() -> ! = core::mem::transmute(entry as usize);
-                    entry_fn();
-                }
-            }
-            Err(_) => {
-                serial_write("[PLANK] ELF parse failed, falling back to built-in UI\r\n");
-                ui_loop::run_ui_loop(fb_addr, width, height);
-            }
-        }
+        screen_log("[ OK ] Starting built-in GUI shell", false);
+        serial_write("[GUI] Starting built-in desktop loop\r\n");
+        ui_loop::run_ui_loop(fb_addr, width, height);
     } else {
         serial_write("[GRAPHICS] No framebuffer available\r\n");
         serial_write("[GRAPHICS] Running in headless mode\r\n");
