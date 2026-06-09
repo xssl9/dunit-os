@@ -7,6 +7,7 @@ extern crate alloc;
 extern crate std;
 
 pub mod allocator;
+pub mod apps;
 pub mod cpu;
 pub mod dpkg;
 pub mod drivers;
@@ -85,50 +86,6 @@ static mut TERMINAL_CWD: [u8; 256] = [0; 256];
 static mut TERMINAL_CWD_LEN: usize = 0;
 static mut TERMINAL_DIR_ENTRIES: [fs::vfs::DirEntry; 16] = [fs::vfs::DirEntry::empty(); 16];
 
-const DUFETCH_LOGO_WIDTH: usize = 80;
-const DUFETCH_LOGO: [&str; 40] = [
-    "",
-    "",
-    "",
-    "",
-    "                                .=**************:.",
-    "                           .*************************-",
-    "                        -********************************",
-    "                     :.  -*********************************=",
-    "                   -====.  -*********************************=",
-    "                  -=======.  -****+..       ..*****************.",
-    "                :===========.  .                 .+*************+",
-    "               -============.                       .*************",
-    "              -===========.                           -************",
-    "             :===========           .-+***--            ***********=",
-    "             ==========-         -*************.         ***********",
-    "            ===========        .****-       =****.       .***********",
-    "            ----------.       :===            -===        :==========",
-    "        ::::::::::::.   .::::     ::::: :::::     .::::  ::::. :::::::::::::.",
-    "       +@@@@@@@@@@@@@@..@@@@+    =@@@@  @@@@@@-  .@@@@+ @@@@@ @@@@@@@@@@@@@@",
-    "      :@@@@      @@@@- @@@@#    -@@@@# @@@@@@@@= @@@@# =@@@@#     @@@@@",
-    "     .@@@@%     %@@@@ *@@@@    .@@@@% @@@@@.@@@@@@@@@ =@@@@#     @@@@@.",
-    "     @@@@@@@@@@@@@@@.*@@@@@@@@@@@@@@ #@@@@.  %@@@@@@: @@@@@     #@@@@:",
-    "    =@@@@@@@@@@@@%:   *@@@@@@@@@@#. .@@@@=    #@@@@= %@@@@     .@@@@@",
-    "",
-    "            ==-========:       -***-         +***:       =**********",
-    "             --=========:       .******+=******-        :***********",
-    "              ===========-         .-*******-.         =***********",
-    "              :============.                         .************",
-    "               :=============:                      +************",
-    "                 -==============.               .==   +*********",
-    "                  :====================:..===========   +*****=",
-    "                    -==================================   +*=",
-    "                      :==================================",
-    "                         ===============================",
-    "                            .=======================.",
-    "                                 ..-=========-..",
-    "",
-    "",
-    "",
-    "",
-];
-
 fn serial_write(s: &str) {
     for byte in s.bytes() {
         unsafe {
@@ -162,92 +119,9 @@ fn terminal_cwd() -> &'static str {
     }
 }
 
-struct TerminalConsoleWriter<'a> {
-    console: &'a mut terminal::FbConsole,
-}
-
-impl core::fmt::Write for TerminalConsoleWriter<'_> {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        self.console.write_str(s);
-        Ok(())
-    }
-}
-
-fn terminal_write_padded(console: &mut terminal::FbConsole, text: &str, width: usize) {
-    console.write_str(text);
-    let mut written = text.len();
-    while written < width {
-        console.write_str(" ");
-        written += 1;
-    }
-}
-
 fn terminal_dufetch(console: &mut terminal::FbConsole) {
-    use core::fmt::Write;
-
     let cwd = terminal_cwd();
-    let pid = process::current_process()
-        .map(|process| process.pid.0)
-        .unwrap_or(0);
-
-    let mut memory_available_kib = 0usize;
-    let mut memory_total_kib = 0usize;
-    if let Some(pmm) = memory::pmm::get_pmm() {
-        memory_available_kib = pmm.available_memory() / 1024;
-        memory_total_kib = pmm.total_memory() / 1024;
-    }
-
-    let info: [&str; 9] = [
-        "OS: Dunit OS",
-        "Kernel: 1.0.0 Green Tea",
-        "Arch: x86_64",
-        "Mode: Terminal",
-        "Shell: Dunit Terminal",
-        "FS: MemFS over VFS",
-        "PID:",
-        "CWD:",
-        "Memory:",
-    ];
-
-    for idx in 0..DUFETCH_LOGO.len() {
-        terminal_write_padded(console, DUFETCH_LOGO[idx], DUFETCH_LOGO_WIDTH);
-        console.write_str("  ");
-
-        match idx {
-            4 => console.write_str(info[0]),
-            5 => console.write_str(info[1]),
-            6 => console.write_str(info[2]),
-            7 => console.write_str(info[3]),
-            8 => console.write_str(info[4]),
-            9 => console.write_str(info[5]),
-            10 => {
-                let _ = write!(TerminalConsoleWriter { console: &mut *console }, "{} {}", info[6], pid);
-            }
-            11 => {
-                console.write_str(info[7]);
-                console.write_str(" ");
-                console.write_str(cwd);
-            }
-            12 => {
-                if memory_total_kib > 0 {
-                    let used_kib = memory_total_kib.saturating_sub(memory_available_kib);
-                    let _ = write!(
-                        TerminalConsoleWriter { console: &mut *console },
-                        "{} {} KiB / {} KiB",
-                        info[8],
-                        used_kib,
-                        memory_total_kib
-                    );
-                } else {
-                    console.write_str("Memory: available");
-                }
-            }
-            13 => console.write_str("Display: Framebuffer"),
-            _ => {}
-        }
-
-        console.write_str("\n");
-    }
+    apps::dufetch::run(console, cwd);
 }
 
 fn write_vfs_error(console: &mut terminal::FbConsole, command: &str, error: fs::vfs::VfsError) {
@@ -372,10 +246,17 @@ fn terminal_exec(console: &mut terminal::FbConsole, cwd: &str, path: &str) {
 
     match read_vfs_file(cwd, path) {
         Ok(data) => {
-            if elf::run_demo_elf(&data) {
+            if elf::run_process_elf(&data) {
                 serial_write("[EXEC] ");
                 serial_write(&normalized);
                 serial_write(" returned\r\n");
+                if let Some(vfs) = fs::vfs::get_vfs() {
+                    if vfs.open_file_count() == 0 {
+                        serial_write("[PROCESS-RUN] VFS handles clean\r\n");
+                    } else {
+                        serial_write("[PROCESS-RUN] VFS handles leaked\r\n");
+                    }
+                }
                 console.write_str("exec: ");
                 console.write_str(&normalized);
                 console.write_str(" returned\n");
@@ -833,6 +714,7 @@ pub extern "C" fn kernel_main(
     screen_log("[ OK ] Memory management subsystem operational", false);
 
     process::init_current_kernel_process();
+    process::run_process_address_space_smoke();
     
     if terminal_mode == 0 {
         screen_log("[ .. ] Initializing process management", false);
@@ -922,6 +804,13 @@ pub extern "C" fn kernel_main(
         serial_write("[DRV] keyboard::init() returned\r\n");
         screen_log("[ OK ] [DRV] keyboard::init() returned", false);
         screen_log("[ OK ] Keyboard driver ready", false);
+    }
+
+    screen_log("[ .. ] Running process kernel stack smoke test", false);
+    if process::run_process_kernel_stack_smoke() {
+        screen_log("[ OK ] Process kernel stack smoke passed", false);
+    } else {
+        screen_log("[FAIL] Process kernel stack smoke failed", true);
     }
 
     screen_log("[ .. ] Running userspace syscall smoke test", false);

@@ -6,6 +6,7 @@ use core::fmt;
 use super::memfs::MemFs;
 
 static ELF_DEMO_BYTES: &[u8] = include_bytes!("../../../build/userspace/elf_demo");
+static FS_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/fs_test");
 
 pub type FileDescriptor = u32;
 pub type FileHandle = usize;
@@ -266,6 +267,10 @@ impl VirtualFileSystem {
         Ok(())
     }
 
+    pub fn open_file_count(&self) -> usize {
+        self.open_files.len()
+    }
+
     pub fn readdir_at(&mut self, cwd: &str, path: &str) -> Result<Vec<DirEntry>> {
         let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut VFS_PATH_BUFFER)? };
         unsafe { (&mut *fs).readdir(relative_path) }
@@ -408,6 +413,10 @@ pub fn init() -> Result<()> {
         let mut elf_demo = Vec::new();
         elf_demo.extend_from_slice(ELF_DEMO_BYTES);
         ROOT_MEMFS.add_file("/app/elf_demo", elf_demo);
+
+        let mut fs_test = Vec::new();
+        fs_test.extend_from_slice(FS_TEST_BYTES);
+        ROOT_MEMFS.add_file("/app/fs_test", fs_test);
 
         vfs.mount("/", &mut ROOT_MEMFS)?;
         serial_log(b"[MEMFS] mounted as /\r\n\0");

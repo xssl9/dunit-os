@@ -81,6 +81,8 @@ userspace:
 	mkdir -p $(USERSPACE_BUILD_DIR)
 	cd $(USERSPACE_DIR)/system_apps/elf_demo && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
 	cp $(USERSPACE_DIR)/system_apps/elf_demo/target/x86_64-unknown-none/release/elf_demo $(USERSPACE_BUILD_DIR)/elf_demo
+	cd $(USERSPACE_DIR)/system_apps/fs_test && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
+	cp $(USERSPACE_DIR)/system_apps/fs_test/target/x86_64-unknown-none/release/fs_test $(USERSPACE_BUILD_DIR)/fs_test
 	cd $(USERSPACE_DIR)/system_apps/plank && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
 	cp $(USERSPACE_DIR)/system_apps/plank/target/x86_64-unknown-none/release/plank $(USERSPACE_BUILD_DIR)/plank
 	cd $(USERSPACE_DIR)/system_apps/terminal && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec

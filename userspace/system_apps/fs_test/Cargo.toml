@@ -1,0 +1,11 @@
+[package]
+name = "fs_test"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "fs_test"
+path = "src/main.rs"
+
+[dependencies]
+libdunit = { path = "../../libdunit" }

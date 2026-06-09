@@ -154,6 +154,74 @@ impl AddressSpace {
         self.user_frames.len()
     }
 
+    pub fn translate_user_page(
+        &self,
+        virt: VirtualAddress,
+    ) -> Result<Option<PhysicalAddress>, AddressSpaceError> {
+        self.user_page_mapping(virt).map(|mapping| {
+            mapping.map(|(phys, _)| phys)
+        })
+    }
+
+    pub fn user_page_flags(
+        &self,
+        virt: VirtualAddress,
+    ) -> Result<Option<PageFlags>, AddressSpaceError> {
+        self.user_page_mapping(virt).map(|mapping| {
+            mapping.map(|(_, flags)| flags)
+        })
+    }
+
+    fn user_page_mapping(
+        &self,
+        virt: VirtualAddress,
+    ) -> Result<Option<(PhysicalAddress, PageFlags)>, AddressSpaceError> {
+        let virt_addr = virt.as_usize();
+        if virt_addr >= USER_SPACE_END {
+            return Err(AddressSpaceError::InvalidUserAddress);
+        }
+
+        unsafe {
+            let root = page_table_from_phys_mut(self.root_frame);
+            let p4 = root.get_entry(virt.p4_index());
+            if p4.is_unused() {
+                return Ok(None);
+            }
+            if p4.flags().contains(PageFlags::HUGE) {
+                return Err(AddressSpaceError::HugePageInPath);
+            }
+
+            let p3_table = page_table_from_phys_mut(p4.addr());
+            let p3 = p3_table.get_entry(virt.p3_index());
+            if p3.is_unused() {
+                return Ok(None);
+            }
+            if p3.flags().contains(PageFlags::HUGE) {
+                return Err(AddressSpaceError::HugePageInPath);
+            }
+
+            let p2_table = page_table_from_phys_mut(p3.addr());
+            let p2 = p2_table.get_entry(virt.p2_index());
+            if p2.is_unused() {
+                return Ok(None);
+            }
+            if p2.flags().contains(PageFlags::HUGE) {
+                return Err(AddressSpaceError::HugePageInPath);
+            }
+
+            let p1_table = page_table_from_phys_mut(p2.addr());
+            let p1 = p1_table.get_entry(virt.p1_index());
+            if p1.is_unused() {
+                return Ok(None);
+            }
+
+            Ok(Some((
+                PhysicalAddress(p1.addr().as_usize() + virt.offset()),
+                p1.flags(),
+            )))
+        }
+    }
+
     pub fn map_user_page(
         &mut self,
         virt: VirtualAddress,

@@ -15,6 +15,7 @@ pub const SYSCALL_GET_PID: usize = 17;
 pub const SYSCALL_KILL_PROCESS: usize = 18;
 pub const SYSCALL_SLEEP: usize = 19;
 pub const SYSCALL_DEBUG_LOG: usize = 20;
+pub const SYSCALL_SMOKE_DONE: usize = 21;
 
 pub const OPEN_READ: usize = 1 << 0;
 pub const OPEN_WRITE: usize = 1 << 1;
@@ -172,7 +173,7 @@ pub fn syscall6(
 }
 
 pub fn exit(code: i32) -> ! {
-    syscall1(SYSCALL_EXIT, code as usize);
+    syscall1(SYSCALL_SMOKE_DONE, code as usize);
     loop {}
 }
 

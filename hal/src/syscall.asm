@@ -9,10 +9,16 @@ extern syscall_handler
 global syscall_entry
 syscall_entry:
     ; SYSCALL leaves the user return RIP in RCX and RFLAGS in R11.
-    ; It does not switch stacks, so use a private kernel syscall stack until
-    ; the process layer grows per-process kernel stacks.
+    ; It does not switch stacks, so use the selected process kernel stack when
+    ; the kernel has installed one, otherwise fall back to a private bootstrap
+    ; syscall stack. This is still a single-active-process policy until the
+    ; scheduler/TSS path can select stacks per running process.
     mov [rel syscall_user_rsp], rsp
+    mov rsp, [rel syscall_selected_stack_top]
+    test rsp, rsp
+    jnz .stack_selected
     lea rsp, [rel syscall_stack_top]
+.stack_selected:
     and rsp, -16
 
     push rcx
@@ -60,6 +66,12 @@ syscall_entry:
     jne .return_to_user
     mov qword [rel syscall_smoke_active], 0
     mov rsp, [rel syscall_smoke_kernel_rsp]
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbp
+    pop rbx
     sti
     ret
 
@@ -105,8 +117,28 @@ syscall_init:
 
     ret
 
+global syscall_set_kernel_stack_top
+syscall_set_kernel_stack_top:
+    and rdi, -16
+    mov [rel syscall_selected_stack_top], rdi
+    ret
+
+global syscall_reset_kernel_stack
+syscall_reset_kernel_stack:
+    mov qword [rel syscall_selected_stack_top], 0
+    ret
+
 global run_user_syscall_smoke
 run_user_syscall_smoke:
+    ; Called from Rust as an extern "C" function. The user payload can clobber
+    ; SysV callee-saved registers before returning through the syscall
+    ; trampoline, so preserve the kernel caller's callee-saved state here.
+    push rbx
+    push rbp
+    push r12
+    push r13
+    push r14
+    push r15
     mov [rel syscall_smoke_kernel_rsp], rsp
     mov qword [rel syscall_smoke_active], 1
 
@@ -128,6 +160,8 @@ syscall_smoke_return_magic:
 section .bss
 alignb 16
 syscall_user_rsp:
+    resq 1
+syscall_selected_stack_top:
     resq 1
 syscall_smoke_kernel_rsp:
     resq 1

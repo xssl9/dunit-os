@@ -150,7 +150,8 @@ impl<'a> Iterator for ProgramHeaderIterator<'a> {
 }
 
 use crate::memory::pmm::PhysicalMemoryManager;
-use crate::memory::vmm::{VirtualAddress, VirtualMemoryManager, PageFlags};
+use crate::memory::pmm::PhysicalAddress;
+use crate::memory::vmm::{AddressSpace, VirtualAddress, VirtualMemoryManager, PageFlags};
 use crate::process::{Process, ProcessId};
 
 pub const USER_STACK_SIZE: usize = 0x10000;
@@ -302,6 +303,157 @@ pub fn run_demo_elf(data: &[u8]) -> bool {
     }
 
     crate::syscall::finish_elf_test()
+}
+
+pub fn run_process_elf(data: &[u8]) -> bool {
+    let parser = match ElfParser::new(data) {
+        Ok(parser) => parser,
+        Err(_) => {
+            crate::memory::serial_write("[ELF-TEST] parse failed\r\n");
+            return false;
+        }
+    };
+
+    let pid = crate::process::allocate_pid();
+    let mut process = match Process::new_user(pid) {
+        Ok(process) => process,
+        Err(_) => {
+            crate::memory::serial_write("[ELF-TEST] process create failed\r\n");
+            return false;
+        }
+    };
+
+    if load_into_process_address_space(&parser, &mut process).is_err() {
+        crate::memory::serial_write("[ELF-TEST] process load failed\r\n");
+        return false;
+    }
+
+    process.context.rip = parser.entry_point();
+    process.context.rsp = USER_STACK_TOP as u64;
+    process.context.rflags = 0x202;
+
+    crate::memory::serial_write("[ELF-TEST] userspace app started\r\n");
+
+    match crate::process::enter_user_process(process) {
+        Ok(exit) => exit.exit_code == 0,
+        Err(_) => {
+            crate::memory::serial_write("[ELF-TEST] process run failed\r\n");
+            false
+        }
+    }
+}
+
+fn load_into_process_address_space(
+    parser: &ElfParser,
+    process: &mut Process,
+) -> Result<(), ElfError> {
+    let address_space = process
+        .address_space_mut()
+        .ok_or(ElfError::InvalidProgramHeader)?;
+
+    for ph in parser.program_headers()? {
+        if ph.p_type != PT_LOAD {
+            continue;
+        }
+        load_segment_process(parser.data, address_space, &ph)?;
+    }
+
+    for page in 1..=(USER_STACK_SIZE / PAGE_SIZE) {
+        let virt = VirtualAddress::from_usize(USER_STACK_TOP - (page * PAGE_SIZE));
+        ensure_process_page(address_space, virt, PageFlags::WRITABLE)?;
+    }
+
+    Ok(())
+}
+
+fn load_segment_process(
+    data: &[u8],
+    address_space: &mut AddressSpace,
+    ph: &ProgramHeader,
+) -> Result<(), ElfError> {
+    if ph.p_memsz < ph.p_filesz {
+        return Err(ElfError::InvalidProgramHeader);
+    }
+
+    let virt_start = ph.p_vaddr as usize;
+    let mem_size = ph.p_memsz as usize;
+    let file_size = ph.p_filesz as usize;
+    let file_start = ph.p_offset as usize;
+    let virt_end = virt_start
+        .checked_add(mem_size)
+        .ok_or(ElfError::InvalidProgramHeader)?;
+    let file_end = file_start
+        .checked_add(file_size)
+        .ok_or(ElfError::InvalidProgramHeader)?;
+
+    if file_end > data.len() {
+        return Err(ElfError::InvalidProgramHeader);
+    }
+
+    let page_start = align_down(virt_start, PAGE_SIZE);
+    let page_end = align_up(virt_end, PAGE_SIZE).ok_or(ElfError::InvalidProgramHeader)?;
+
+    let mut flags = PageFlags::USER;
+    if ph.p_flags & PF_W != 0 {
+        flags |= PageFlags::WRITABLE;
+    }
+    if ph.p_flags & PF_X == 0 {
+        flags |= PageFlags::NO_EXECUTE;
+    }
+
+    for page_addr in (page_start..page_end).step_by(PAGE_SIZE) {
+        let virt = VirtualAddress::from_usize(page_addr);
+        let phys = ensure_process_page(address_space, virt, flags)?;
+        let dst_page = crate::memory::vmm::phys_to_virt(phys.as_usize()) as *mut u8;
+
+        let copy_start = page_addr.max(virt_start);
+        let copy_end = (page_addr + PAGE_SIZE).min(virt_start + file_size);
+        if copy_start < copy_end {
+            let src_offset = file_start + (copy_start - virt_start);
+            let dst_offset = copy_start - page_addr;
+            let copy_len = copy_end - copy_start;
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    data.as_ptr().add(src_offset),
+                    dst_page.add(dst_offset),
+                    copy_len,
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn ensure_process_page(
+    address_space: &mut AddressSpace,
+    virt: VirtualAddress,
+    flags: PageFlags,
+) -> Result<PhysicalAddress, ElfError> {
+    match address_space.translate_user_page(virt) {
+        Ok(Some(phys)) => {
+            let phys = PhysicalAddress(align_down(phys.as_usize(), PAGE_SIZE));
+            let existing_flags = address_space
+                .user_page_flags(virt)
+                .ok()
+                .flatten()
+                .unwrap_or(PageFlags::empty());
+            let mut merged_flags = existing_flags | flags | PageFlags::USER;
+            if !existing_flags.contains(PageFlags::NO_EXECUTE)
+                || !flags.contains(PageFlags::NO_EXECUTE)
+            {
+                merged_flags.remove(PageFlags::NO_EXECUTE);
+            }
+            address_space
+                .map_user_frame(virt, phys, merged_flags)
+                .map_err(|_| ElfError::InvalidProgramHeader)?;
+            Ok(phys)
+        }
+        Ok(None) => address_space
+            .map_user_page(virt, flags)
+            .map_err(|_| ElfError::InvalidProgramHeader),
+        Err(_) => Err(ElfError::InvalidProgramHeader),
+    }
 }
 
 unsafe fn load_into_current_address_space(parser: &ElfParser) -> Result<(), ElfError> {

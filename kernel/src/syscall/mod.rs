@@ -314,11 +314,16 @@ pub extern "C" fn syscall_handler(
         Syscall::KillProcess => sys_kill_process(arg0 as u32),
         Syscall::Sleep => sys_sleep(arg0),
         Syscall::DebugLog => sys_debug_log(arg0),
-        Syscall::SmokeDone => sys_smoke_done(),
+        Syscall::SmokeDone => sys_smoke_done(arg0 as i32),
     }
 }
 
 fn sys_exit(code: i32) -> i64 {
+    if let Some(pid) = crate::process::request_current_user_exit(code) {
+        syscall_log!("[PROCESS-RUN] exited pid={} code={}\r\n", pid.0, code);
+        return SMOKE_RETURN_MAGIC;
+    }
+
     if ELF_TEST_RUNNING.load(Ordering::SeqCst) {
         if code == 0 {
             syscall_log!("[ELF-TEST] userspace app returned\r\n");
@@ -542,6 +547,10 @@ fn process_error_to_errno(error: crate::process::ProcessError) -> i64 {
         crate::process::ProcessError::NoCurrentProcess => EINVAL,
         crate::process::ProcessError::InvalidFd => EBADF,
         crate::process::ProcessError::FdTableFull => ENFILE,
+        crate::process::ProcessError::NoAddressSpace
+        | crate::process::ProcessError::AddressSpaceCreateFailed
+        | crate::process::ProcessError::NoKernelStack
+        | crate::process::ProcessError::InvalidUserContext => EINVAL,
     }
 }
 
@@ -722,7 +731,12 @@ fn sys_debug_log(code: u64) -> i64 {
     }
 }
 
-fn sys_smoke_done() -> i64 {
+fn sys_smoke_done(exit_code: i32) -> i64 {
+    if let Some(pid) = crate::process::request_current_user_exit(exit_code) {
+        syscall_log!("[PROCESS-RUN] exited pid={} code={}\r\n", pid.0, exit_code);
+        return SMOKE_RETURN_MAGIC;
+    }
+
     if SYSCALL_SMOKE_OK.load(Ordering::SeqCst) {
         syscall_log!("[SYSCALL-TEST] userspace returned after syscall\r\n");
     } else {
