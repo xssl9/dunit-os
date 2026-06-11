@@ -19,6 +19,7 @@ static STDIN_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/stdin_
 static FAULT_PF_BYTES: &[u8] = include_bytes!("../../../build/userspace/fault_pf");
 static FAULT_UD_BYTES: &[u8] = include_bytes!("../../../build/userspace/fault_ud");
 static DR15_BMP_BYTES: &[u8] = include_bytes!("../../../dr15.bmp");
+static LOGO_BMP_BYTES: &[u8] = include_bytes!("../../../logo.bmp");
 
 pub type FileDescriptor = u32;
 pub type FileHandle = usize;
@@ -451,30 +452,36 @@ fn push_i32_le(out: &mut Vec<u8>, value: i32) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
-fn make_dr15_preview_bmp() -> Vec<u8> {
+fn make_preview_bmp(source: &[u8]) -> Vec<u8> {
     const OUT_W: usize = 160;
     const OUT_H: usize = 120;
     const HEADER_SIZE: usize = 54;
     const OUT_ROW_STRIDE: usize = (OUT_W * 3 + 3) & !3;
     const OUT_FILE_SIZE: usize = HEADER_SIZE + OUT_ROW_STRIDE * OUT_H;
 
-    let Some(src_offset) = read_u32_le(DR15_BMP_BYTES, 10).map(|v| v as usize) else {
+    let Some(src_offset) = read_u32_le(source, 10).map(|v| v as usize) else {
         return Vec::new();
     };
-    let Some(src_w) = read_i32_le(DR15_BMP_BYTES, 18) else {
+    let Some(src_w) = read_i32_le(source, 18) else {
         return Vec::new();
     };
-    let Some(src_h_raw) = read_i32_le(DR15_BMP_BYTES, 22) else {
+    let Some(src_h_raw) = read_i32_le(source, 22) else {
         return Vec::new();
     };
-    let Some(src_bpp) = read_u16_le(DR15_BMP_BYTES, 28) else {
+    let Some(src_bpp) = read_u16_le(source, 28) else {
         return Vec::new();
     };
-    let Some(compression) = read_u32_le(DR15_BMP_BYTES, 30) else {
+    let Some(compression) = read_u32_le(source, 30) else {
         return Vec::new();
     };
 
-    if src_w <= 0 || src_h_raw == 0 || src_bpp != 24 || compression != 0 {
+    if source.get(0) != Some(&b'B')
+        || source.get(1) != Some(&b'M')
+        || src_w <= 0
+        || src_h_raw == 0
+        || src_bpp != 24
+        || compression != 0
+    {
         return Vec::new();
     }
 
@@ -482,7 +489,7 @@ fn make_dr15_preview_bmp() -> Vec<u8> {
     let src_h = src_h_raw.unsigned_abs() as usize;
     let src_top_down = src_h_raw < 0;
     let src_row_stride = (src_w * 3 + 3) & !3;
-    if src_offset + src_row_stride * src_h > DR15_BMP_BYTES.len() {
+    if src_offset + src_row_stride * src_h > source.len() {
         return Vec::new();
     }
 
@@ -511,9 +518,9 @@ fn make_dr15_preview_bmp() -> Vec<u8> {
         for out_x in 0..OUT_W {
             let src_x = out_x * src_w / OUT_W;
             let src_index = src_offset + src_file_y * src_row_stride + src_x * 3;
-            bmp.push(DR15_BMP_BYTES[src_index]);
-            bmp.push(DR15_BMP_BYTES[src_index + 1]);
-            bmp.push(DR15_BMP_BYTES[src_index + 2]);
+            bmp.push(source[src_index]);
+            bmp.push(source[src_index + 1]);
+            bmp.push(source[src_index + 2]);
         }
         while (bmp.len() - HEADER_SIZE) % OUT_ROW_STRIDE != 0 {
             bmp.push(0);
@@ -560,7 +567,8 @@ pub fn init() -> Result<()> {
         bmp_viewer.extend_from_slice(BMP_VIEWER_BYTES);
         ROOT_MEMFS.add_file("/app/bmp_viewer", bmp_viewer);
 
-        ROOT_MEMFS.add_file("/assets/dr15.bmp", make_dr15_preview_bmp());
+        ROOT_MEMFS.add_file("/assets/dr15.bmp", make_preview_bmp(DR15_BMP_BYTES));
+        ROOT_MEMFS.add_file("/assets/logo.bmp", make_preview_bmp(LOGO_BMP_BYTES));
 
         let mut scheduler_test = Vec::new();
         scheduler_test.extend_from_slice(SCHEDULER_TEST_BYTES);

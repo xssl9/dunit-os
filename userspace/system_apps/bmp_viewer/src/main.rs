@@ -4,7 +4,7 @@
 use core::panic::PanicInfo;
 
 const DEFAULT_PATH: &str = "/assets/dr15.bmp";
-const MAX_BMP_SIZE: usize = 3 * 1024 * 1024;
+const MAX_BMP_SIZE: usize = 6 * 1024 * 1024;
 const READ_CHUNK_SIZE: usize = 4096;
 const SCALE: u32 = 1;
 
