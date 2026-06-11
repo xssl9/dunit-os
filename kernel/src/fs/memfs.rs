@@ -5,7 +5,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-const BASE_DIRS: [&str; 6] = ["kernel", "proc", "app", "cfg", "usr", "tmp"];
+const BASE_DIRS: [&str; 7] = ["kernel", "proc", "app", "assets", "cfg", "usr", "tmp"];
 
 struct MemNode {
     path: String,

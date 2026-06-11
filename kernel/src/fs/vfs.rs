@@ -12,11 +12,13 @@ static ARGS_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/args_te
 static CWD_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/cwd_test");
 static PATH_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/path_test");
 static IMAGE_DEMO_BYTES: &[u8] = include_bytes!("../../../build/userspace/image_demo");
+static BMP_VIEWER_BYTES: &[u8] = include_bytes!("../../../build/userspace/bmp_viewer");
 static SCHEDULER_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/scheduler_test");
 static SPAWN_READY_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/spawn_ready_test");
 static STDIN_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/stdin_test");
 static FAULT_PF_BYTES: &[u8] = include_bytes!("../../../build/userspace/fault_pf");
 static FAULT_UD_BYTES: &[u8] = include_bytes!("../../../build/userspace/fault_ud");
+static DR15_BMP_BYTES: &[u8] = include_bytes!("../../../dr15.bmp");
 
 pub type FileDescriptor = u32;
 pub type FileHandle = usize;
@@ -415,6 +417,112 @@ fn serial_log(msg: &'static [u8]) {
     unsafe { serial_write(msg.as_ptr()) }
 }
 
+fn read_u16_le(data: &[u8], offset: usize) -> Option<u16> {
+    Some(u16::from_le_bytes([*data.get(offset)?, *data.get(offset + 1)?]))
+}
+
+fn read_u32_le(data: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_le_bytes([
+        *data.get(offset)?,
+        *data.get(offset + 1)?,
+        *data.get(offset + 2)?,
+        *data.get(offset + 3)?,
+    ]))
+}
+
+fn read_i32_le(data: &[u8], offset: usize) -> Option<i32> {
+    Some(i32::from_le_bytes([
+        *data.get(offset)?,
+        *data.get(offset + 1)?,
+        *data.get(offset + 2)?,
+        *data.get(offset + 3)?,
+    ]))
+}
+
+fn push_u16_le(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_u32_le(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_i32_le(out: &mut Vec<u8>, value: i32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn make_dr15_preview_bmp() -> Vec<u8> {
+    const OUT_W: usize = 160;
+    const OUT_H: usize = 120;
+    const HEADER_SIZE: usize = 54;
+    const OUT_ROW_STRIDE: usize = (OUT_W * 3 + 3) & !3;
+    const OUT_FILE_SIZE: usize = HEADER_SIZE + OUT_ROW_STRIDE * OUT_H;
+
+    let Some(src_offset) = read_u32_le(DR15_BMP_BYTES, 10).map(|v| v as usize) else {
+        return Vec::new();
+    };
+    let Some(src_w) = read_i32_le(DR15_BMP_BYTES, 18) else {
+        return Vec::new();
+    };
+    let Some(src_h_raw) = read_i32_le(DR15_BMP_BYTES, 22) else {
+        return Vec::new();
+    };
+    let Some(src_bpp) = read_u16_le(DR15_BMP_BYTES, 28) else {
+        return Vec::new();
+    };
+    let Some(compression) = read_u32_le(DR15_BMP_BYTES, 30) else {
+        return Vec::new();
+    };
+
+    if src_w <= 0 || src_h_raw == 0 || src_bpp != 24 || compression != 0 {
+        return Vec::new();
+    }
+
+    let src_w = src_w as usize;
+    let src_h = src_h_raw.unsigned_abs() as usize;
+    let src_top_down = src_h_raw < 0;
+    let src_row_stride = (src_w * 3 + 3) & !3;
+    if src_offset + src_row_stride * src_h > DR15_BMP_BYTES.len() {
+        return Vec::new();
+    }
+
+    let mut bmp = Vec::new();
+    bmp.extend_from_slice(b"BM");
+    push_u32_le(&mut bmp, OUT_FILE_SIZE as u32);
+    push_u16_le(&mut bmp, 0);
+    push_u16_le(&mut bmp, 0);
+    push_u32_le(&mut bmp, HEADER_SIZE as u32);
+    push_u32_le(&mut bmp, 40);
+    push_i32_le(&mut bmp, OUT_W as i32);
+    push_i32_le(&mut bmp, OUT_H as i32);
+    push_u16_le(&mut bmp, 1);
+    push_u16_le(&mut bmp, 24);
+    push_u32_le(&mut bmp, 0);
+    push_u32_le(&mut bmp, (OUT_ROW_STRIDE * OUT_H) as u32);
+    push_i32_le(&mut bmp, 2835);
+    push_i32_le(&mut bmp, 2835);
+    push_u32_le(&mut bmp, 0);
+    push_u32_le(&mut bmp, 0);
+
+    for out_file_y in 0..OUT_H {
+        let out_y = OUT_H - 1 - out_file_y;
+        let src_y = out_y * src_h / OUT_H;
+        let src_file_y = if src_top_down { src_y } else { src_h - 1 - src_y };
+        for out_x in 0..OUT_W {
+            let src_x = out_x * src_w / OUT_W;
+            let src_index = src_offset + src_file_y * src_row_stride + src_x * 3;
+            bmp.push(DR15_BMP_BYTES[src_index]);
+            bmp.push(DR15_BMP_BYTES[src_index + 1]);
+            bmp.push(DR15_BMP_BYTES[src_index + 2]);
+        }
+        while (bmp.len() - HEADER_SIZE) % OUT_ROW_STRIDE != 0 {
+            bmp.push(0);
+        }
+    }
+
+    bmp
+}
+
 pub fn init() -> Result<()> {
     serial_log(b"[VFS] init START\r\n\0");
     unsafe {
@@ -447,6 +555,12 @@ pub fn init() -> Result<()> {
         let mut image_demo = Vec::new();
         image_demo.extend_from_slice(IMAGE_DEMO_BYTES);
         ROOT_MEMFS.add_file("/app/image_demo", image_demo);
+
+        let mut bmp_viewer = Vec::new();
+        bmp_viewer.extend_from_slice(BMP_VIEWER_BYTES);
+        ROOT_MEMFS.add_file("/app/bmp_viewer", bmp_viewer);
+
+        ROOT_MEMFS.add_file("/assets/dr15.bmp", make_dr15_preview_bmp());
 
         let mut scheduler_test = Vec::new();
         scheduler_test.extend_from_slice(SCHEDULER_TEST_BYTES);
