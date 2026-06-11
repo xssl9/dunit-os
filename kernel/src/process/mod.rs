@@ -624,13 +624,12 @@ pub fn reap_process(pid: ProcessId) -> Result<(), ProcessError> {
     if record.state != ProcessState::Dead {
         return Err(ProcessError::NotRunnable);
     }
+    let from = record.state;
     record.process = None;
     record.state = ProcessState::Reaped;
     record.waitable = false;
     crate::process::scheduler::remove(pid);
-    crate::memory::serial_write("[PROCESS] pid=");
-    serial_write_u64(pid.0);
-    crate::memory::serial_write(" state=reaped\r\n");
+    log_process_transition(pid, from, ProcessState::Reaped, "reap");
     Ok(())
 }
 
@@ -697,6 +696,7 @@ pub fn wait_for_child(requested_pid: ProcessId) -> Result<WaitRecord, ProcessErr
     let pid = record.pid;
     let from = record.state;
     log_process_transition(pid, from, ProcessState::Reaped, "wait");
+    crate::process::scheduler::remove(pid);
     let mut record = table.remove(index);
     if let Some(mut process) = record.process.take() {
         let closed = process.cleanup_fds();
@@ -742,6 +742,7 @@ pub fn autoreap_process(pid: ProcessId, reason: &str) -> Result<(), ProcessError
     let index = process_record_index(table, pid).ok_or(ProcessError::NoSuchProcess)?;
     let from = table[index].state;
     log_process_transition(pid, from, ProcessState::Reaped, reason);
+    crate::process::scheduler::remove(pid);
     let mut record = table.remove(index);
     if let Some(mut process) = record.process.take() {
         let _ = process.cleanup_fds();

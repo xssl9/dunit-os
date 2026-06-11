@@ -725,6 +725,7 @@ fn sys_spawn_process(path: *const u8, path_len: usize) -> i64 {
             pid.0,
             resolved
         ));
+        let _ = crate::process::autoreap_process(pid, "spawn-prepare-failed");
         return EIO;
     }
 

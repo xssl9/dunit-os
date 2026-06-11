@@ -67,35 +67,32 @@ pub fn init() {
     unsafe {
         SCHEDULER_INSTANCE = Some(Scheduler::new());
     }
-    crate::memory::serial_write("[SCHED] ready queue initialized\r\n");
+    crate::memory::serial_write(
+        "[SCHED] foundation init: cooperative only, timer-preemption=off smp=off\r\n",
+    );
+}
+
+fn with_scheduler_mut<R>(f: impl FnOnce(&mut Scheduler) -> R) -> Option<R> {
+    unsafe { SCHEDULER_INSTANCE.as_mut().map(f) }
+}
+
+fn with_scheduler<R>(f: impl FnOnce(&Scheduler) -> R) -> Option<R> {
+    unsafe { SCHEDULER_INSTANCE.as_ref().map(f) }
 }
 
 pub fn enqueue_ready(pid: ProcessId) -> Result<(), ProcessError> {
-    unsafe {
-        match SCHEDULER_INSTANCE.as_mut() {
-            Some(scheduler) => scheduler.enqueue(pid),
-            None => Err(ProcessError::SchedulerUnavailable),
-        }
-    }
+    with_scheduler_mut(|scheduler| scheduler.enqueue(pid))
+        .unwrap_or(Err(ProcessError::SchedulerUnavailable))
 }
 
 pub fn remove(pid: ProcessId) {
-    unsafe {
-        if let Some(scheduler) = SCHEDULER_INSTANCE.as_mut() {
-            scheduler.remove(pid);
-        }
-    }
+    let _ = with_scheduler_mut(|scheduler| scheduler.remove(pid));
 }
 
 pub fn pick_next_candidate() -> Option<ProcessId> {
-    unsafe { SCHEDULER_INSTANCE.as_mut()?.pick_next() }
+    with_scheduler_mut(|scheduler| scheduler.pick_next()).flatten()
 }
 
 pub fn ready_len() -> usize {
-    unsafe {
-        SCHEDULER_INSTANCE
-            .as_ref()
-            .map(|scheduler| scheduler.len())
-            .unwrap_or(0)
-    }
+    with_scheduler(|scheduler| scheduler.len()).unwrap_or(0)
 }

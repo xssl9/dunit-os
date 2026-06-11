@@ -1026,9 +1026,9 @@ pub extern "C" fn kernel_main(
         serial_write("[PROC] Calling scheduler::init()...\r\n");
         process::scheduler::init();
         serial_write("[PROC] scheduler::init() returned\r\n");
-        screen_log("[ OK ] Scheduler: Round-robin algorithm loaded", false);
-        screen_log("[ OK ] Scheduler: Ready queue initialized", false);
-        screen_log("[ OK ] Scheduler: Context switching enabled", false);
+        screen_log("[ OK ] Scheduler: cooperative foundation initialized", false);
+        screen_log("[ OK ] Scheduler: PID ready queue initialized", false);
+        screen_log("[ .. ] Scheduler: context switching unavailable", false);
         screen_log("[ OK ] Process management ready", false);
         
         screen_log("[ .. ] Initializing Inter-Process Communication", false);
