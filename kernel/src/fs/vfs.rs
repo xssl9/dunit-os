@@ -11,6 +11,7 @@ static EXIT_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/exit_te
 static ARGS_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/args_test");
 static CWD_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/cwd_test");
 static PATH_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/path_test");
+static IMAGE_DEMO_BYTES: &[u8] = include_bytes!("../../../build/userspace/image_demo");
 static SCHEDULER_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/scheduler_test");
 static SPAWN_READY_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/spawn_ready_test");
 static STDIN_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/stdin_test");
@@ -442,6 +443,10 @@ pub fn init() -> Result<()> {
         let mut path_test = Vec::new();
         path_test.extend_from_slice(PATH_TEST_BYTES);
         ROOT_MEMFS.add_file("/app/path_test", path_test);
+
+        let mut image_demo = Vec::new();
+        image_demo.extend_from_slice(IMAGE_DEMO_BYTES);
+        ROOT_MEMFS.add_file("/app/image_demo", image_demo);
 
         let mut scheduler_test = Vec::new();
         scheduler_test.extend_from_slice(SCHEDULER_TEST_BYTES);
