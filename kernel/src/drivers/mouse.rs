@@ -1,10 +1,13 @@
-static mut MOUSE_X: i32 = 512;
-static mut MOUSE_Y: i32 = 384;
-static mut MOUSE_BUTTONS: u8 = 0;
-static mut MOUSE_MAX_X: i32 = 1023;
-static mut MOUSE_MAX_Y: i32 = 767;
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
+
+static MOUSE_X: AtomicI32 = AtomicI32::new(512);
+static MOUSE_Y: AtomicI32 = AtomicI32::new(384);
+static MOUSE_BUTTONS: AtomicU8 = AtomicU8::new(0);
+static MOUSE_MAX_X: AtomicI32 = AtomicI32::new(1023);
+static MOUSE_MAX_Y: AtomicI32 = AtomicI32::new(767);
 static mut PACKET: [u8; 3] = [0; 3];
 static mut PACKET_INDEX: usize = 0;
+static PACKET_LOCK: AtomicBool = AtomicBool::new(false);
 
 pub fn init() {
     unsafe {
@@ -16,6 +19,7 @@ pub fn init() {
         wait_read();
         let mut status = inb(0x60);
         status |= 0x02;
+        status &= !0x20;
 
         wait_write();
         outb(0x64, 0x60);
@@ -33,23 +37,23 @@ pub fn init() {
 }
 
 pub fn set_bounds(width: usize, height: usize) {
-    unsafe {
-        MOUSE_MAX_X = width.saturating_sub(1) as i32;
-        MOUSE_MAX_Y = height.saturating_sub(1) as i32;
-        MOUSE_X = MOUSE_X.max(0).min(MOUSE_MAX_X);
-        MOUSE_Y = MOUSE_Y.max(0).min(MOUSE_MAX_Y);
-    }
+    let max_x = width.saturating_sub(1) as i32;
+    let max_y = height.saturating_sub(1) as i32;
+    MOUSE_MAX_X.store(max_x, Ordering::Relaxed);
+    MOUSE_MAX_Y.store(max_y, Ordering::Relaxed);
+    clamp_position();
 }
 
 pub fn set_position(x: i32, y: i32) {
-    unsafe {
-        MOUSE_X = x.max(0).min(MOUSE_MAX_X);
-        MOUSE_Y = y.max(0).min(MOUSE_MAX_Y);
-    }
+    let max_x = MOUSE_MAX_X.load(Ordering::Relaxed);
+    let max_y = MOUSE_MAX_Y.load(Ordering::Relaxed);
+    MOUSE_X.store(x.max(0).min(max_x), Ordering::Relaxed);
+    MOUSE_Y.store(y.max(0).min(max_y), Ordering::Relaxed);
 }
 
 pub fn update() {
     unsafe {
+        crate::hal::hal_disable_interrupts();
         while (inb(0x64) & 0x01) != 0 {
             let status = inb(0x64);
             let byte = inb(0x60);
@@ -57,32 +61,66 @@ pub fn update() {
                 continue;
             }
 
-            if PACKET_INDEX == 0 && (byte & 0x08) == 0 {
-                continue;
-            }
+            push_packet_byte(byte);
+        }
+        crate::hal::hal_enable_interrupts();
+    }
+}
 
-            PACKET[PACKET_INDEX] = byte;
-            PACKET_INDEX += 1;
+pub fn push_packet_byte(byte: u8) {
+    while PACKET_LOCK
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    push_packet_byte_locked(byte);
+    PACKET_LOCK.store(false, Ordering::Release);
+}
 
-            if PACKET_INDEX == 3 {
-                MOUSE_BUTTONS = PACKET[0] & 0x07;
-                let dx = PACKET[1] as i8 as i32;
-                let dy = -(PACKET[2] as i8 as i32);
+fn push_packet_byte_locked(byte: u8) {
+    unsafe {
+        if PACKET_INDEX == 0 && (byte & 0x08) == 0 {
+            return;
+        }
 
-                MOUSE_X = (MOUSE_X + dx).max(0).min(MOUSE_MAX_X);
-                MOUSE_Y = (MOUSE_Y + dy).max(0).min(MOUSE_MAX_Y);
-                PACKET_INDEX = 0;
-            }
+        PACKET[PACKET_INDEX] = byte;
+        PACKET_INDEX += 1;
+
+        if PACKET_INDEX == 3 {
+            MOUSE_BUTTONS.store(PACKET[0] & 0x07, Ordering::Relaxed);
+            let dx = PACKET[1] as i8 as i32;
+            let dy = -(PACKET[2] as i8 as i32);
+
+            let max_x = MOUSE_MAX_X.load(Ordering::Relaxed);
+            let max_y = MOUSE_MAX_Y.load(Ordering::Relaxed);
+            let x = (MOUSE_X.load(Ordering::Relaxed) + dx).max(0).min(max_x);
+            let y = (MOUSE_Y.load(Ordering::Relaxed) + dy).max(0).min(max_y);
+            MOUSE_X.store(x, Ordering::Relaxed);
+            MOUSE_Y.store(y, Ordering::Relaxed);
+            PACKET_INDEX = 0;
         }
     }
 }
 
 pub fn get_position() -> (i32, i32) {
-    unsafe { (MOUSE_X, MOUSE_Y) }
+    (
+        MOUSE_X.load(Ordering::Relaxed),
+        MOUSE_Y.load(Ordering::Relaxed),
+    )
 }
 
 pub fn get_buttons() -> u8 {
-    unsafe { MOUSE_BUTTONS }
+    MOUSE_BUTTONS.load(Ordering::Relaxed)
+}
+
+fn clamp_position() {
+    let max_x = MOUSE_MAX_X.load(Ordering::Relaxed);
+    let max_y = MOUSE_MAX_Y.load(Ordering::Relaxed);
+    let x = MOUSE_X.load(Ordering::Relaxed).max(0).min(max_x);
+    let y = MOUSE_Y.load(Ordering::Relaxed).max(0).min(max_y);
+    MOUSE_X.store(x, Ordering::Relaxed);
+    MOUSE_Y.store(y, Ordering::Relaxed);
 }
 
 unsafe fn inb(port: u16) -> u8 {

@@ -906,8 +906,23 @@ pub extern "C" fn kernel_main(
     }
 
     screen_log("[ .. ] Configuring interrupt handlers", false);
-    screen_log("[ OK ] IRQ 1: Keyboard interrupt enabled", false);
-    screen_log("[ OK ] IRQ 0/12 masked for terminal mode", false);
+    if terminal_mode == 0 {
+        unsafe {
+            hal::hal_outb(0x21, 0xF9);
+            hal::hal_outb(0xA1, 0xEF);
+        }
+        serial_write("[IRQ] GUI input enabled: IRQ1 keyboard, IRQ12 mouse\r\n");
+        screen_log("[ OK ] IRQ 1: Keyboard interrupt enabled", false);
+        screen_log("[ OK ] IRQ 12: PS/2 mouse interrupt enabled", false);
+    } else {
+        unsafe {
+            hal::hal_outb(0x21, 0xFD);
+            hal::hal_outb(0xA1, 0xFF);
+        }
+        serial_write("[IRQ] Terminal input enabled: IRQ1 keyboard only\r\n");
+        screen_log("[ OK ] IRQ 1: Keyboard interrupt enabled", false);
+        screen_log("[ OK ] IRQ 0/12 masked for terminal mode", false);
+    }
     screen_log("[ OK ] Hardware interrupts configured", false);
     
     screen_log("[ OK ] System initialization complete", false);

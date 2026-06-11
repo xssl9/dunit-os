@@ -48,6 +48,7 @@ pub extern "C" fn interrupt_handler(frame: *const InterruptFrame) -> u64 {
         30 => handle_security_exception(frame),
         32 => handle_timer(frame),
         33 => handle_keyboard(frame),
+        44 => handle_mouse(frame),
         _ => handle_unknown_interrupt(frame),
     }
 

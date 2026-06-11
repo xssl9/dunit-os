@@ -45,6 +45,30 @@ pub fn handle_keyboard(_frame: &InterruptFrame) {
     }
 }
 
+pub fn handle_mouse(_frame: &InterruptFrame) {
+    unsafe {
+        for _ in 0..64 {
+            let status: u8;
+            core::arch::asm!("in al, dx", out("al") status, in("dx") 0x64u16, options(nomem, nostack));
+
+            if (status & 0x01) == 0 {
+                break;
+            }
+
+            let byte: u8;
+            core::arch::asm!("in al, dx", out("al") byte, in("dx") 0x60u16, options(nomem, nostack));
+            if (status & 0x20) != 0 {
+                crate::drivers::mouse::push_packet_byte(byte);
+            } else {
+                crate::drivers::keyboard::push_scancode(byte);
+            }
+        }
+
+        core::arch::asm!("out dx, al", in("dx") 0xA0u16, in("al") 0x20u8, options(nomem, nostack));
+        core::arch::asm!("out dx, al", in("dx") 0x20u16, in("al") 0x20u8, options(nomem, nostack));
+    }
+}
+
 pub fn handle_divide_by_zero(frame: &InterruptFrame) {
     let is_user_mode = (frame.cs & 0x3) == 3;
     
@@ -150,7 +174,17 @@ pub fn handle_security_exception(frame: &InterruptFrame) {
     panic!("Security exception at RIP: {:#x}, error code: {:#x}", frame.rip, frame.err_code);
 }
 
-pub fn handle_unknown_interrupt(_frame: &InterruptFrame) {
+pub fn handle_unknown_interrupt(frame: &InterruptFrame) {
+    if frame.int_no >= 40 && frame.int_no < 48 {
+        unsafe {
+            core::arch::asm!("out dx, al", in("dx") 0xA0u16, in("al") 0x20u8, options(nomem, nostack));
+            core::arch::asm!("out dx, al", in("dx") 0x20u16, in("al") 0x20u8, options(nomem, nostack));
+        }
+    } else if frame.int_no >= 32 && frame.int_no < 40 {
+        unsafe {
+            core::arch::asm!("out dx, al", in("dx") 0x20u16, in("al") 0x20u8, options(nomem, nostack));
+        }
+    }
 }
 
 fn terminate_current_process(
