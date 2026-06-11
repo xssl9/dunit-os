@@ -4,6 +4,7 @@ CC = gcc
 AS = nasm
 CARGO = cargo
 QEMU = qemu-system-x86_64
+QEMU_DISPLAY = sdl
 
 HAL_DIR = hal
 KERNEL_DIR = kernel
@@ -126,7 +127,7 @@ grub-iso: $(BUILD_DIR)/kernel.elf
 	@echo "GRUB ISO created at $(BUILD_DIR)/os.iso"
 
 run: iso
-	$(QEMU) -boot d -cdrom $(BUILD_DIR)/microkernel.iso -m 512M -serial stdio -boot menu=on
+	$(QEMU) -boot d -cdrom $(BUILD_DIR)/microkernel.iso -m 512M -serial stdio -display $(QEMU_DISPLAY) -boot menu=on
 
 run-terminal: iso
 	$(QEMU) -boot d -cdrom $(BUILD_DIR)/microkernel.iso -m 512M -serial stdio -nographic -boot menu=on
