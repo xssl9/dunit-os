@@ -557,7 +557,8 @@ fn process_error_to_errno(error: crate::process::ProcessError) -> i64 {
         crate::process::ProcessError::NoAddressSpace
         | crate::process::ProcessError::AddressSpaceCreateFailed
         | crate::process::ProcessError::NoKernelStack
-        | crate::process::ProcessError::InvalidUserContext => EINVAL,
+        | crate::process::ProcessError::InvalidUserContext
+        | crate::process::ProcessError::ProcessNotPrepared => EINVAL,
     }
 }
 
@@ -704,7 +705,10 @@ fn sys_spawn_process(path: *const u8, path_len: usize) -> i64 {
         return EIO;
     }
 
-    let pid = crate::process::create_process_record(resolved.clone(), true);
+    let pid = match crate::process::create_user_process_record(resolved.clone(), true) {
+        Ok(pid) => pid,
+        Err(error) => return process_error_to_errno(error),
+    };
     syscall_log(format_args!(
         "[SPAWN] prepared pid={} path={} execution=not-started\n",
         pid.0,
@@ -722,6 +726,12 @@ fn sys_wait_process(pid: u32, status: *mut WaitStatus) -> i64 {
         kind: wait_record.kind,
         code: wait_record.code,
     };
+    syscall_log(format_args!(
+        "[WAIT] pid={} kind={} code={}\n",
+        wait_record.pid.0,
+        wait_status.kind,
+        wait_status.code
+    ));
     let bytes = unsafe {
         core::slice::from_raw_parts(
             &wait_status as *const WaitStatus as *const u8,

@@ -27,15 +27,23 @@ static PROCESS_EXIT_KIND: AtomicI32 = AtomicI32::new(0);
 pub const WAIT_KIND_EMPTY: i32 = -1;
 pub const WAIT_KIND_SPAWN_PREPARED: i32 = -2;
 
+/// Process lifecycle for the non-preemptive foundation:
+///
+/// Prepared: process object exists and owns its address space, kernel stack,
+/// fd table, cwd and pid, but no executable image has run yet.
+/// Ready: executable context has been prepared and a future scheduler may run it.
+/// Running: CURRENT_PROCESS owns the process while the CPU is in user mode.
+/// Dead: execution finished or faulted; wait observes the real status only when
+/// has_run is true. Prepared/not-started children keep an explicit wait status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessState {
+    Prepared,
     Ready,
     Running,
     Blocked,
     Dead,
 }
 
-#[derive(Debug, Clone)]
 pub struct ProcessRecord {
     pub pid: ProcessId,
     pub parent: Option<ProcessId>,
@@ -44,6 +52,7 @@ pub struct ProcessRecord {
     pub has_run: bool,
     pub waitable: bool,
     pub path: String,
+    process: Option<Process>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,6 +296,7 @@ pub enum ProcessError {
     AddressSpaceCreateFailed,
     NoKernelStack,
     InvalidUserContext,
+    ProcessNotPrepared,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -411,6 +421,7 @@ pub fn insert_process_record(
     state: ProcessState,
     waitable: bool,
     has_run: bool,
+    process: Option<Process>,
 ) {
     let table = process_table_mut();
     if let Some(index) = process_record_index(table, pid) {
@@ -421,6 +432,7 @@ pub fn insert_process_record(
         record.waitable = waitable;
         record.has_run = has_run;
         record.status = None;
+        record.process = process;
         return;
     }
 
@@ -432,14 +444,61 @@ pub fn insert_process_record(
         has_run,
         waitable,
         path,
+        process,
     });
 }
 
-pub fn create_process_record(path: String, waitable: bool) -> ProcessId {
+pub fn create_user_process_record(path: String, waitable: bool) -> Result<ProcessId, ProcessError> {
     let pid = allocate_pid();
     let parent = current_process().map(|process| process.pid);
-    insert_process_record(pid, parent, path, ProcessState::Ready, waitable, false);
-    pid
+    let mut process = Process::new_user(pid)?;
+    if let Some(current) = current_process() {
+        process.cwd = current.cwd.clone();
+    }
+
+    insert_process_record(
+        pid,
+        parent,
+        path.clone(),
+        ProcessState::Prepared,
+        waitable,
+        false,
+        Some(process),
+    );
+
+    crate::memory::serial_write("[PROCESS] pid=");
+    serial_write_u64(pid.0);
+    crate::memory::serial_write(" parent=");
+    match parent {
+        Some(parent_pid) => serial_write_u64(parent_pid.0),
+        None => crate::memory::serial_write("none"),
+    }
+    crate::memory::serial_write(" state=prepared path=");
+    crate::memory::serial_write(&path);
+    crate::memory::serial_write("\r\n");
+
+    Ok(pid)
+}
+
+pub fn take_prepared_process(pid: ProcessId) -> Result<Process, ProcessError> {
+    let table = process_table_mut();
+    let index = process_record_index(table, pid).ok_or(ProcessError::NoSuchProcess)?;
+    let record = &mut table[index];
+    if record.state == ProcessState::Dead {
+        return Err(ProcessError::ProcessNotPrepared);
+    }
+    record.state = ProcessState::Ready;
+    record.process.take().ok_or(ProcessError::ProcessNotPrepared)
+}
+
+pub fn mark_process_ready(pid: ProcessId) {
+    let table = process_table_mut();
+    if let Some(index) = process_record_index(table, pid) {
+        let record = &mut table[index];
+        if record.state != ProcessState::Dead {
+            record.state = ProcessState::Ready;
+        }
+    }
 }
 
 pub fn mark_process_started(pid: ProcessId) {
@@ -510,6 +569,7 @@ pub fn init_current_kernel_process() {
                 ProcessState::Running,
                 false,
                 true,
+                None,
             );
             CURRENT_PROCESS = Some(process);
         }

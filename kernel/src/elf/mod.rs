@@ -324,11 +324,17 @@ pub fn run_process_elf(data: &[u8], argv: &[String]) -> Result<ProcessExit, ElfE
         .first()
         .cloned()
         .unwrap_or_else(|| String::from("elf"));
-    let pid = crate::process::create_process_record(path, true);
-    let mut process = match Process::new_user(pid) {
-        Ok(process) => process,
+    let pid = match crate::process::create_user_process_record(path, true) {
+        Ok(pid) => pid,
         Err(_) => {
             crate::memory::serial_write("[ELF-TEST] process create failed\r\n");
+            return Err(ElfError::InvalidProgramHeader);
+        }
+    };
+    let mut process = match crate::process::take_prepared_process(pid) {
+        Ok(process) => process,
+        Err(_) => {
+            crate::memory::serial_write("[ELF-TEST] process record take failed\r\n");
             return Err(ElfError::InvalidProgramHeader);
         }
     };
@@ -352,6 +358,8 @@ pub fn run_process_elf(data: &[u8], argv: &[String]) -> Result<ProcessExit, ElfE
     process.entry_argc = initial_stack.argc;
     process.entry_argv = initial_stack.argv;
     process.entry_envp = initial_stack.envp;
+    process.state = crate::process::ProcessState::Ready;
+    crate::process::mark_process_ready(pid);
 
     crate::memory::serial_write("[ELF-TEST] userspace app started\r\n");
 
