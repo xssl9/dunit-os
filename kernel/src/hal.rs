@@ -17,6 +17,7 @@ extern "C" {
     pub fn syscall_set_kernel_stack_top(stack_top: u64);
     pub fn syscall_reset_kernel_stack();
     pub fn run_user_syscall_smoke(entry: u64, stack_top: u64);
+    pub fn run_user_process(entry: u64, stack_top: u64, argc: u64, argv: u64, envp: u64);
 }
 
 #[no_mangle]

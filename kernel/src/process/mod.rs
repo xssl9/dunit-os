@@ -85,10 +85,13 @@ pub struct Process {
     pub context: CpuContext,
     pub is_kernel: bool,
     pub cwd: String,
-    pub exit_code: Option<i32>,
+    pub status: Option<ProcessExitStatus>,
     address_space: Option<AddressSpace>,
     kernel_stack: Option<Vec<u8>>,
     pub kernel_stack_top: usize,
+    pub entry_argc: usize,
+    pub entry_argv: usize,
+    pub entry_envp: usize,
     fd_table: BTreeMap<ProcessFd, FdEntry>,
     next_fd: ProcessFd,
 }
@@ -108,10 +111,13 @@ impl Process {
             context: CpuContext::new(),
             is_kernel,
             cwd: String::from("/"),
-            exit_code: None,
+            status: None,
             address_space: None,
             kernel_stack: None,
             kernel_stack_top: 0,
+            entry_argc: 0,
+            entry_argv: 0,
+            entry_envp: 0,
             fd_table: BTreeMap::new(),
             next_fd: FIRST_PROCESS_FD,
         };
@@ -132,10 +138,13 @@ impl Process {
             context: CpuContext::new(),
             is_kernel: false,
             cwd: String::from("/"),
-            exit_code: None,
+            status: None,
             address_space: Some(AddressSpace::new().map_err(|_| ProcessError::AddressSpaceCreateFailed)?),
             kernel_stack: Some(kernel_stack),
             kernel_stack_top,
+            entry_argc: 0,
+            entry_argv: 0,
+            entry_envp: 0,
             fd_table: BTreeMap::new(),
             next_fd: FIRST_PROCESS_FD,
         };
@@ -184,7 +193,12 @@ impl Process {
     }
 
     pub fn exit(&mut self, code: i32) {
-        self.exit_code = Some(code);
+        self.status = Some(ProcessExitStatus::Exited(code));
+        self.terminate();
+    }
+
+    pub fn fault(&mut self, fault: ProcessFault) {
+        self.status = Some(ProcessExitStatus::Fault(fault));
         self.terminate();
     }
 
@@ -254,14 +268,29 @@ pub enum ProcessError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessExit {
     pub pid: ProcessId,
-    pub exit_code: i32,
     pub status: ProcessExitStatus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessExitStatus {
-    Exited,
+    Exited(i32),
     Fault(ProcessFault),
+}
+
+impl ProcessExitStatus {
+    pub const fn exit_code(self) -> i32 {
+        match self {
+            ProcessExitStatus::Exited(code) => code,
+            ProcessExitStatus::Fault(fault) => fault.exit_code(),
+        }
+    }
+
+    pub const fn kind_code(self) -> i32 {
+        match self {
+            ProcessExitStatus::Exited(_) => 0,
+            ProcessExitStatus::Fault(fault) => fault_kind_to_i32(fault),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -411,7 +440,7 @@ fn take_process_exit_request() -> Option<(i32, ProcessExitStatus)> {
         let code = PROCESS_EXIT_CODE.load(Ordering::SeqCst);
         let kind = PROCESS_EXIT_KIND.swap(0, Ordering::SeqCst);
         let status = match kind {
-            0 => ProcessExitStatus::Exited,
+            0 => ProcessExitStatus::Exited(code),
             value => ProcessExitStatus::Fault(fault_kind_from_i32(value)),
         };
         Some((code, status))
@@ -438,6 +467,9 @@ pub fn enter_user_process(mut process: Process) -> Result<ProcessExit, ProcessEr
     let pid = process.pid;
     let entry = process.context.rip;
     let user_stack = process.context.rsp;
+    let entry_argc = process.entry_argc as u64;
+    let entry_argv = process.entry_argv as u64;
+    let entry_envp = process.entry_envp as u64;
 
     crate::memory::serial_write("[PROCESS-RUN] starting pid=");
     serial_write_u64(pid.0);
@@ -456,7 +488,13 @@ pub fn enter_user_process(mut process: Process) -> Result<ProcessExit, ProcessEr
                         match current.activate_address_space() {
                             Ok(active) => {
                                 crate::memory::serial_write("[PROCESS-RUN] entered user mode\r\n");
-                                crate::hal::run_user_syscall_smoke(entry, user_stack);
+                                crate::hal::run_user_process(
+                                    entry,
+                                    user_stack,
+                                    entry_argc,
+                                    entry_argv,
+                                    entry_envp,
+                                );
                                 drop(active);
                                 Ok(())
                             }
@@ -475,16 +513,18 @@ pub fn enter_user_process(mut process: Process) -> Result<ProcessExit, ProcessEr
     }
 
     let mut finished = unsafe { CURRENT_PROCESS.take() }.ok_or(ProcessError::NoCurrentProcess)?;
-    let status = if let Some((code, status)) = take_process_exit_request() {
-        finished.exit(code);
+    let status = if let Some((_code, status)) = take_process_exit_request() {
+        match status {
+            ProcessExitStatus::Exited(code) => finished.exit(code),
+            ProcessExitStatus::Fault(fault) => finished.fault(fault),
+        }
         status
     } else if finished.state != ProcessState::Dead {
-        finished.exit(-1);
+        finished.fault(ProcessFault::Unknown);
         ProcessExitStatus::Fault(ProcessFault::Unknown)
     } else {
-        ProcessExitStatus::Exited
+        finished.status.unwrap_or(ProcessExitStatus::Fault(ProcessFault::Unknown))
     };
-    let exit_code = finished.exit_code.unwrap_or(-1);
     let closed = finished.cleanup_fds();
     if closed > 0 {
         crate::memory::serial_write("[PROCESS-RUN] cleaned fds=");
@@ -494,9 +534,15 @@ pub fn enter_user_process(mut process: Process) -> Result<ProcessExit, ProcessEr
 
     unsafe {
         CURRENT_PROCESS = previous;
+        match CURRENT_PROCESS.as_ref() {
+            Some(current) if !current.is_kernel && current.kernel_stack_top().is_some() => {
+                let _ = current.install_syscall_stack();
+            }
+            _ => Process::reset_syscall_stack_policy(),
+        }
     }
 
-    run_result.map(|_| ProcessExit { pid, exit_code, status })
+    run_result.map(|_| ProcessExit { pid, status })
 }
 
 const fn fault_kind_to_i32(fault: ProcessFault) -> i32 {

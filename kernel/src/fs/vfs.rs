@@ -8,6 +8,10 @@ use super::memfs::MemFs;
 static ELF_DEMO_BYTES: &[u8] = include_bytes!("../../../build/userspace/elf_demo");
 static FS_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/fs_test");
 static EXIT_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/exit_test");
+static ARGS_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/args_test");
+static CWD_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/cwd_test");
+static PATH_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/path_test");
+static STDIN_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/stdin_test");
 static FAULT_PF_BYTES: &[u8] = include_bytes!("../../../build/userspace/fault_pf");
 static FAULT_UD_BYTES: &[u8] = include_bytes!("../../../build/userspace/fault_ud");
 
@@ -424,6 +428,22 @@ pub fn init() -> Result<()> {
         let mut exit_test = Vec::new();
         exit_test.extend_from_slice(EXIT_TEST_BYTES);
         ROOT_MEMFS.add_file("/app/exit_test", exit_test);
+
+        let mut args_test = Vec::new();
+        args_test.extend_from_slice(ARGS_TEST_BYTES);
+        ROOT_MEMFS.add_file("/app/args_test", args_test);
+
+        let mut cwd_test = Vec::new();
+        cwd_test.extend_from_slice(CWD_TEST_BYTES);
+        ROOT_MEMFS.add_file("/app/cwd_test", cwd_test);
+
+        let mut path_test = Vec::new();
+        path_test.extend_from_slice(PATH_TEST_BYTES);
+        ROOT_MEMFS.add_file("/app/path_test", path_test);
+
+        let mut stdin_test = Vec::new();
+        stdin_test.extend_from_slice(STDIN_TEST_BYTES);
+        ROOT_MEMFS.add_file("/app/stdin_test", stdin_test);
 
         let mut fault_pf = Vec::new();
         fault_pf.extend_from_slice(FAULT_PF_BYTES);

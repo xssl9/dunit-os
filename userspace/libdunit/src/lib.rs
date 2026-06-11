@@ -11,10 +11,13 @@ pub const SYSCALL_DRAW_RECT: usize = 12;
 pub const SYSCALL_GET_KEY: usize = 13;
 pub const SYSCALL_GET_MOUSE_POS: usize = 14;
 pub const SYSCALL_SPAWN_PROCESS: usize = 15;
+pub const SYSCALL_WAIT_PROCESS: usize = 16;
 pub const SYSCALL_GET_PID: usize = 17;
 pub const SYSCALL_KILL_PROCESS: usize = 18;
 pub const SYSCALL_SLEEP: usize = 19;
 pub const SYSCALL_DEBUG_LOG: usize = 20;
+pub const SYSCALL_GETCWD: usize = 22;
+pub const SYSCALL_CHDIR: usize = 23;
 
 pub const OPEN_READ: usize = 1 << 0;
 pub const OPEN_WRITE: usize = 1 << 1;
@@ -22,6 +25,9 @@ pub const OPEN_CREATE: usize = 1 << 2;
 pub const OPEN_TRUNC: usize = 1 << 3;
 pub const OPEN_APPEND: usize = 1 << 4;
 pub const OPEN_READ_WRITE: usize = OPEN_READ | OPEN_WRITE;
+
+pub type RawArgv = *const *const u8;
+pub type RawEnvp = *const *const u8;
 
 #[repr(C)]
 pub struct FbInfo {
@@ -209,6 +215,91 @@ pub fn println(s: &str) {
     write_stdout("\n");
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct WaitStatus {
+    pub kind: i32,
+    pub code: i32,
+}
+
+pub const WAIT_KIND_EMPTY: i32 = -1;
+pub const WAIT_KIND_SPAWN_PREPARED: i32 = -2;
+pub const WAIT_KIND_EXITED: i32 = 0;
+
+impl WaitStatus {
+    pub const fn empty() -> Self {
+        Self { kind: WAIT_KIND_EMPTY, code: 0 }
+    }
+
+    pub const fn spawn_prepared(&self) -> bool {
+        self.kind == WAIT_KIND_SPAWN_PREPARED
+    }
+
+    pub const fn exited(&self) -> bool {
+        self.kind == WAIT_KIND_EXITED
+    }
+
+    pub const fn faulted(&self) -> bool {
+        self.kind > 0
+    }
+}
+
+pub fn print_usize(mut value: usize) {
+    let mut buf = [0u8; 20];
+    let mut index = buf.len();
+
+    if value == 0 {
+        write_stdout("0");
+        return;
+    }
+
+    while value > 0 {
+        index -= 1;
+        buf[index] = b'0' + (value % 10) as u8;
+        value /= 10;
+    }
+
+    let s = unsafe { core::str::from_utf8_unchecked(&buf[index..]) };
+    write_stdout(s);
+}
+
+pub unsafe fn argv_get<'a>(argc: usize, argv: RawArgv, index: usize) -> Option<&'a str> {
+    if argv.is_null() || index >= argc {
+        return None;
+    }
+
+    cstr_at(*argv.add(index))
+}
+
+pub unsafe fn env_get<'a>(envp: RawEnvp, index: usize) -> Option<&'a str> {
+    if envp.is_null() {
+        return None;
+    }
+
+    let ptr = *envp.add(index);
+    if ptr.is_null() {
+        return None;
+    }
+
+    cstr_at(ptr)
+}
+
+unsafe fn cstr_at<'a>(ptr: *const u8) -> Option<&'a str> {
+    if ptr.is_null() {
+        return None;
+    }
+
+    let mut len = 0;
+    while *ptr.add(len) != 0 {
+        len += 1;
+        if len > 4096 {
+            return None;
+        }
+    }
+
+    core::str::from_utf8(core::slice::from_raw_parts(ptr, len)).ok()
+}
+
 pub fn get_framebuffer(info: &mut FbInfo) -> bool {
     syscall1(SYSCALL_GET_FRAMEBUFFER, info as *mut FbInfo as usize) == 0
 }
@@ -247,6 +338,18 @@ pub fn kill(pid: u32) {
 
 pub fn spawn(path: &str) -> isize {
     syscall2(SYSCALL_SPAWN_PROCESS, path.as_ptr() as usize, path.len())
+}
+
+pub fn wait(pid: u32, status: &mut WaitStatus) -> isize {
+    syscall2(SYSCALL_WAIT_PROCESS, pid as usize, status as *mut WaitStatus as usize)
+}
+
+pub fn getcwd(buf: &mut [u8]) -> isize {
+    syscall2(SYSCALL_GETCWD, buf.as_mut_ptr() as usize, buf.len())
+}
+
+pub fn chdir(path: &str) -> isize {
+    syscall2(SYSCALL_CHDIR, path.as_ptr() as usize, path.len())
 }
 
 pub fn debug_log(code: usize) -> isize {

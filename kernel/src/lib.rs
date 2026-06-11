@@ -226,13 +226,42 @@ fn read_vfs_file(cwd: &str, path: &str) -> Result<alloc::vec::Vec<u8>, fs::vfs::
     Ok(data)
 }
 
-fn terminal_exec(console: &mut terminal::FbConsole, cwd: &str, path: &str) {
-    if path.is_empty() {
+fn terminal_resolve_exec_path(cwd: &str, path: &str) -> Result<alloc::string::String, fs::vfs::VfsError> {
+    if path.contains('/') {
+        return fs::vfs::normalize_path(path, cwd);
+    }
+
+    let mut candidate = alloc::string::String::from("/app/");
+    candidate.push_str(path);
+    if let Some(vfs) = fs::vfs::get_vfs() {
+        let stat = vfs.stat_at("/", &candidate)?;
+        if stat.file_type == fs::vfs::FileType::Directory {
+            return Err(fs::vfs::VfsError::IsADirectory);
+        }
+        Ok(candidate)
+    } else {
+        Err(fs::vfs::VfsError::IoError)
+    }
+}
+
+fn terminal_exec(console: &mut terminal::FbConsole, cwd: &str, command_line: &str) {
+    if command_line.is_empty() {
         console.write_str("exec: missing path\n");
         return;
     }
 
-    let normalized = match fs::vfs::normalize_path(path, cwd) {
+    let mut argv = alloc::vec::Vec::new();
+    for part in command_line.split_whitespace() {
+        argv.push(alloc::string::String::from(part));
+    }
+
+    if argv.is_empty() {
+        console.write_str("exec: missing path\n");
+        return;
+    }
+
+    let path = argv[0].clone();
+    let normalized = match terminal_resolve_exec_path(cwd, &path) {
         Ok(path) => path,
         Err(error) => {
             write_vfs_error(console, "exec", error);
@@ -240,20 +269,23 @@ fn terminal_exec(console: &mut terminal::FbConsole, cwd: &str, path: &str) {
         }
     };
 
+    let argv0 = normalized.rsplit('/').find(|part| !part.is_empty()).unwrap_or(path.as_str());
+    argv[0] = alloc::string::String::from(argv0);
+
     serial_write("[EXEC] loading ");
     serial_write(&normalized);
     serial_write("\r\n");
 
-    match read_vfs_file(cwd, path) {
+    match read_vfs_file(cwd, &normalized) {
         Ok(data) => {
-            match elf::run_process_elf(&data) {
+            match elf::run_process_elf(&data, &argv) {
                 Ok(exit) => {
                 serial_write("[EXEC] ");
                 serial_write(&normalized);
                 match exit.status {
-                    process::ProcessExitStatus::Exited => {
+                    process::ProcessExitStatus::Exited(code) => {
                         serial_write(" returned code=");
-                        serial_write_i32(exit.exit_code);
+                        serial_write_i32(code);
                     }
                     process::ProcessExitStatus::Fault(fault) => {
                         serial_write(" killed by ");
@@ -271,9 +303,9 @@ fn terminal_exec(console: &mut terminal::FbConsole, cwd: &str, path: &str) {
                 console.write_str("exec: ");
                 console.write_str(&normalized);
                 match exit.status {
-                    process::ProcessExitStatus::Exited => {
+                    process::ProcessExitStatus::Exited(code) => {
                         console.write_str(" returned code=");
-                        terminal_write_i32(console, exit.exit_code);
+                        terminal_write_i32(console, code);
                     }
                     process::ProcessExitStatus::Fault(fault) => {
                         console.write_str(" killed by ");

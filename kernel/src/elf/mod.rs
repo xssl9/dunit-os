@@ -1,3 +1,6 @@
+use alloc::string::String;
+use alloc::vec::Vec;
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct ElfHeader {
@@ -156,6 +159,9 @@ use crate::process::{Process, ProcessExit, ProcessId};
 
 pub const USER_STACK_SIZE: usize = 0x10000;
 pub const USER_STACK_TOP: usize = 0x00007FFF_FFFFF000;
+const MAX_EXEC_ARGS: usize = 16;
+const MAX_EXEC_ARG_LEN: usize = 128;
+const EXEC_ENV: [&str; 3] = ["PATH=/app", "SHELL=dunit", "CWD=/"];
 
 pub struct ElfLoader<'a> {
     parser: ElfParser<'a>,
@@ -305,7 +311,7 @@ pub fn run_demo_elf(data: &[u8]) -> bool {
     crate::syscall::finish_elf_test()
 }
 
-pub fn run_process_elf(data: &[u8]) -> Result<ProcessExit, ElfError> {
+pub fn run_process_elf(data: &[u8], argv: &[String]) -> Result<ProcessExit, ElfError> {
     let parser = match ElfParser::new(data) {
         Ok(parser) => parser,
         Err(_) => {
@@ -328,9 +334,20 @@ pub fn run_process_elf(data: &[u8]) -> Result<ProcessExit, ElfError> {
         return Err(ElfError::InvalidProgramHeader);
     }
 
+    let initial_stack = match prepare_initial_stack(&mut process, argv, &EXEC_ENV) {
+        Ok(stack) => stack,
+        Err(_) => {
+            crate::memory::serial_write("[ELF-TEST] argv stack setup failed\r\n");
+            return Err(ElfError::InvalidProgramHeader);
+        }
+    };
+
     process.context.rip = parser.entry_point();
-    process.context.rsp = initial_user_stack() as u64;
+    process.context.rsp = initial_stack.rsp as u64;
     process.context.rflags = 0x202;
+    process.entry_argc = initial_stack.argc;
+    process.entry_argv = initial_stack.argv;
+    process.entry_envp = initial_stack.envp;
 
     crate::memory::serial_write("[ELF-TEST] userspace app started\r\n");
 
@@ -345,6 +362,146 @@ pub fn run_process_elf(data: &[u8]) -> Result<ProcessExit, ElfError> {
 
 pub const fn initial_user_stack() -> usize {
     USER_STACK_TOP & !0xF
+}
+
+struct InitialStack {
+    rsp: usize,
+    argc: usize,
+    argv: usize,
+    envp: usize,
+}
+
+/// Dunit userspace exec ABI v1.
+///
+/// On process entry:
+/// - `%rsp` points at the stack block below and is 8 mod 16, matching the
+///   x86_64 SysV function-entry contract a Rust `_start` expects after `call`.
+/// - `%rdi = argc`, `%rsi = argv`, `%rdx = envp` for no-libc Rust `_start`.
+/// - Stack memory contains:
+///
+/// ```text
+/// rsp -> argc: u64
+///        argv[0]: *const u8
+///        ...
+///        argv[argc - 1]: *const u8
+///        NULL
+///        envp[0]: *const u8
+///        ...
+///        NULL
+///        padding, then NUL-terminated argv/env strings
+/// ```
+///
+/// `envp` is intentionally minimal for now. The ABI exists so a fuller shell
+/// environment can grow later without changing userspace startup shape.
+fn prepare_initial_stack(
+    process: &mut Process,
+    argv: &[String],
+    env: &[&str],
+) -> Result<InitialStack, ElfError> {
+    if argv.is_empty() || argv.len() > MAX_EXEC_ARGS || env.len() > MAX_EXEC_ARGS {
+        return Err(ElfError::InvalidProgramHeader);
+    }
+
+    let mut sp = initial_user_stack();
+    let mut argv_ptrs = Vec::new();
+    let mut env_ptrs = Vec::new();
+
+    for value in argv.iter().rev() {
+        let ptr = write_stack_string(process, &mut sp, value.as_str())?;
+        argv_ptrs.push(ptr);
+    }
+    argv_ptrs.reverse();
+
+    for value in env.iter().rev() {
+        let ptr = write_stack_string(process, &mut sp, value)?;
+        env_ptrs.push(ptr);
+    }
+    env_ptrs.reverse();
+
+    let words = argv_ptrs.len() + env_ptrs.len() + 3;
+    sp &= !0xF;
+    if words % 2 == 0 {
+        sp = sp.checked_sub(8).ok_or(ElfError::InvalidProgramHeader)?;
+        write_user_u64(process, sp, 0)?;
+    }
+
+    push_user_u64(process, &mut sp, 0)?;
+    for ptr in env_ptrs.iter().rev() {
+        push_user_u64(process, &mut sp, *ptr as u64)?;
+    }
+    let envp = sp;
+
+    push_user_u64(process, &mut sp, 0)?;
+    for ptr in argv_ptrs.iter().rev() {
+        push_user_u64(process, &mut sp, *ptr as u64)?;
+    }
+    let argv_addr = sp;
+
+    push_user_u64(process, &mut sp, argv_ptrs.len() as u64)?;
+
+    if sp & 0xF != 8 {
+        return Err(ElfError::InvalidProgramHeader);
+    }
+
+    Ok(InitialStack {
+        rsp: sp,
+        argc: argv_ptrs.len(),
+        argv: argv_addr,
+        envp,
+    })
+}
+
+fn write_stack_string(
+    process: &mut Process,
+    sp: &mut usize,
+    value: &str,
+) -> Result<usize, ElfError> {
+    if value.len() > MAX_EXEC_ARG_LEN {
+        return Err(ElfError::InvalidProgramHeader);
+    }
+
+    let total = value.len() + 1;
+    *sp = sp.checked_sub(total).ok_or(ElfError::InvalidProgramHeader)?;
+    write_user_bytes(process, *sp, value.as_bytes())?;
+    write_user_bytes(process, *sp + value.len(), &[0])?;
+    Ok(*sp)
+}
+
+fn push_user_u64(process: &mut Process, sp: &mut usize, value: u64) -> Result<(), ElfError> {
+    *sp = sp.checked_sub(8).ok_or(ElfError::InvalidProgramHeader)?;
+    write_user_u64(process, *sp, value)
+}
+
+fn write_user_u64(process: &mut Process, addr: usize, value: u64) -> Result<(), ElfError> {
+    write_user_bytes(process, addr, &value.to_le_bytes())
+}
+
+fn write_user_bytes(process: &mut Process, addr: usize, bytes: &[u8]) -> Result<(), ElfError> {
+    let address_space = process
+        .address_space()
+        .ok_or(ElfError::InvalidProgramHeader)?;
+    let mut written = 0;
+
+    while written < bytes.len() {
+        let user_addr = addr
+            .checked_add(written)
+            .ok_or(ElfError::InvalidProgramHeader)?;
+        let page_left = PAGE_SIZE - (user_addr & (PAGE_SIZE - 1));
+        let chunk_len = page_left.min(bytes.len() - written);
+        let phys = address_space
+            .translate_user_page(VirtualAddress::from_usize(user_addr))
+            .map_err(|_| ElfError::InvalidProgramHeader)?
+            .ok_or(ElfError::InvalidProgramHeader)?;
+        let dst = crate::memory::vmm::phys_to_virt(phys.as_usize()) as *mut u8;
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr().add(written), dst, chunk_len);
+        }
+
+        written += chunk_len;
+    }
+
+    Ok(())
 }
 
 fn load_into_process_address_space(

@@ -182,6 +182,49 @@ run_user_syscall_smoke:
     xor r11, r11
     iretq
 
+global run_user_process
+run_user_process:
+    ; Rust extern "C":
+    ;   rdi=entry, rsi=user_stack, rdx=argc, rcx=argv, r8=envp
+    ; Userspace entry ABI:
+    ;   stack points at the argc/argv/envp block,
+    ;   rdi=argc, rsi=argv, rdx=envp for tiny no-libc programs.
+    push rbx
+    push rbp
+    push r12
+    push r13
+    push r14
+    push r15
+    mov [rel syscall_smoke_kernel_rsp], rsp
+    mov qword [rel syscall_smoke_active], 1
+    mov rax, rdi
+    mov rbx, rsi
+    mov r12, rdx
+    mov r13, rcx
+    mov r14, r8
+
+    push qword USER_DATA_SELECTOR
+    push rbx
+    pushfq
+    pop rcx
+    or rcx, 0x200
+    push rcx
+    push qword USER_CODE_SELECTOR
+    push rax
+    xor rax, rax
+    xor rcx, rcx
+    mov rdi, r12
+    mov rsi, r13
+    mov rdx, r14
+    xor r8, r8
+    xor r9, r9
+    xor r10, r10
+    xor r11, r11
+    xor r12, r12
+    xor r13, r13
+    xor r14, r14
+    iretq
+
 section .rodata
 align 8
 syscall_smoke_return_magic:

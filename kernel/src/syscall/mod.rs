@@ -1,7 +1,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
 #[repr(u64)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +28,8 @@ pub enum Syscall {
     Sleep = 19,
     DebugLog = 20,
     SmokeDone = 21,
+    GetCwd = 22,
+    Chdir = 23,
 }
 
 impl Syscall {
@@ -55,6 +57,8 @@ impl Syscall {
             19 => Some(Syscall::Sleep),
             20 => Some(Syscall::DebugLog),
             21 => Some(Syscall::SmokeDone),
+            22 => Some(Syscall::GetCwd),
+            23 => Some(Syscall::Chdir),
             _ => None,
         }
     }
@@ -109,12 +113,25 @@ const SMOKE_FS_DATA: &[u8] = b"hello";
 const SMOKE_APPEND_A: &[u8] = b"A";
 const SMOKE_APPEND_B: &[u8] = b"B";
 const SMOKE_STDOUT_DATA: &[u8] = b"[STDOUT-TEST] hello from userspace\n";
+const EXEC_PATH: &str = "/app";
 
 static SYSCALL_SMOKE_OK: AtomicBool = AtomicBool::new(false);
 static SYSCALL_FS_SMOKE_OK: AtomicBool = AtomicBool::new(false);
 static SYSCALL_FS_SEMANTICS_OK: AtomicBool = AtomicBool::new(false);
 static ELF_TEST_RUNNING: AtomicBool = AtomicBool::new(false);
 static ELF_TEST_RETURNED: AtomicBool = AtomicBool::new(false);
+static LAST_WAIT_PID: AtomicU64 = AtomicU64::new(0);
+static LAST_WAIT_KIND: AtomicI32 = AtomicI32::new(WAIT_KIND_EMPTY);
+static LAST_WAIT_CODE: AtomicI32 = AtomicI32::new(0);
+const WAIT_KIND_EMPTY: i32 = -1;
+const WAIT_KIND_SPAWN_PREPARED: i32 = -2;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct WaitStatus {
+    pub kind: i32,
+    pub code: i32,
+}
 
 #[repr(align(4096))]
 struct UserSmokeStack([u8; 4096]);
@@ -309,12 +326,14 @@ pub extern "C" fn syscall_handler(
         Syscall::GetKey => sys_get_key(),
         Syscall::GetMousePos => sys_get_mouse_pos(arg0 as *mut u32, arg1 as *mut u32),
         Syscall::SpawnProcess => sys_spawn_process(arg0 as *const u8, arg1 as usize),
-        Syscall::WaitProcess => sys_wait_process(arg0 as u32),
+        Syscall::WaitProcess => sys_wait_process(arg0 as u32, arg1 as *mut WaitStatus),
         Syscall::GetPid => sys_get_pid(),
         Syscall::KillProcess => sys_kill_process(arg0 as u32),
         Syscall::Sleep => sys_sleep(arg0),
         Syscall::DebugLog => sys_debug_log(arg0),
         Syscall::SmokeDone => sys_smoke_done(arg0 as i32),
+        Syscall::GetCwd => sys_getcwd(arg0 as *mut u8, arg1 as usize),
+        Syscall::Chdir => sys_chdir(arg0 as *const u8, arg1 as usize),
     }
 }
 
@@ -352,7 +371,7 @@ fn sys_read(fd: u32, buf: *mut u8, count: usize) -> i64 {
     }
 
     match crate::process::get_fd(fd).map(|entry| entry.target) {
-        Some(crate::process::FdTarget::Stdin) => return ENOSYS,
+        Some(crate::process::FdTarget::Stdin) => return 0,
         Some(crate::process::FdTarget::Stdout | crate::process::FdTarget::Stderr) => return EBADF,
         Some(crate::process::FdTarget::Vfs(_)) => {}
         None => return EBADF,
@@ -663,15 +682,130 @@ fn sys_get_mouse_pos(x: *mut u32, y: *mut u32) -> i64 {
 }
 
 fn sys_spawn_process(path: *const u8, path_len: usize) -> i64 {
-    if let Err(error) = copy_string_from_user_len(path, path_len, MAX_USER_PATH) {
+    let path = match copy_string_from_user_len(path, path_len, MAX_USER_PATH) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+
+    let cwd = match crate::process::current_process() {
+        Some(process) => process.cwd.clone(),
+        None => return EINVAL,
+    };
+
+    let resolved = match resolve_exec_path(&cwd, &path) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+
+    let data = match read_vfs_file(&cwd, &resolved) {
+        Ok(data) => data,
+        Err(error) => return vfs_error_to_errno(error),
+    };
+
+    // Spawn ABI foundation, v0:
+    //
+    // Dunit is still a single-process runtime. Running a child ELF from inside a
+    // userspace syscall needs nested syscall-return state in the HAL and a real
+    // scheduler ownership model. For now spawn performs the stable part of the
+    // contract: copy the userspace path, apply cwd/PATH lookup, validate that the
+    // target is an ELF, allocate a waitable pid, and publish an explicit
+    // not-started status. It must not report Exited(0), because no child has
+    // executed yet.
+    if crate::elf::ElfParser::new(&data).is_err() {
+        return EIO;
+    }
+
+    let pid = crate::process::allocate_pid();
+    LAST_WAIT_PID.store(pid.0, Ordering::SeqCst);
+    LAST_WAIT_KIND.store(WAIT_KIND_SPAWN_PREPARED, Ordering::SeqCst);
+    LAST_WAIT_CODE.store(0, Ordering::SeqCst);
+    syscall_log(format_args!(
+        "[SPAWN] prepared pid={} path={} execution=not-started\n",
+        pid.0,
+        resolved
+    ));
+    pid.0 as i64
+}
+
+fn sys_wait_process(pid: u32, status: *mut WaitStatus) -> i64 {
+    let last_pid = LAST_WAIT_PID.load(Ordering::SeqCst);
+    if last_pid == 0 || (pid != 0 && pid as u64 != last_pid) {
+        return ENOENT;
+    }
+
+    let wait_status = WaitStatus {
+        kind: LAST_WAIT_KIND.load(Ordering::SeqCst),
+        code: LAST_WAIT_CODE.load(Ordering::SeqCst),
+    };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            &wait_status as *const WaitStatus as *const u8,
+            core::mem::size_of::<WaitStatus>(),
+        )
+    };
+
+    if let Err(error) = copy_buffer_to_user(status as *mut u8, bytes) {
         return error;
     }
 
-    ENOSYS
+    last_pid as i64
 }
 
-fn sys_wait_process(_pid: u32) -> i64 {
-    ENOSYS
+fn sys_getcwd(buf: *mut u8, len: usize) -> i64 {
+    if len == 0 {
+        return EINVAL;
+    }
+
+    let cwd = match crate::process::current_process() {
+        Some(process) => process.cwd.clone(),
+        None => return EINVAL,
+    };
+
+    if cwd.len() >= len {
+        return ENAMETOOLONG;
+    }
+
+    if let Err(error) = copy_buffer_to_user(buf, cwd.as_bytes()) {
+        return error;
+    }
+    if let Err(error) = copy_buffer_to_user(unsafe { buf.add(cwd.len()) }, &[0]) {
+        return error;
+    }
+
+    cwd.len() as i64
+}
+
+fn sys_chdir(path: *const u8, path_len: usize) -> i64 {
+    let path = match copy_string_from_user_len(path, path_len, MAX_USER_PATH) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+
+    let cwd = match crate::process::current_process() {
+        Some(process) => process.cwd.clone(),
+        None => return EINVAL,
+    };
+
+    let normalized = match crate::fs::vfs::get_vfs()
+        .ok_or(EIO)
+        .and_then(|vfs| {
+            let stat = vfs.stat_at(&cwd, &path).map_err(vfs_error_to_errno)?;
+            if stat.file_type != crate::fs::vfs::FileType::Directory {
+                return Err(ENOTDIR);
+            }
+            vfs.normalize_at(&cwd, &path).map_err(vfs_error_to_errno)
+        }) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+
+    match crate::process::current_process_mut() {
+        Some(process) => {
+            process.cwd = normalized;
+            0
+        }
+        None => EINVAL,
+    }
 }
 
 fn sys_get_pid() -> i64 {
@@ -682,6 +816,48 @@ fn sys_get_pid() -> i64 {
 
 fn sys_kill_process(_pid: u32) -> i64 {
     ENOSYS
+}
+
+fn resolve_exec_path(cwd: &str, path: &str) -> Result<String, i64> {
+    let vfs = crate::fs::vfs::get_vfs().ok_or(EIO)?;
+    if path.contains('/') {
+        let normalized = vfs.normalize_at(cwd, path).map_err(vfs_error_to_errno)?;
+        let stat = vfs.stat_at("/", &normalized).map_err(vfs_error_to_errno)?;
+        if stat.file_type == crate::fs::vfs::FileType::Directory {
+            return Err(EISDIR);
+        }
+        return Ok(normalized);
+    }
+
+    let mut candidate = String::from(EXEC_PATH);
+    candidate.push('/');
+    candidate.push_str(path);
+    let stat = vfs.stat_at("/", &candidate).map_err(vfs_error_to_errno)?;
+    if stat.file_type == crate::fs::vfs::FileType::Directory {
+        return Err(EISDIR);
+    }
+    Ok(candidate)
+}
+
+fn read_vfs_file(cwd: &str, path: &str) -> Result<Vec<u8>, crate::fs::vfs::VfsError> {
+    let vfs = crate::fs::vfs::get_vfs().ok_or(crate::fs::vfs::VfsError::IoError)?;
+    let fd = vfs.open_at(cwd, path, crate::fs::vfs::OpenFlags::READ)?;
+    let mut data = Vec::new();
+    let mut buf = [0u8; 512];
+
+    loop {
+        match vfs.read(fd, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => data.extend_from_slice(&buf[..n]),
+            Err(error) => {
+                let _ = vfs.close(fd);
+                return Err(error);
+            }
+        }
+    }
+
+    vfs.close(fd)?;
+    Ok(data)
 }
 
 fn sys_sleep(ms: u64) -> i64 {
