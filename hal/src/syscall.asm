@@ -128,6 +128,25 @@ syscall_reset_kernel_stack:
     mov qword [rel syscall_selected_stack_top], 0
     ret
 
+global syscall_escape_user_fault
+syscall_escape_user_fault:
+    cmp qword [rel syscall_smoke_active], 1
+    jne .halt
+    mov qword [rel syscall_smoke_active], 0
+    mov rsp, [rel syscall_smoke_kernel_rsp]
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbp
+    pop rbx
+    sti
+    ret
+.halt:
+    cli
+    hlt
+    jmp .halt
+
 global run_user_syscall_smoke
 run_user_syscall_smoke:
     ; Called from Rust as an extern "C" function. The user payload can clobber
@@ -141,15 +160,26 @@ run_user_syscall_smoke:
     push r15
     mov [rel syscall_smoke_kernel_rsp], rsp
     mov qword [rel syscall_smoke_active], 1
+    mov rax, rdi
+    mov rbx, rsi
 
     push qword USER_DATA_SELECTOR
-    push rsi
+    push rbx
     pushfq
-    pop rax
-    or rax, 0x200
-    push rax
+    pop rcx
+    or rcx, 0x200
+    push rcx
     push qword USER_CODE_SELECTOR
-    push rdi
+    push rax
+    xor rax, rax
+    xor rcx, rcx
+    xor rdx, rdx
+    xor rsi, rsi
+    xor rdi, rdi
+    xor r8, r8
+    xor r9, r9
+    xor r10, r10
+    xor r11, r11
     iretq
 
 section .rodata

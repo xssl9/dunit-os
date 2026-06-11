@@ -2,6 +2,7 @@ section .text
 bits 64
 
 global gdt_flush
+global gdt_load_tss
 
 gdt_flush:
     lgdt [rdi]
@@ -18,3 +19,7 @@ gdt_flush:
     push rax
     push rdi
     retfq
+
+gdt_load_tss:
+    ltr di
+    ret

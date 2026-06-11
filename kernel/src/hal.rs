@@ -20,7 +20,7 @@ extern "C" {
 }
 
 #[no_mangle]
-pub extern "C" fn interrupt_handler(frame: *const InterruptFrame) {
+pub extern "C" fn interrupt_handler(frame: *const InterruptFrame) -> u64 {
     let frame = unsafe { &*frame };
     
     use crate::interrupts::*;
@@ -49,5 +49,11 @@ pub extern "C" fn interrupt_handler(frame: *const InterruptFrame) {
         32 => handle_timer(frame),
         33 => handle_keyboard(frame),
         _ => handle_unknown_interrupt(frame),
+    }
+
+    if crate::process::user_fault_escape_requested() {
+        1
+    } else {
+        0
     }
 }

@@ -49,7 +49,7 @@ pub fn handle_divide_by_zero(frame: &InterruptFrame) {
     let is_user_mode = (frame.cs & 0x3) == 3;
     
     if is_user_mode {
-        terminate_current_process();
+        terminate_current_process("divide-by-zero", frame, 0, crate::process::ProcessFault::DivideByZero);
     } else {
         panic!("Kernel divide by zero at RIP: {:#x}", frame.rip);
     }
@@ -71,7 +71,7 @@ pub fn handle_invalid_opcode(frame: &InterruptFrame) {
     let is_user_mode = (frame.cs & 0x3) == 3;
     
     if is_user_mode {
-        terminate_current_process();
+        terminate_current_process("invalid-opcode", frame, 0, crate::process::ProcessFault::InvalidOpcode);
     } else {
         panic!("Kernel invalid opcode at RIP: {:#x}", frame.rip);
     }
@@ -108,7 +108,7 @@ pub fn handle_general_protection_fault(frame: &InterruptFrame) {
     let is_user_mode = (frame.cs & 0x3) == 3;
     
     if is_user_mode {
-        terminate_current_process();
+        terminate_current_process("general-protection", frame, 0, crate::process::ProcessFault::GeneralProtection);
     } else {
         panic!("Kernel general protection fault at RIP: {:#x}, error code: {:#x}", frame.rip, frame.err_code);
     }
@@ -123,7 +123,7 @@ pub fn handle_page_fault(frame: &InterruptFrame) {
     let is_user_mode = (frame.cs & 0x3) == 3;
     
     if is_user_mode {
-        terminate_current_process();
+        terminate_current_process("page-fault", frame, cr2, crate::process::ProcessFault::PageFault);
     } else {
         panic!("Kernel page fault at RIP: {:#x}, address: {:#x}, error code: {:#x}", frame.rip, cr2, frame.err_code);
     }
@@ -150,8 +150,71 @@ pub fn handle_security_exception(frame: &InterruptFrame) {
     panic!("Security exception at RIP: {:#x}, error code: {:#x}", frame.rip, frame.err_code);
 }
 
-pub fn handle_unknown_interrupt(frame: &InterruptFrame) {
+pub fn handle_unknown_interrupt(_frame: &InterruptFrame) {
 }
 
-fn terminate_current_process() {
+fn terminate_current_process(
+    reason: &str,
+    frame: &InterruptFrame,
+    fault_addr: u64,
+    fault: crate::process::ProcessFault,
+) {
+    let pid = crate::process::current_process()
+        .map(|process| process.pid.0)
+        .unwrap_or(0);
+
+    crate::memory::serial_write("[USER-FAULT] pid=");
+    serial_write_u64(pid);
+    crate::memory::serial_write(" reason=");
+    crate::memory::serial_write(reason);
+    crate::memory::serial_write(" rip=");
+    serial_write_hex(frame.rip);
+    crate::memory::serial_write(" rsp=");
+    serial_write_hex(frame.rsp);
+    if fault_addr != 0 {
+        crate::memory::serial_write(" addr=");
+        serial_write_hex(fault_addr);
+    }
+    crate::memory::serial_write(" err=");
+    serial_write_hex(frame.err_code);
+    crate::memory::serial_write("\r\n");
+
+    let _ = crate::process::request_current_user_fault(fault);
+}
+
+fn serial_write_u64(mut value: u64) {
+    let mut buf = [0u8; 20];
+    let mut index = buf.len();
+
+    if value == 0 {
+        crate::memory::serial_write("0");
+        return;
+    }
+
+    while value > 0 {
+        index -= 1;
+        buf[index] = b'0' + (value % 10) as u8;
+        value /= 10;
+    }
+
+    for byte in &buf[index..] {
+        let ch = [*byte];
+        let s = unsafe { core::str::from_utf8_unchecked(&ch) };
+        crate::memory::serial_write(s);
+    }
+}
+
+fn serial_write_hex(value: u64) {
+    crate::memory::serial_write("0x");
+    let mut started = false;
+    for shift in (0..64).step_by(4).rev() {
+        let nibble = ((value >> shift) & 0xF) as u8;
+        if nibble != 0 || started || shift == 0 {
+            started = true;
+            let byte = if nibble < 10 { b'0' + nibble } else { b'a' + (nibble - 10) };
+            let ch = [byte];
+            let s = unsafe { core::str::from_utf8_unchecked(&ch) };
+            crate::memory::serial_write(s);
+        }
+    }
 }

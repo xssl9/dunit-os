@@ -152,7 +152,7 @@ impl<'a> Iterator for ProgramHeaderIterator<'a> {
 use crate::memory::pmm::PhysicalMemoryManager;
 use crate::memory::pmm::PhysicalAddress;
 use crate::memory::vmm::{AddressSpace, VirtualAddress, VirtualMemoryManager, PageFlags};
-use crate::process::{Process, ProcessId};
+use crate::process::{Process, ProcessExit, ProcessId};
 
 pub const USER_STACK_SIZE: usize = 0x10000;
 pub const USER_STACK_TOP: usize = 0x00007FFF_FFFFF000;
@@ -305,12 +305,12 @@ pub fn run_demo_elf(data: &[u8]) -> bool {
     crate::syscall::finish_elf_test()
 }
 
-pub fn run_process_elf(data: &[u8]) -> bool {
+pub fn run_process_elf(data: &[u8]) -> Result<ProcessExit, ElfError> {
     let parser = match ElfParser::new(data) {
         Ok(parser) => parser,
         Err(_) => {
             crate::memory::serial_write("[ELF-TEST] parse failed\r\n");
-            return false;
+            return Err(ElfError::InvalidMagic);
         }
     };
 
@@ -319,28 +319,32 @@ pub fn run_process_elf(data: &[u8]) -> bool {
         Ok(process) => process,
         Err(_) => {
             crate::memory::serial_write("[ELF-TEST] process create failed\r\n");
-            return false;
+            return Err(ElfError::InvalidProgramHeader);
         }
     };
 
     if load_into_process_address_space(&parser, &mut process).is_err() {
         crate::memory::serial_write("[ELF-TEST] process load failed\r\n");
-        return false;
+        return Err(ElfError::InvalidProgramHeader);
     }
 
     process.context.rip = parser.entry_point();
-    process.context.rsp = USER_STACK_TOP as u64;
+    process.context.rsp = initial_user_stack() as u64;
     process.context.rflags = 0x202;
 
     crate::memory::serial_write("[ELF-TEST] userspace app started\r\n");
 
     match crate::process::enter_user_process(process) {
-        Ok(exit) => exit.exit_code == 0,
+        Ok(exit) => Ok(exit),
         Err(_) => {
             crate::memory::serial_write("[ELF-TEST] process run failed\r\n");
-            false
+            Err(ElfError::InvalidProgramHeader)
         }
     }
+}
+
+pub const fn initial_user_stack() -> usize {
+    USER_STACK_TOP & !0xF
 }
 
 fn load_into_process_address_space(

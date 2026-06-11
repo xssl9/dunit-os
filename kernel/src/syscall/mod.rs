@@ -324,16 +324,6 @@ fn sys_exit(code: i32) -> i64 {
         return SMOKE_RETURN_MAGIC;
     }
 
-    if ELF_TEST_RUNNING.load(Ordering::SeqCst) {
-        if code == 0 {
-            syscall_log!("[ELF-TEST] userspace app returned\r\n");
-        } else {
-            syscall_log!("[ELF-TEST] userspace app exited with code {}\r\n", code);
-        }
-        ELF_TEST_RETURNED.store(true, Ordering::SeqCst);
-        return SMOKE_RETURN_MAGIC;
-    }
-
     0
 }
 
@@ -733,7 +723,11 @@ fn sys_debug_log(code: u64) -> i64 {
 
 fn sys_smoke_done(exit_code: i32) -> i64 {
     if let Some(pid) = crate::process::request_current_user_exit(exit_code) {
-        syscall_log!("[PROCESS-RUN] exited pid={} code={}\r\n", pid.0, exit_code);
+        syscall_log!(
+            "[PROCESS-RUN] legacy smoke exit pid={} code={}\r\n",
+            pid.0,
+            exit_code
+        );
         return SMOKE_RETURN_MAGIC;
     }
 

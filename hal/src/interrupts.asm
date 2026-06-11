@@ -56,6 +56,7 @@ ISR_NOERRCODE i
 %endrep
 
 extern interrupt_handler
+extern syscall_escape_user_fault
 
 isr_common_stub:
     push rax
@@ -80,6 +81,8 @@ isr_common_stub:
     sub rsp, 16
     mov [rsp], rax
     call interrupt_handler
+    cmp rax, 1
+    je .escape_user_fault
     mov rsp, [rsp]
     
     pop r15
@@ -101,3 +104,6 @@ isr_common_stub:
     add rsp, 16
     
     iretq
+
+.escape_user_fault:
+    jmp syscall_escape_user_fault

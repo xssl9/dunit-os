@@ -7,6 +7,9 @@ use super::memfs::MemFs;
 
 static ELF_DEMO_BYTES: &[u8] = include_bytes!("../../../build/userspace/elf_demo");
 static FS_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/fs_test");
+static EXIT_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/exit_test");
+static FAULT_PF_BYTES: &[u8] = include_bytes!("../../../build/userspace/fault_pf");
+static FAULT_UD_BYTES: &[u8] = include_bytes!("../../../build/userspace/fault_ud");
 
 pub type FileDescriptor = u32;
 pub type FileHandle = usize;
@@ -417,6 +420,18 @@ pub fn init() -> Result<()> {
         let mut fs_test = Vec::new();
         fs_test.extend_from_slice(FS_TEST_BYTES);
         ROOT_MEMFS.add_file("/app/fs_test", fs_test);
+
+        let mut exit_test = Vec::new();
+        exit_test.extend_from_slice(EXIT_TEST_BYTES);
+        ROOT_MEMFS.add_file("/app/exit_test", exit_test);
+
+        let mut fault_pf = Vec::new();
+        fault_pf.extend_from_slice(FAULT_PF_BYTES);
+        ROOT_MEMFS.add_file("/app/fault_pf", fault_pf);
+
+        let mut fault_ud = Vec::new();
+        fault_ud.extend_from_slice(FAULT_UD_BYTES);
+        ROOT_MEMFS.add_file("/app/fault_ud", fault_ud);
 
         vfs.mount("/", &mut ROOT_MEMFS)?;
         serial_log(b"[MEMFS] mounted as /\r\n\0");

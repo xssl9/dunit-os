@@ -21,6 +21,7 @@ static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 static mut CURRENT_PROCESS: Option<Process> = None;
 static PROCESS_EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 static PROCESS_EXIT_CODE: AtomicI32 = AtomicI32::new(0);
+static PROCESS_EXIT_KIND: AtomicI32 = AtomicI32::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessState {
@@ -254,6 +255,44 @@ pub enum ProcessError {
 pub struct ProcessExit {
     pub pid: ProcessId,
     pub exit_code: i32,
+    pub status: ProcessExitStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessExitStatus {
+    Exited,
+    Fault(ProcessFault),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessFault {
+    PageFault,
+    GeneralProtection,
+    InvalidOpcode,
+    DivideByZero,
+    Unknown,
+}
+
+impl ProcessFault {
+    pub const fn exit_code(self) -> i32 {
+        match self {
+            ProcessFault::PageFault => -14,
+            ProcessFault::GeneralProtection => -11,
+            ProcessFault::InvalidOpcode => -4,
+            ProcessFault::DivideByZero => -8,
+            ProcessFault::Unknown => -1,
+        }
+    }
+
+    pub const fn reason(self) -> &'static str {
+        match self {
+            ProcessFault::PageFault => "page fault",
+            ProcessFault::GeneralProtection => "general protection fault",
+            ProcessFault::InvalidOpcode => "invalid opcode",
+            ProcessFault::DivideByZero => "divide by zero",
+            ProcessFault::Unknown => "user fault",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -346,13 +385,36 @@ pub fn request_current_user_exit(code: i32) -> Option<ProcessId> {
         return None;
     }
     PROCESS_EXIT_CODE.store(code, Ordering::SeqCst);
+    PROCESS_EXIT_KIND.store(0, Ordering::SeqCst);
     PROCESS_EXIT_REQUESTED.store(true, Ordering::SeqCst);
     Some(process.pid)
 }
 
-fn take_process_exit_request() -> Option<i32> {
+pub fn request_current_user_fault(fault: ProcessFault) -> Option<ProcessId> {
+    let process = current_process()?;
+    if process.is_kernel {
+        return None;
+    }
+    PROCESS_EXIT_CODE.store(fault.exit_code(), Ordering::SeqCst);
+    PROCESS_EXIT_KIND.store(fault_kind_to_i32(fault), Ordering::SeqCst);
+    PROCESS_EXIT_REQUESTED.store(true, Ordering::SeqCst);
+    Some(process.pid)
+}
+
+pub fn user_fault_escape_requested() -> bool {
+    PROCESS_EXIT_REQUESTED.load(Ordering::SeqCst)
+        && PROCESS_EXIT_KIND.load(Ordering::SeqCst) != 0
+}
+
+fn take_process_exit_request() -> Option<(i32, ProcessExitStatus)> {
     if PROCESS_EXIT_REQUESTED.swap(false, Ordering::SeqCst) {
-        Some(PROCESS_EXIT_CODE.load(Ordering::SeqCst))
+        let code = PROCESS_EXIT_CODE.load(Ordering::SeqCst);
+        let kind = PROCESS_EXIT_KIND.swap(0, Ordering::SeqCst);
+        let status = match kind {
+            0 => ProcessExitStatus::Exited,
+            value => ProcessExitStatus::Fault(fault_kind_from_i32(value)),
+        };
+        Some((code, status))
     } else {
         None
     }
@@ -413,11 +475,15 @@ pub fn enter_user_process(mut process: Process) -> Result<ProcessExit, ProcessEr
     }
 
     let mut finished = unsafe { CURRENT_PROCESS.take() }.ok_or(ProcessError::NoCurrentProcess)?;
-    if let Some(code) = take_process_exit_request() {
+    let status = if let Some((code, status)) = take_process_exit_request() {
         finished.exit(code);
+        status
     } else if finished.state != ProcessState::Dead {
         finished.exit(-1);
-    }
+        ProcessExitStatus::Fault(ProcessFault::Unknown)
+    } else {
+        ProcessExitStatus::Exited
+    };
     let exit_code = finished.exit_code.unwrap_or(-1);
     let closed = finished.cleanup_fds();
     if closed > 0 {
@@ -430,7 +496,27 @@ pub fn enter_user_process(mut process: Process) -> Result<ProcessExit, ProcessEr
         CURRENT_PROCESS = previous;
     }
 
-    run_result.map(|_| ProcessExit { pid, exit_code })
+    run_result.map(|_| ProcessExit { pid, exit_code, status })
+}
+
+const fn fault_kind_to_i32(fault: ProcessFault) -> i32 {
+    match fault {
+        ProcessFault::PageFault => 1,
+        ProcessFault::GeneralProtection => 2,
+        ProcessFault::InvalidOpcode => 3,
+        ProcessFault::DivideByZero => 4,
+        ProcessFault::Unknown => 5,
+    }
+}
+
+const fn fault_kind_from_i32(value: i32) -> ProcessFault {
+    match value {
+        1 => ProcessFault::PageFault,
+        2 => ProcessFault::GeneralProtection,
+        3 => ProcessFault::InvalidOpcode,
+        4 => ProcessFault::DivideByZero,
+        _ => ProcessFault::Unknown,
+    }
 }
 
 pub fn run_process_address_space_smoke() -> bool {

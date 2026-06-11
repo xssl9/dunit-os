@@ -246,10 +246,21 @@ fn terminal_exec(console: &mut terminal::FbConsole, cwd: &str, path: &str) {
 
     match read_vfs_file(cwd, path) {
         Ok(data) => {
-            if elf::run_process_elf(&data) {
+            match elf::run_process_elf(&data) {
+                Ok(exit) => {
                 serial_write("[EXEC] ");
                 serial_write(&normalized);
-                serial_write(" returned\r\n");
+                match exit.status {
+                    process::ProcessExitStatus::Exited => {
+                        serial_write(" returned code=");
+                        serial_write_i32(exit.exit_code);
+                    }
+                    process::ProcessExitStatus::Fault(fault) => {
+                        serial_write(" killed by ");
+                        serial_write(fault.reason());
+                    }
+                }
+                serial_write("\r\n");
                 if let Some(vfs) = fs::vfs::get_vfs() {
                     if vfs.open_file_count() == 0 {
                         serial_write("[PROCESS-RUN] VFS handles clean\r\n");
@@ -259,12 +270,86 @@ fn terminal_exec(console: &mut terminal::FbConsole, cwd: &str, path: &str) {
                 }
                 console.write_str("exec: ");
                 console.write_str(&normalized);
-                console.write_str(" returned\n");
-            } else {
-                console.write_str("exec: ELF launch failed\n");
+                match exit.status {
+                    process::ProcessExitStatus::Exited => {
+                        console.write_str(" returned code=");
+                        terminal_write_i32(console, exit.exit_code);
+                    }
+                    process::ProcessExitStatus::Fault(fault) => {
+                        console.write_str(" killed by ");
+                        console.write_str(fault.reason());
+                    }
+                }
+                console.write_str("\n");
+                }
+                Err(_) => {
+                    console.write_str("exec: ELF launch failed\n");
+                }
             }
         }
         Err(error) => write_vfs_error(console, "exec", error),
+    }
+}
+
+fn serial_write_i32(value: i32) {
+    if value < 0 {
+        serial_write("-");
+        serial_write_u32(value.wrapping_neg() as u32);
+    } else {
+        serial_write_u32(value as u32);
+    }
+}
+
+fn serial_write_u32(mut value: u32) {
+    let mut buf = [0u8; 10];
+    let mut index = buf.len();
+
+    if value == 0 {
+        serial_write("0");
+        return;
+    }
+
+    while value > 0 {
+        index -= 1;
+        buf[index] = b'0' + (value % 10) as u8;
+        value /= 10;
+    }
+
+    for byte in &buf[index..] {
+        let ch = [*byte];
+        let s = unsafe { core::str::from_utf8_unchecked(&ch) };
+        serial_write(s);
+    }
+}
+
+fn terminal_write_i32(console: &mut terminal::FbConsole, value: i32) {
+    if value < 0 {
+        console.write_str("-");
+        terminal_write_u32(console, value.wrapping_neg() as u32);
+    } else {
+        terminal_write_u32(console, value as u32);
+    }
+}
+
+fn terminal_write_u32(console: &mut terminal::FbConsole, mut value: u32) {
+    let mut buf = [0u8; 10];
+    let mut index = buf.len();
+
+    if value == 0 {
+        console.write_str("0");
+        return;
+    }
+
+    while value > 0 {
+        index -= 1;
+        buf[index] = b'0' + (value % 10) as u8;
+        value /= 10;
+    }
+
+    for byte in &buf[index..] {
+        let ch = [*byte];
+        let s = unsafe { core::str::from_utf8_unchecked(&ch) };
+        console.write_str(s);
     }
 }
 
@@ -699,7 +784,7 @@ pub extern "C" fn kernel_main(
         serial_write("[HAL] OK\r\n");
         screen_log("[ OK ] [HAL] OK", false);
     }
-    screen_log("[ OK ] GDT loaded with 5 segments", false);
+    screen_log("[ OK ] GDT loaded with 7 segments", false);
     screen_log("[ OK ] Code segment: 0x08, Data segment: 0x10", false);
     screen_log("[ .. ] Setting up Interrupt Descriptor Table", false);
     screen_log("[ OK ] IDT loaded with 256 entries", false);
