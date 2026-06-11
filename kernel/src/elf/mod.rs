@@ -320,7 +320,11 @@ pub fn run_process_elf(data: &[u8], argv: &[String]) -> Result<ProcessExit, ElfE
         }
     };
 
-    let pid = crate::process::allocate_pid();
+    let path = argv
+        .first()
+        .cloned()
+        .unwrap_or_else(|| String::from("elf"));
+    let pid = crate::process::create_process_record(path, true);
     let mut process = match Process::new_user(pid) {
         Ok(process) => process,
         Err(_) => {

@@ -19,9 +19,13 @@ pub const DEFAULT_KERNEL_STACK_SIZE: usize = 0x40000;
 
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 static mut CURRENT_PROCESS: Option<Process> = None;
+static mut PROCESS_TABLE: Option<Vec<ProcessRecord>> = None;
 static PROCESS_EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 static PROCESS_EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 static PROCESS_EXIT_KIND: AtomicI32 = AtomicI32::new(0);
+
+pub const WAIT_KIND_EMPTY: i32 = -1;
+pub const WAIT_KIND_SPAWN_PREPARED: i32 = -2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessState {
@@ -29,6 +33,24 @@ pub enum ProcessState {
     Running,
     Blocked,
     Dead,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProcessRecord {
+    pub pid: ProcessId,
+    pub parent: Option<ProcessId>,
+    pub state: ProcessState,
+    pub status: Option<ProcessExitStatus>,
+    pub has_run: bool,
+    pub waitable: bool,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WaitRecord {
+    pub pid: ProcessId,
+    pub kind: i32,
+    pub code: i32,
 }
 
 #[repr(C)]
@@ -257,6 +279,8 @@ impl Process {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessError {
     NoCurrentProcess,
+    NoSuchProcess,
+    NotChild,
     InvalidFd,
     FdTableFull,
     NoAddressSpace,
@@ -367,12 +391,126 @@ pub fn allocate_pid() -> ProcessId {
     ProcessId(NEXT_PID.fetch_add(1, Ordering::SeqCst))
 }
 
+fn process_table_mut() -> &'static mut Vec<ProcessRecord> {
+    unsafe {
+        if PROCESS_TABLE.is_none() {
+            PROCESS_TABLE = Some(Vec::new());
+        }
+        PROCESS_TABLE.as_mut().unwrap()
+    }
+}
+
+fn process_record_index(table: &[ProcessRecord], pid: ProcessId) -> Option<usize> {
+    table.iter().position(|record| record.pid == pid)
+}
+
+pub fn insert_process_record(
+    pid: ProcessId,
+    parent: Option<ProcessId>,
+    path: String,
+    state: ProcessState,
+    waitable: bool,
+    has_run: bool,
+) {
+    let table = process_table_mut();
+    if let Some(index) = process_record_index(table, pid) {
+        let record = &mut table[index];
+        record.parent = parent;
+        record.path = path;
+        record.state = state;
+        record.waitable = waitable;
+        record.has_run = has_run;
+        record.status = None;
+        return;
+    }
+
+    table.push(ProcessRecord {
+        pid,
+        parent,
+        state,
+        status: None,
+        has_run,
+        waitable,
+        path,
+    });
+}
+
+pub fn create_process_record(path: String, waitable: bool) -> ProcessId {
+    let pid = allocate_pid();
+    let parent = current_process().map(|process| process.pid);
+    insert_process_record(pid, parent, path, ProcessState::Ready, waitable, false);
+    pid
+}
+
+pub fn mark_process_started(pid: ProcessId) {
+    let table = process_table_mut();
+    if let Some(index) = process_record_index(table, pid) {
+        let record = &mut table[index];
+        record.state = ProcessState::Running;
+        record.has_run = true;
+    }
+}
+
+pub fn mark_process_finished(exit: ProcessExit) {
+    let table = process_table_mut();
+    if let Some(index) = process_record_index(table, exit.pid) {
+        let record = &mut table[index];
+        record.state = ProcessState::Dead;
+        record.status = Some(exit.status);
+        record.has_run = true;
+    }
+}
+
+pub fn wait_for_child(requested_pid: ProcessId) -> Result<WaitRecord, ProcessError> {
+    let parent_pid = current_process()
+        .ok_or(ProcessError::NoCurrentProcess)?
+        .pid;
+    let table = process_table_mut();
+    let has_requested_process = requested_pid.0 == 0
+        || table.iter().any(|record| record.pid == requested_pid);
+
+    for record in table.iter() {
+        if record.parent != Some(parent_pid) || !record.waitable {
+            continue;
+        }
+        if requested_pid.0 != 0 && record.pid != requested_pid {
+            continue;
+        }
+
+        let (kind, code) = match record.status {
+            Some(status) if record.has_run => (status.kind_code(), status.exit_code()),
+            _ if !record.has_run => (WAIT_KIND_SPAWN_PREPARED, 0),
+            _ => (WAIT_KIND_EMPTY, 0),
+        };
+
+        return Ok(WaitRecord {
+            pid: record.pid,
+            kind,
+            code,
+        });
+    }
+
+    if has_requested_process {
+        Err(ProcessError::NotChild)
+    } else {
+        Err(ProcessError::NoSuchProcess)
+    }
+}
+
 pub fn init_current_kernel_process() {
     unsafe {
         if CURRENT_PROCESS.is_none() {
             let pid = allocate_pid();
             let mut process = Process::new_kernel(pid);
             process.state = ProcessState::Running;
+            insert_process_record(
+                pid,
+                None,
+                String::from("kernel"),
+                ProcessState::Running,
+                false,
+                true,
+            );
             CURRENT_PROCESS = Some(process);
         }
     }
@@ -474,6 +612,7 @@ pub fn enter_user_process(mut process: Process) -> Result<ProcessExit, ProcessEr
     crate::memory::serial_write("[PROCESS-RUN] starting pid=");
     serial_write_u64(pid.0);
     crate::memory::serial_write("\r\n");
+    mark_process_started(pid);
 
     let previous = unsafe { CURRENT_PROCESS.take() };
     unsafe {
@@ -542,7 +681,9 @@ pub fn enter_user_process(mut process: Process) -> Result<ProcessExit, ProcessEr
         }
     }
 
-    run_result.map(|_| ProcessExit { pid, status })
+    let exit = ProcessExit { pid, status };
+    mark_process_finished(exit);
+    run_result.map(|_| exit)
 }
 
 const fn fault_kind_to_i32(fault: ProcessFault) -> i32 {

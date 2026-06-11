@@ -1,7 +1,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 #[repr(u64)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +77,7 @@ pub const EISDIR: i64 = -21;
 pub const EIO: i64 = -5;
 pub const ENFILE: i64 = -23;
 pub const EOPNOTSUPP: i64 = -95;
+pub const ECHILD: i64 = -10;
 
 pub static mut KERNEL_FB_ADDR: u64 = 0;
 pub static mut KERNEL_FB_WIDTH: u32 = 0;
@@ -120,11 +121,6 @@ static SYSCALL_FS_SMOKE_OK: AtomicBool = AtomicBool::new(false);
 static SYSCALL_FS_SEMANTICS_OK: AtomicBool = AtomicBool::new(false);
 static ELF_TEST_RUNNING: AtomicBool = AtomicBool::new(false);
 static ELF_TEST_RETURNED: AtomicBool = AtomicBool::new(false);
-static LAST_WAIT_PID: AtomicU64 = AtomicU64::new(0);
-static LAST_WAIT_KIND: AtomicI32 = AtomicI32::new(WAIT_KIND_EMPTY);
-static LAST_WAIT_CODE: AtomicI32 = AtomicI32::new(0);
-const WAIT_KIND_EMPTY: i32 = -1;
-const WAIT_KIND_SPAWN_PREPARED: i32 = -2;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -554,6 +550,8 @@ fn process_vfs_fd(fd: u32) -> Result<crate::fs::vfs::FileDescriptor, i64> {
 fn process_error_to_errno(error: crate::process::ProcessError) -> i64 {
     match error {
         crate::process::ProcessError::NoCurrentProcess => EINVAL,
+        crate::process::ProcessError::NoSuchProcess => ENOENT,
+        crate::process::ProcessError::NotChild => ECHILD,
         crate::process::ProcessError::InvalidFd => EBADF,
         crate::process::ProcessError::FdTableFull => ENFILE,
         crate::process::ProcessError::NoAddressSpace
@@ -702,23 +700,11 @@ fn sys_spawn_process(path: *const u8, path_len: usize) -> i64 {
         Err(error) => return vfs_error_to_errno(error),
     };
 
-    // Spawn ABI foundation, v0:
-    //
-    // Dunit is still a single-process runtime. Running a child ELF from inside a
-    // userspace syscall needs nested syscall-return state in the HAL and a real
-    // scheduler ownership model. For now spawn performs the stable part of the
-    // contract: copy the userspace path, apply cwd/PATH lookup, validate that the
-    // target is an ELF, allocate a waitable pid, and publish an explicit
-    // not-started status. It must not report Exited(0), because no child has
-    // executed yet.
     if crate::elf::ElfParser::new(&data).is_err() {
         return EIO;
     }
 
-    let pid = crate::process::allocate_pid();
-    LAST_WAIT_PID.store(pid.0, Ordering::SeqCst);
-    LAST_WAIT_KIND.store(WAIT_KIND_SPAWN_PREPARED, Ordering::SeqCst);
-    LAST_WAIT_CODE.store(0, Ordering::SeqCst);
+    let pid = crate::process::create_process_record(resolved.clone(), true);
     syscall_log(format_args!(
         "[SPAWN] prepared pid={} path={} execution=not-started\n",
         pid.0,
@@ -728,14 +714,13 @@ fn sys_spawn_process(path: *const u8, path_len: usize) -> i64 {
 }
 
 fn sys_wait_process(pid: u32, status: *mut WaitStatus) -> i64 {
-    let last_pid = LAST_WAIT_PID.load(Ordering::SeqCst);
-    if last_pid == 0 || (pid != 0 && pid as u64 != last_pid) {
-        return ENOENT;
-    }
-
+    let wait_record = match crate::process::wait_for_child(crate::process::ProcessId(pid as u64)) {
+        Ok(record) => record,
+        Err(error) => return process_error_to_errno(error),
+    };
     let wait_status = WaitStatus {
-        kind: LAST_WAIT_KIND.load(Ordering::SeqCst),
-        code: LAST_WAIT_CODE.load(Ordering::SeqCst),
+        kind: wait_record.kind,
+        code: wait_record.code,
     };
     let bytes = unsafe {
         core::slice::from_raw_parts(
@@ -748,7 +733,7 @@ fn sys_wait_process(pid: u32, status: *mut WaitStatus) -> i64 {
         return error;
     }
 
-    last_pid as i64
+    wait_record.pid.0 as i64
 }
 
 fn sys_getcwd(buf: *mut u8, len: usize) -> i64 {
