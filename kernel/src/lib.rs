@@ -308,11 +308,12 @@ fn terminal_exec(console: &mut terminal::FbConsole, cwd: &str, command_line: &st
                         terminal_write_i32(console, code);
                     }
                     process::ProcessExitStatus::Fault(fault) => {
-                        console.write_str(" killed by ");
+                console.write_str(" killed by ");
                         console.write_str(fault.reason());
                     }
                 }
                 console.write_str("\n");
+                let _ = process::autoreap_process(exit.pid, "terminal-exec");
                 }
                 Err(_) => {
                     console.write_str("exec: ELF launch failed\n");
@@ -382,6 +383,192 @@ fn terminal_write_u32(console: &mut terminal::FbConsole, mut value: u32) {
         let ch = [*byte];
         let s = unsafe { core::str::from_utf8_unchecked(&ch) };
         console.write_str(s);
+    }
+}
+
+fn terminal_write_u64(console: &mut terminal::FbConsole, mut value: u64) {
+    let mut buf = [0u8; 20];
+    let mut index = buf.len();
+
+    if value == 0 {
+        console.write_str("0");
+        return;
+    }
+
+    while value > 0 {
+        index -= 1;
+        buf[index] = b'0' + (value % 10) as u8;
+        value /= 10;
+    }
+
+    for byte in &buf[index..] {
+        let ch = [*byte];
+        let s = unsafe { core::str::from_utf8_unchecked(&ch) };
+        console.write_str(s);
+    }
+}
+
+fn terminal_write_usize(console: &mut terminal::FbConsole, value: usize) {
+    terminal_write_u64(console, value as u64);
+}
+
+fn terminal_write_process_state(console: &mut terminal::FbConsole, state: process::ProcessState) {
+    console.write_str(match state {
+        process::ProcessState::Prepared => "Prepared",
+        process::ProcessState::Ready => "Ready",
+        process::ProcessState::Running => "Running",
+        process::ProcessState::Blocked => "Blocked",
+        process::ProcessState::Dead => "Dead",
+        process::ProcessState::Reaped => "Reaped",
+    });
+}
+
+fn terminal_write_process_status(
+    console: &mut terminal::FbConsole,
+    status: Option<process::ProcessExitStatus>,
+) {
+    match status {
+        Some(process::ProcessExitStatus::Exited(code)) => {
+            console.write_str("Exited(");
+            terminal_write_i32(console, code);
+            console.write_str(")");
+        }
+        Some(process::ProcessExitStatus::Fault(fault)) => {
+            console.write_str("Fault(");
+            console.write_str(fault.reason());
+            console.write_str(")");
+        }
+        None => console.write_str("-"),
+    }
+}
+
+fn terminal_ps(console: &mut terminal::FbConsole, aux: bool) {
+    let mut records = alloc::vec::Vec::new();
+    process::snapshot_processes(&mut records);
+
+    if aux {
+        console.write_str("PID  PPID  STATE     RUN WAIT STATUS      COMMAND\n");
+    } else {
+        console.write_str("PID  PPID  STATE     COMMAND\n");
+    }
+
+    for record in records.iter() {
+        terminal_write_u64(console, record.pid.0);
+        console.write_str("  ");
+        match record.parent {
+            Some(parent) => terminal_write_u64(console, parent.0),
+            None => console.write_str("-"),
+        }
+        console.write_str("  ");
+        terminal_write_process_state(console, record.state);
+        if aux {
+            console.write_str("  ");
+            console.write_str(if record.has_run { "yes" } else { "no" });
+            console.write_str("  ");
+            console.write_str(if record.waitable { "yes" } else { "no" });
+            console.write_str("  ");
+            terminal_write_process_status(console, record.status);
+        }
+        console.write_str("  ");
+        console.write_str(&record.path);
+        console.write_str("\n");
+    }
+}
+
+fn terminal_free(console: &mut terminal::FbConsole) {
+    if let Some(pmm) = memory::pmm::get_pmm() {
+        let total_kib = pmm.total_memory() / 1024;
+        let free_kib = pmm.available_memory() / 1024;
+        let used_kib = total_kib.saturating_sub(free_kib);
+        console.write_str("              total        used        free\n");
+        console.write_str("PMM KiB:      ");
+        terminal_write_usize(console, total_kib);
+        console.write_str("        ");
+        terminal_write_usize(console, used_kib);
+        console.write_str("        ");
+        terminal_write_usize(console, free_kib);
+        console.write_str("\n");
+        console.write_str("Heap: allocator stats unavailable\n");
+        console.write_str("Swap: unavailable\n");
+    } else {
+        console.write_str("free: PMM unavailable\n");
+    }
+}
+
+fn terminal_handle_system_command(console: &mut terminal::FbConsole, cmd_str: &str) -> bool {
+    match cmd_str {
+        "help" => {
+            console.write_str("Available commands:\n");
+            console.write_str("  help       - Show this help\n");
+            console.write_str("  dufetch    - Show Dunit OS system summary\n");
+            console.write_str("  ls         - List files\n");
+            console.write_str("  pwd        - Print working directory\n");
+            console.write_str("  cd         - Change directory\n");
+            console.write_str("  mkdir      - Create directory\n");
+            console.write_str("  touch      - Create file\n");
+            console.write_str("  cat        - Display file contents\n");
+            console.write_str("  echo       - Print text\n");
+            console.write_str("  rm         - Remove file\n");
+            console.write_str("  tree       - Show directory tree\n");
+            console.write_str("  exec       - Execute userspace program\n");
+            console.write_str("  ps         - Show process table records\n");
+            console.write_str("  ps aux     - Show detailed process table records\n");
+            console.write_str("  uname      - System name\n");
+            console.write_str("  uname -a   - System and kernel details\n");
+            console.write_str("  date       - RTC status\n");
+            console.write_str("  whoami     - Kernel terminal user\n");
+            console.write_str("  uptime     - Uptime status\n");
+            console.write_str("  free       - Memory status\n");
+            console.write_str("  top        - Scheduler status\n");
+            console.write_str("  exit       - Terminal exit status\n");
+            console.write_str("  poweroff   - Shutdown status\n");
+            true
+        }
+        "uname" => {
+            console.write_str("Dunit OS\n");
+            true
+        }
+        "uname -a" => {
+            console.write_str("Dunit OS 1.0.0 Green Tea x86_64 kernel=monolithic-rust-hal\n");
+            true
+        }
+        "date" => {
+            console.write_str("date: RTC unavailable\n");
+            true
+        }
+        "whoami" => {
+            console.write_str("root (kernel terminal)\n");
+            true
+        }
+        "uptime" => {
+            console.write_str("uptime unavailable: timer tick source is not active in terminal mode\n");
+            true
+        }
+        "free" => {
+            terminal_free(console);
+            true
+        }
+        "ps" => {
+            terminal_ps(console, false);
+            true
+        }
+        "ps aux" => {
+            terminal_ps(console, true);
+            true
+        }
+        "top" => {
+            console.write_str("top unavailable: scheduler not active\n");
+            true
+        }
+        "exit" => {
+            console.write_str("exit: kernel terminal cannot exit\n");
+            true
+        }
+        "poweroff" | "shutdown" => {
+            console.write_str("shutdown not implemented: ACPI/QEMU shutdown device unavailable\n");
+            true
+        }
+        _ => false,
     }
 }
 
@@ -896,9 +1083,9 @@ pub extern "C" fn kernel_main(
     } else {
         screen_log("[ .. ] Terminal mode: Minimal initialization", false);
         
-        screen_log("[ .. ] Initializing process scheduler", false);
+        screen_log("[ .. ] Initializing scheduler foundation", false);
         process::scheduler::init();
-        screen_log("[ OK ] Scheduler ready", false);
+        screen_log("[ OK ] Scheduler foundation ready (not active)", false);
         
         screen_log("[ .. ] Initializing IPC", false);
         ipc::init();
@@ -1014,9 +1201,8 @@ pub extern "C" fn kernel_main(
                 serial_write("[TERM-005] Writing header\r\n");
                 console.write_str("Dunit OS 1.0.0 (Green Tea) tty1\n");
                 console.write_str("\n");
-                console.write_str("dunit login: root\n");
-                console.write_str("Password: \n");
-                console.write_str("Last login: Sat Jun  6 12:00:00 UTC 2026 on tty1\n");
+                console.write_str("kernel terminal user: root\n");
+                console.write_str("login records: unavailable\n");
                 terminal_set_cwd("/");
                 console.write_str("root@dunit:~# ");
                 console.draw_cursor(true);
@@ -1125,67 +1311,31 @@ pub extern "C" fn kernel_main(
                                             HISTORY_POSITION = -1;
                                         }
                                     
-                                            let response = if terminal_handle_fs_command(console, cmd_str) {
+                                            let response = if terminal_handle_fs_command(console, cmd_str)
+                                                || terminal_handle_system_command(console, cmd_str)
+                                            {
                                                 ""
                                             } else {
                                                 match cmd_str {
-                                        "help" => "Available commands:\n  help     - Show this help\n  dufetch  - Show Dunit OS system summary\n  ls       - List files\n  pwd      - Print working directory\n  cd       - Change directory\n  mkdir    - Create directory\n  touch    - Create file\n  cat      - Display file contents\n  echo     - Print text\n  rm       - Remove file\n  tree     - Show directory tree\n  exec     - Execute userspace program\n  ps       - Process list\n  kill     - Kill process\n  top      - Process monitor\n  uname    - System information\n  date     - Show date and time\n  whoami   - Current user\n  uptime   - System uptime\n  free     - Memory usage\n  exit     - Halt system",
-                                        "uname" => "Dunit OS",
-                                        "uname -a" => "Dunit OS 1.0 Green Tea x86_64",
-                                        "date" => "Tue May 5 12:00:00 UTC 2026",
-                                        "whoami" => "root",
-                                        "uptime" => "up 0 minutes, 1 user, load average: 0.00, 0.00, 0.00",
-                                        "free" => "              total        used        free\nMem:         524288       16384      507904\nSwap:             0           0           0",
-                                        "ps" => "  PID TTY          TIME CMD\n    1 tty1     00:00:00 init\n    2 tty1     00:00:00 kernel\n    3 tty1     00:00:00 terminal",
-                                        "ps aux" => "USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND\nroot         1  0.0  0.1   1024   512 tty1     S    12:00   0:00 init\nroot         2  0.0  0.2   2048  1024 tty1     R    12:00   0:00 kernel\nroot         3  0.0  0.1   1024   512 tty1     S    12:00   0:00 terminal",
-                                        "top" => "Tasks: 3 total, 1 running, 2 sleeping\nCPU: 2.5% user, 1.2% system, 96.3% idle\nMem: 16384/524288 KB\n\n  PID USER     PR  NI  VIRT  RES  SHR S %CPU %MEM    TIME+ COMMAND\n    1 root     20   0  1024  512    0 S  0.0  0.1  0:00.01 init\n    2 root     20   0  2048 1024    0 R  2.5  0.2  0:00.15 kernel\n    3 root     20   0  1024  512    0 S  0.0  0.1  0:00.02 terminal",
-                                        "exit" => {
-                                            console.write_str("\nShutting down Dunit OS...\n");
-                                            console.write_str("Goodbye!\n");
-                                            loop {
-                                                unsafe { core::arch::asm!("hlt"); }
-                                            }
-                                        },
                                         "" => "",
                                         _ => {
                                             if cmd_str.starts_with("dpkg search ") {
-                                                "dpkg: command not found (network required)"
+                                                "dpkg: not implemented"
                                             } else if cmd_str.starts_with("dpkg install ") {
-                                                "dpkg: command not found (network required)"
+                                                "dpkg: not implemented"
                                             } else if cmd_str.starts_with("dpkg remove ") {
-                                                "dpkg: command not found (network required)"
+                                                "dpkg: not implemented"
                                             } else if cmd_str.starts_with("kill ") {
-                                                let pid_str = &cmd_str[5..];
-                                                if let Ok(pid) = pid_str.parse::<u32>() {
-                                                    if pid == 1 {
-                                                        "Error: Cannot kill init process (PID 1)"
-                                                    } else if pid == 2 {
-                                                        "Error: Cannot kill kernel process (PID 2)"
-                                                    } else if pid == 3 {
-                                                        "Error: Cannot kill current terminal (PID 3)"
-                                                    } else {
-                                                        "Process killed successfully"
-                                                    }
-                                                } else {
-                                                    "Error: Invalid PID"
-                                                }
+                                                "kill: not implemented"
                                             } else if cmd_str.starts_with("killall ") {
-                                                let name = &cmd_str[8..];
-                                                if name == "init" || name == "kernel" || name == "terminal" {
-                                                    "Error: Cannot kill system processes"
-                                                } else {
-                                                    "No processes found with that name"
-                                                }
+                                                "killall: not implemented"
                                             } else if cmd_str.starts_with("exec ") {
                                                 let path = &cmd_str[5..].trim();
                                                 
                                                 if path.is_empty() {
                                                     "Usage: exec <path>"
                                                 } else {
-                                                    console.write_str("Loading ");
-                                                    console.write_str(path);
-                                                    console.write_str("...\n");
-                                                    
+                                                    terminal_exec(console, terminal_cwd(), path);
                                                     ""
                                                 }
                                             } else {
@@ -1208,8 +1358,8 @@ pub extern "C" fn kernel_main(
                                     
                                     let commands = [
                                         "help", "dufetch", "ls", "pwd", "cd", "mkdir", "touch", "cat", 
-                                        "echo", "exec", "ps", "kill", "top", "uname", "date", 
-                                        "whoami", "uptime", "free", "exit", "killall"
+                                        "echo", "exec", "ps", "top", "uname", "date", 
+                                        "whoami", "uptime", "free", "exit", "poweroff", "shutdown"
                                     ];
                                     
                                     let mut matches: [&str; 20] = [""; 20];

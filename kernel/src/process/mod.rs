@@ -42,6 +42,7 @@ pub enum ProcessState {
     Running,
     Blocked,
     Dead,
+    Reaped,
 }
 
 pub struct ProcessRecord {
@@ -53,6 +54,17 @@ pub struct ProcessRecord {
     pub waitable: bool,
     pub path: String,
     process: Option<Process>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProcessSnapshot {
+    pub pid: ProcessId,
+    pub parent: Option<ProcessId>,
+    pub state: ProcessState,
+    pub status: Option<ProcessExitStatus>,
+    pub has_run: bool,
+    pub waitable: bool,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -414,6 +426,20 @@ fn process_record_index(table: &[ProcessRecord], pid: ProcessId) -> Option<usize
     table.iter().position(|record| record.pid == pid)
 }
 
+fn log_process_transition(pid: ProcessId, from: ProcessState, to: ProcessState, reason: &str) {
+    crate::memory::serial_write("[PROCESS] pid=");
+    serial_write_u64(pid.0);
+    crate::memory::serial_write(" state=");
+    serial_write_state(from);
+    crate::memory::serial_write("->");
+    serial_write_state(to);
+    if !reason.is_empty() {
+        crate::memory::serial_write(" reason=");
+        crate::memory::serial_write(reason);
+    }
+    crate::memory::serial_write("\r\n");
+}
+
 pub fn insert_process_record(
     pid: ProcessId,
     parent: Option<ProcessId>,
@@ -484,10 +510,12 @@ pub fn take_prepared_process(pid: ProcessId) -> Result<Process, ProcessError> {
     let table = process_table_mut();
     let index = process_record_index(table, pid).ok_or(ProcessError::NoSuchProcess)?;
     let record = &mut table[index];
-    if record.state == ProcessState::Dead {
+    if record.state == ProcessState::Dead || record.state == ProcessState::Reaped {
         return Err(ProcessError::ProcessNotPrepared);
     }
+    let from = record.state;
     record.state = ProcessState::Ready;
+    log_process_transition(pid, from, ProcessState::Ready, "take-prepared");
     record.process.take().ok_or(ProcessError::ProcessNotPrepared)
 }
 
@@ -495,8 +523,12 @@ pub fn mark_process_ready(pid: ProcessId) {
     let table = process_table_mut();
     if let Some(index) = process_record_index(table, pid) {
         let record = &mut table[index];
-        if record.state != ProcessState::Dead {
+        if record.state != ProcessState::Dead && record.state != ProcessState::Reaped {
+            let from = record.state;
             record.state = ProcessState::Ready;
+            if from != ProcessState::Ready {
+                log_process_transition(pid, from, ProcessState::Ready, "elf-ready");
+            }
         }
     }
 }
@@ -505,8 +537,12 @@ pub fn mark_process_started(pid: ProcessId) {
     let table = process_table_mut();
     if let Some(index) = process_record_index(table, pid) {
         let record = &mut table[index];
+        let from = record.state;
         record.state = ProcessState::Running;
         record.has_run = true;
+        if from != ProcessState::Running {
+            log_process_transition(pid, from, ProcessState::Running, "enter-user");
+        }
     }
 }
 
@@ -514,9 +550,13 @@ pub fn mark_process_finished(exit: ProcessExit) {
     let table = process_table_mut();
     if let Some(index) = process_record_index(table, exit.pid) {
         let record = &mut table[index];
+        let from = record.state;
         record.state = ProcessState::Dead;
         record.status = Some(exit.status);
         record.has_run = true;
+        if from != ProcessState::Dead {
+            log_process_transition(exit.pid, from, ProcessState::Dead, "finished");
+        }
     }
 }
 
@@ -528,31 +568,98 @@ pub fn wait_for_child(requested_pid: ProcessId) -> Result<WaitRecord, ProcessErr
     let has_requested_process = requested_pid.0 == 0
         || table.iter().any(|record| record.pid == requested_pid);
 
-    for record in table.iter() {
+    let mut child_index = None;
+    for (index, record) in table.iter().enumerate() {
         if record.parent != Some(parent_pid) || !record.waitable {
             continue;
         }
         if requested_pid.0 != 0 && record.pid != requested_pid {
             continue;
         }
-
-        let (kind, code) = match record.status {
-            Some(status) if record.has_run => (status.kind_code(), status.exit_code()),
-            _ if !record.has_run => (WAIT_KIND_SPAWN_PREPARED, 0),
-            _ => (WAIT_KIND_EMPTY, 0),
-        };
-
-        return Ok(WaitRecord {
-            pid: record.pid,
-            kind,
-            code,
-        });
+        child_index = Some(index);
+        break;
     }
 
-    if has_requested_process {
-        Err(ProcessError::NotChild)
-    } else {
-        Err(ProcessError::NoSuchProcess)
+    let index = match child_index {
+        Some(index) => index,
+        None if has_requested_process => return Err(ProcessError::NotChild),
+        None => return Err(ProcessError::NoSuchProcess),
+    };
+
+    let record = &table[index];
+    let (kind, code) = match record.status {
+        Some(status) if record.has_run => (status.kind_code(), status.exit_code()),
+        _ if !record.has_run => (WAIT_KIND_SPAWN_PREPARED, 0),
+        _ => return Err(ProcessError::ProcessNotPrepared),
+    };
+
+    let pid = record.pid;
+    let from = record.state;
+    log_process_transition(pid, from, ProcessState::Reaped, "wait");
+    let mut record = table.remove(index);
+    if let Some(mut process) = record.process.take() {
+        let closed = process.cleanup_fds();
+        if closed > 0 {
+            crate::memory::serial_write("[PROCESS] reaped pid=");
+            serial_write_u64(pid.0);
+            crate::memory::serial_write(" cleaned-fds=");
+            serial_write_usize(closed);
+            crate::memory::serial_write("\r\n");
+        }
+    }
+
+    Ok(WaitRecord { pid, kind, code })
+}
+
+pub fn cleanup_prepared_children(parent_pid: ProcessId) -> usize {
+    let table = process_table_mut();
+    let mut removed = 0;
+    let mut index = 0;
+    while index < table.len() {
+        let should_remove = table[index].parent == Some(parent_pid)
+            && !table[index].has_run
+            && table[index].process.is_some();
+        if should_remove {
+            let pid = table[index].pid;
+            let from = table[index].state;
+            log_process_transition(pid, from, ProcessState::Reaped, "parent-exit");
+            let mut record = table.remove(index);
+            if let Some(mut process) = record.process.take() {
+                let _ = process.cleanup_fds();
+            }
+            removed += 1;
+        } else {
+            index += 1;
+        }
+    }
+    removed
+}
+
+pub fn autoreap_process(pid: ProcessId, reason: &str) -> Result<(), ProcessError> {
+    let table = process_table_mut();
+    let index = process_record_index(table, pid).ok_or(ProcessError::NoSuchProcess)?;
+    let from = table[index].state;
+    log_process_transition(pid, from, ProcessState::Reaped, reason);
+    let mut record = table.remove(index);
+    if let Some(mut process) = record.process.take() {
+        let _ = process.cleanup_fds();
+    }
+    Ok(())
+}
+
+pub fn snapshot_processes(out: &mut Vec<ProcessSnapshot>) {
+    out.clear();
+    let table = process_table_mut();
+    for record in table.iter() {
+        out.push(ProcessSnapshot {
+            pid: record.pid,
+            parent: record.parent,
+            state: record.state,
+            status: record.status,
+            has_run: record.has_run,
+            waitable: record.waitable,
+            path: record.path.clone(),
+        });
     }
 }
 
@@ -730,6 +837,12 @@ pub fn enter_user_process(mut process: Process) -> Result<ProcessExit, ProcessEr
         serial_write_usize(closed);
         crate::memory::serial_write("\r\n");
     }
+    let reaped_children = cleanup_prepared_children(pid);
+    if reaped_children > 0 {
+        crate::memory::serial_write("[PROCESS-RUN] reaped prepared children=");
+        serial_write_usize(reaped_children);
+        crate::memory::serial_write("\r\n");
+    }
 
     unsafe {
         CURRENT_PROCESS = previous;
@@ -838,6 +951,18 @@ fn serial_write_u64(mut value: u64) {
 
 fn serial_write_usize(value: usize) {
     serial_write_u64(value as u64);
+}
+
+fn serial_write_state(state: ProcessState) {
+    let name = match state {
+        ProcessState::Prepared => "Prepared",
+        ProcessState::Ready => "Ready",
+        ProcessState::Running => "Running",
+        ProcessState::Blocked => "Blocked",
+        ProcessState::Dead => "Dead",
+        ProcessState::Reaped => "Reaped",
+    };
+    crate::memory::serial_write(name);
 }
 
 pub fn run_process_kernel_stack_smoke() -> bool {
