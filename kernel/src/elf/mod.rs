@@ -312,13 +312,13 @@ pub fn run_demo_elf(data: &[u8]) -> bool {
 }
 
 pub fn run_process_elf(data: &[u8], argv: &[String]) -> Result<ProcessExit, ElfError> {
-    let parser = match ElfParser::new(data) {
-        Ok(parser) => parser,
+    match ElfParser::new(data) {
+        Ok(_) => {}
         Err(_) => {
             crate::memory::serial_write("[ELF-TEST] parse failed\r\n");
             return Err(ElfError::InvalidMagic);
         }
-    };
+    }
 
     let path = argv
         .first()
@@ -331,45 +331,58 @@ pub fn run_process_elf(data: &[u8], argv: &[String]) -> Result<ProcessExit, ElfE
             return Err(ElfError::InvalidProgramHeader);
         }
     };
-    let mut process = match crate::process::take_prepared_process(pid) {
-        Ok(process) => process,
-        Err(_) => {
-            crate::memory::serial_write("[ELF-TEST] process record take failed\r\n");
-            return Err(ElfError::InvalidProgramHeader);
-        }
-    };
 
-    if load_into_process_address_space(&parser, &mut process).is_err() {
-        crate::memory::serial_write("[ELF-TEST] process load failed\r\n");
+    if prepare_process_elf(pid, data, argv).is_err() {
+        crate::memory::serial_write("[ELF-TEST] process prepare failed\r\n");
         return Err(ElfError::InvalidProgramHeader);
     }
 
-    let initial_stack = match prepare_initial_stack(&mut process, argv, &EXEC_ENV) {
-        Ok(stack) => stack,
-        Err(_) => {
-            crate::memory::serial_write("[ELF-TEST] argv stack setup failed\r\n");
-            return Err(ElfError::InvalidProgramHeader);
-        }
-    };
-
-    process.context.rip = parser.entry_point();
-    process.context.rsp = initial_stack.rsp as u64;
-    process.context.rflags = 0x202;
-    process.entry_argc = initial_stack.argc;
-    process.entry_argv = initial_stack.argv;
-    process.entry_envp = initial_stack.envp;
-    process.state = crate::process::ProcessState::Ready;
-    crate::process::mark_process_ready(pid);
-
     crate::memory::serial_write("[ELF-TEST] userspace app started\r\n");
 
-    match crate::process::enter_user_process(process) {
+    match crate::process::enter_user_process(pid) {
         Ok(exit) => Ok(exit),
         Err(_) => {
             crate::memory::serial_write("[ELF-TEST] process run failed\r\n");
             Err(ElfError::InvalidProgramHeader)
         }
     }
+}
+
+pub fn prepare_process_elf(
+    pid: ProcessId,
+    data: &[u8],
+    argv: &[String],
+) -> Result<(), ElfError> {
+    let parser = ElfParser::new(data)?;
+    let prepared = crate::process::with_process_mut(pid, |process| {
+        if load_into_process_address_space(&parser, process).is_err() {
+            crate::memory::serial_write("[ELF-TEST] process load failed\r\n");
+            return Err(crate::process::ProcessError::InvalidUserContext);
+        }
+
+        let initial_stack = match prepare_initial_stack(process, argv, &EXEC_ENV) {
+            Ok(stack) => stack,
+            Err(_) => {
+                crate::memory::serial_write("[ELF-TEST] argv stack setup failed\r\n");
+                return Err(crate::process::ProcessError::InvalidUserContext);
+            }
+        };
+
+        process.context.rip = parser.entry_point();
+        process.context.rsp = initial_stack.rsp as u64;
+        process.context.rflags = 0x202;
+        process.entry_argc = initial_stack.argc;
+        process.entry_argv = initial_stack.argv;
+        process.entry_envp = initial_stack.envp;
+        process.state = crate::process::ProcessState::Ready;
+        Ok(())
+    });
+
+    if prepared.is_err() || crate::process::mark_process_prepared_as_ready(pid).is_err() {
+        return Err(ElfError::InvalidProgramHeader);
+    }
+
+    Ok(())
 }
 
 pub const fn initial_user_stack() -> usize {

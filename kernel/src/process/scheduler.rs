@@ -1,78 +1,101 @@
-use super::{CpuContext, Process, ProcessId, ProcessState};
+use super::{ProcessError, ProcessId};
 use alloc::vec::Vec;
 
 pub struct Scheduler {
-    processes: Vec<Process>,
-    current_index: usize,
+    ready_queue: Vec<ProcessId>,
+    cursor: usize,
 }
 
 impl Scheduler {
     pub const fn new() -> Self {
         Self {
-            processes: Vec::new(),
-            current_index: 0,
+            ready_queue: Vec::new(),
+            cursor: 0,
         }
     }
 
-    pub fn add_process(&mut self, process: Process) {
-        self.processes.push(process);
+    pub fn enqueue(&mut self, pid: ProcessId) -> Result<(), ProcessError> {
+        if !super::is_pid_runnable(pid) {
+            return Err(ProcessError::NotRunnable);
+        }
+        if !self.ready_queue.contains(&pid) {
+            self.ready_queue.push(pid);
+        }
+        Ok(())
     }
 
-    pub fn remove_process(&mut self, pid: ProcessId) {
-        self.processes.retain(|p| p.pid != pid);
-        if self.current_index >= self.processes.len() && !self.processes.is_empty() {
-            self.current_index = 0;
+    pub fn remove(&mut self, pid: ProcessId) {
+        self.ready_queue.retain(|queued| *queued != pid);
+        if self.cursor >= self.ready_queue.len() {
+            self.cursor = 0;
         }
     }
 
-    pub fn schedule(&mut self) -> Option<&mut Process> {
-        if self.processes.is_empty() {
+    pub fn pick_next(&mut self) -> Option<ProcessId> {
+        if self.ready_queue.is_empty() {
             return None;
         }
 
-        let start_index = self.current_index;
-        let len = self.processes.len();
-        
-        for _ in 0..len {
-            self.current_index = (self.current_index + 1) % len;
-            
-            if self.processes[self.current_index].state == ProcessState::Ready {
-                self.processes[self.current_index].state = ProcessState::Running;
-                return Some(&mut self.processes[self.current_index]);
+        let len = self.ready_queue.len();
+        let mut checked = 0;
+        while checked < len && !self.ready_queue.is_empty() {
+            if self.cursor >= self.ready_queue.len() {
+                self.cursor = 0;
             }
-            
-            if self.current_index == start_index {
-                break;
+
+            let pid = self.ready_queue[self.cursor];
+            if super::is_pid_runnable(pid) {
+                self.cursor = (self.cursor + 1) % self.ready_queue.len();
+                return Some(pid);
             }
+
+            self.ready_queue.remove(self.cursor);
+            checked += 1;
         }
 
         None
     }
 
-    pub fn current_process(&mut self) -> Option<&mut Process> {
-        if self.processes.is_empty() {
-            return None;
-        }
-        Some(&mut self.processes[self.current_index])
+    pub fn len(&self) -> usize {
+        self.ready_queue.len()
     }
-}
-
-extern "C" {
-    fn switch_context_asm(old_context: *mut CpuContext, new_context: *const CpuContext);
-}
-
-pub unsafe fn switch_context(from: &mut Process, to: &Process) {
-    from.state = ProcessState::Ready;
-    switch_context_asm(&mut from.context as *mut CpuContext, &to.context as *const CpuContext);
 }
 
 static mut SCHEDULER_INSTANCE: Option<Scheduler> = None;
 
 pub fn init() {
-    // Временно пропускаем инициализацию планировщика
-    // TODO: инициализировать после настройки аллокатора
+    unsafe {
+        SCHEDULER_INSTANCE = Some(Scheduler::new());
+    }
+    crate::memory::serial_write("[SCHED] ready queue initialized\r\n");
 }
 
-pub fn get_scheduler() -> Option<&'static mut Scheduler> {
-    unsafe { SCHEDULER_INSTANCE.as_mut() }
+pub fn enqueue_ready(pid: ProcessId) -> Result<(), ProcessError> {
+    unsafe {
+        match SCHEDULER_INSTANCE.as_mut() {
+            Some(scheduler) => scheduler.enqueue(pid),
+            None => Err(ProcessError::SchedulerUnavailable),
+        }
+    }
+}
+
+pub fn remove(pid: ProcessId) {
+    unsafe {
+        if let Some(scheduler) = SCHEDULER_INSTANCE.as_mut() {
+            scheduler.remove(pid);
+        }
+    }
+}
+
+pub fn pick_next_candidate() -> Option<ProcessId> {
+    unsafe { SCHEDULER_INSTANCE.as_mut()?.pick_next() }
+}
+
+pub fn ready_len() -> usize {
+    unsafe {
+        SCHEDULER_INSTANCE
+            .as_ref()
+            .map(|scheduler| scheduler.len())
+            .unwrap_or(0)
+    }
 }

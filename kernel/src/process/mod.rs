@@ -18,8 +18,8 @@ pub const MAX_PROCESS_FD: ProcessFd = 1024;
 pub const DEFAULT_KERNEL_STACK_SIZE: usize = 0x40000;
 
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
-static mut CURRENT_PROCESS: Option<Process> = None;
 static mut PROCESS_TABLE: Option<Vec<ProcessRecord>> = None;
+static CURRENT_PID: AtomicU64 = AtomicU64::new(0);
 static PROCESS_EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 static PROCESS_EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 static PROCESS_EXIT_KIND: AtomicI32 = AtomicI32::new(0);
@@ -32,9 +32,13 @@ pub const WAIT_KIND_SPAWN_PREPARED: i32 = -2;
 /// Prepared: process object exists and owns its address space, kernel stack,
 /// fd table, cwd and pid, but no executable image has run yet.
 /// Ready: executable context has been prepared and a future scheduler may run it.
-/// Running: CURRENT_PROCESS owns the process while the CPU is in user mode.
+/// Running: CURRENT_PID points at the process table record while the CPU is in
+/// user mode. The process object still lives inside PROCESS_TABLE.
 /// Dead: execution finished or faulted; wait observes the real status only when
 /// has_run is true. Prepared/not-started children keep an explicit wait status.
+/// Reaped: terminal exec or a future wait path consumed the heavyweight
+/// ownership. Metadata stays behind briefly for diagnostics, but it is not
+/// runnable or waitable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessState {
     Prepared,
@@ -309,6 +313,9 @@ pub enum ProcessError {
     NoKernelStack,
     InvalidUserContext,
     ProcessNotPrepared,
+    ProcessAlreadyExists,
+    NotRunnable,
+    SchedulerUnavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -440,6 +447,15 @@ fn log_process_transition(pid: ProcessId, from: ProcessState, to: ProcessState, 
     crate::memory::serial_write("\r\n");
 }
 
+fn current_pid() -> Option<ProcessId> {
+    let pid = CURRENT_PID.load(Ordering::SeqCst);
+    if pid == 0 {
+        None
+    } else {
+        Some(ProcessId(pid))
+    }
+}
+
 pub fn insert_process_record(
     pid: ProcessId,
     parent: Option<ProcessId>,
@@ -476,8 +492,9 @@ pub fn insert_process_record(
 
 pub fn create_user_process_record(path: String, waitable: bool) -> Result<ProcessId, ProcessError> {
     let pid = allocate_pid();
-    let parent = current_process().map(|process| process.pid);
+    let parent = current_pid();
     let mut process = Process::new_user(pid)?;
+    process.state = ProcessState::Prepared;
     if let Some(current) = current_process() {
         process.cwd = current.cwd.clone();
     }
@@ -506,17 +523,44 @@ pub fn create_user_process_record(path: String, waitable: bool) -> Result<Proces
     Ok(pid)
 }
 
-pub fn take_prepared_process(pid: ProcessId) -> Result<Process, ProcessError> {
+pub fn with_process_mut<R>(
+    pid: ProcessId,
+    f: impl FnOnce(&mut Process) -> Result<R, ProcessError>,
+) -> Result<R, ProcessError> {
     let table = process_table_mut();
     let index = process_record_index(table, pid).ok_or(ProcessError::NoSuchProcess)?;
     let record = &mut table[index];
-    if record.state == ProcessState::Dead || record.state == ProcessState::Reaped {
-        return Err(ProcessError::ProcessNotPrepared);
+    let process = record.process.as_mut().ok_or(ProcessError::ProcessNotPrepared)?;
+    f(process)
+}
+
+pub fn mark_process_prepared_as_ready(pid: ProcessId) -> Result<(), ProcessError> {
+    {
+        let table = process_table_mut();
+        let index = process_record_index(table, pid).ok_or(ProcessError::NoSuchProcess)?;
+        let record = &mut table[index];
+        if record.state == ProcessState::Dead || record.state == ProcessState::Reaped {
+            return Err(ProcessError::ProcessNotPrepared);
+        }
+        if record.process.is_none() {
+            return Err(ProcessError::ProcessNotPrepared);
+        }
+        let from = record.state;
+        record.state = ProcessState::Ready;
+        if let Some(process) = record.process.as_mut() {
+            process.state = ProcessState::Ready;
+        }
+        if from != ProcessState::Ready {
+            log_process_transition(pid, from, ProcessState::Ready, "prepare-ready");
+        }
     }
-    let from = record.state;
-    record.state = ProcessState::Ready;
-    log_process_transition(pid, from, ProcessState::Ready, "take-prepared");
-    record.process.take().ok_or(ProcessError::ProcessNotPrepared)
+    if crate::process::scheduler::enqueue_ready(pid).is_err() {
+        crate::memory::serial_write("[SCHED] enqueue rejected pid=");
+        serial_write_u64(pid.0);
+        crate::memory::serial_write("\r\n");
+        return Err(ProcessError::NotRunnable);
+    }
+    Ok(())
 }
 
 pub fn mark_process_ready(pid: ProcessId) {
@@ -526,8 +570,16 @@ pub fn mark_process_ready(pid: ProcessId) {
         if record.state != ProcessState::Dead && record.state != ProcessState::Reaped {
             let from = record.state;
             record.state = ProcessState::Ready;
+            if let Some(process) = record.process.as_mut() {
+                process.state = ProcessState::Ready;
+            }
             if from != ProcessState::Ready {
                 log_process_transition(pid, from, ProcessState::Ready, "elf-ready");
+            }
+            if crate::process::scheduler::enqueue_ready(pid).is_err() {
+                crate::memory::serial_write("[SCHED] enqueue rejected pid=");
+                serial_write_u64(pid.0);
+                crate::memory::serial_write("\r\n");
             }
         }
     }
@@ -554,10 +606,56 @@ pub fn mark_process_finished(exit: ProcessExit) {
         record.state = ProcessState::Dead;
         record.status = Some(exit.status);
         record.has_run = true;
+        if let Some(process) = record.process.as_mut() {
+            process.state = ProcessState::Dead;
+            process.status = Some(exit.status);
+        }
+        crate::process::scheduler::remove(exit.pid);
         if from != ProcessState::Dead {
             log_process_transition(exit.pid, from, ProcessState::Dead, "finished");
         }
     }
+}
+
+pub fn reap_process(pid: ProcessId) -> Result<(), ProcessError> {
+    let table = process_table_mut();
+    let index = process_record_index(table, pid).ok_or(ProcessError::NoSuchProcess)?;
+    let record = &mut table[index];
+    if record.state != ProcessState::Dead {
+        return Err(ProcessError::NotRunnable);
+    }
+    record.process = None;
+    record.state = ProcessState::Reaped;
+    record.waitable = false;
+    crate::process::scheduler::remove(pid);
+    crate::memory::serial_write("[PROCESS] pid=");
+    serial_write_u64(pid.0);
+    crate::memory::serial_write(" state=reaped\r\n");
+    Ok(())
+}
+
+pub fn process_exists(pid: ProcessId) -> bool {
+    let table = process_table_mut();
+    process_record_index(table, pid).is_some()
+}
+
+pub fn is_pid_runnable(pid: ProcessId) -> bool {
+    let table = process_table_mut();
+    let Some(index) = process_record_index(table, pid) else {
+        return false;
+    };
+    let record = &table[index];
+    if record.state != ProcessState::Ready {
+        return false;
+    }
+    let Some(process) = record.process.as_ref() else {
+        return false;
+    };
+    !process.is_kernel
+        && process.context.rip != 0
+        && process.context.rsp != 0
+        && process.address_space().is_some()
+        && process.kernel_stack_top().is_some()
 }
 
 pub fn wait_for_child(requested_pid: ProcessId) -> Result<WaitRecord, ProcessError> {
@@ -589,7 +687,10 @@ pub fn wait_for_child(requested_pid: ProcessId) -> Result<WaitRecord, ProcessErr
     let record = &table[index];
     let (kind, code) = match record.status {
         Some(status) if record.has_run => (status.kind_code(), status.exit_code()),
-        _ if !record.has_run => (WAIT_KIND_SPAWN_PREPARED, 0),
+        _ if record.state == ProcessState::Prepared && !record.has_run => (WAIT_KIND_SPAWN_PREPARED, 0),
+        _ if matches!(record.state, ProcessState::Ready | ProcessState::Running | ProcessState::Blocked) => {
+            return Err(ProcessError::NotRunnable);
+        }
         _ => return Err(ProcessError::ProcessNotPrepared),
     };
 
@@ -627,6 +728,7 @@ pub fn cleanup_prepared_children(parent_pid: ProcessId) -> usize {
             if let Some(mut process) = record.process.take() {
                 let _ = process.cleanup_fds();
             }
+            crate::process::scheduler::remove(pid);
             removed += 1;
         } else {
             index += 1;
@@ -664,31 +766,37 @@ pub fn snapshot_processes(out: &mut Vec<ProcessSnapshot>) {
 }
 
 pub fn init_current_kernel_process() {
-    unsafe {
-        if CURRENT_PROCESS.is_none() {
-            let pid = allocate_pid();
-            let mut process = Process::new_kernel(pid);
-            process.state = ProcessState::Running;
-            insert_process_record(
-                pid,
-                None,
-                String::from("kernel"),
-                ProcessState::Running,
-                false,
-                true,
-                None,
-            );
-            CURRENT_PROCESS = Some(process);
-        }
+    if CURRENT_PID.load(Ordering::SeqCst) != 0 {
+        return;
     }
+
+    let pid = allocate_pid();
+    let mut process = Process::new_kernel(pid);
+    process.state = ProcessState::Running;
+    insert_process_record(
+        pid,
+        None,
+        String::from("kernel"),
+        ProcessState::Running,
+        false,
+        true,
+        Some(process),
+    );
+    CURRENT_PID.store(pid.0, Ordering::SeqCst);
 }
 
 pub fn current_process() -> Option<&'static Process> {
-    unsafe { CURRENT_PROCESS.as_ref() }
+    let pid = current_pid()?;
+    let table = process_table_mut();
+    let index = process_record_index(table, pid)?;
+    table[index].process.as_ref()
 }
 
 pub fn current_process_mut() -> Option<&'static mut Process> {
-    unsafe { CURRENT_PROCESS.as_mut() }
+    let pid = current_pid()?;
+    let table = process_table_mut();
+    let index = process_record_index(table, pid)?;
+    table[index].process.as_mut()
 }
 
 pub fn allocate_fd(entry: FdEntry) -> Result<ProcessFd, ProcessError> {
@@ -754,40 +862,40 @@ fn take_process_exit_request() -> Option<(i32, ProcessExitStatus)> {
     }
 }
 
-pub fn enter_user_process(mut process: Process) -> Result<ProcessExit, ProcessError> {
-    if process.is_kernel {
-        return Err(ProcessError::InvalidUserContext);
-    }
-    if process.context.rip == 0 || process.context.rsp == 0 {
-        return Err(ProcessError::InvalidUserContext);
-    }
-    if process.address_space().is_none() {
-        return Err(ProcessError::NoAddressSpace);
-    }
-    if process.kernel_stack_top().is_none() {
-        return Err(ProcessError::NoKernelStack);
-    }
+pub fn enter_user_process(pid: ProcessId) -> Result<ProcessExit, ProcessError> {
+    let previous_pid = CURRENT_PID.load(Ordering::SeqCst);
+    let (entry, user_stack, entry_argc, entry_argv, entry_envp) = with_process_mut(pid, |process| {
+        if process.is_kernel {
+            return Err(ProcessError::InvalidUserContext);
+        }
+        if process.context.rip == 0 || process.context.rsp == 0 {
+            return Err(ProcessError::InvalidUserContext);
+        }
+        if process.address_space().is_none() {
+            return Err(ProcessError::NoAddressSpace);
+        }
+        if process.kernel_stack_top().is_none() {
+            return Err(ProcessError::NoKernelStack);
+        }
 
-    process.state = ProcessState::Running;
-    let pid = process.pid;
-    let entry = process.context.rip;
-    let user_stack = process.context.rsp;
-    let entry_argc = process.entry_argc as u64;
-    let entry_argv = process.entry_argv as u64;
-    let entry_envp = process.entry_envp as u64;
+        process.state = ProcessState::Running;
+        Ok((
+            process.context.rip,
+            process.context.rsp,
+            process.entry_argc as u64,
+            process.entry_argv as u64,
+            process.entry_envp as u64,
+        ))
+    })?;
 
     crate::memory::serial_write("[PROCESS-RUN] starting pid=");
     serial_write_u64(pid.0);
     crate::memory::serial_write("\r\n");
     mark_process_started(pid);
-
-    let previous = unsafe { CURRENT_PROCESS.take() };
-    unsafe {
-        CURRENT_PROCESS = Some(process);
-    }
+    CURRENT_PID.store(pid.0, Ordering::SeqCst);
 
     let run_result = unsafe {
-        match CURRENT_PROCESS.as_ref() {
+        match current_process() {
             Some(current) => {
                 match current.install_syscall_stack() {
                     Ok(()) => {
@@ -818,20 +926,22 @@ pub fn enter_user_process(mut process: Process) -> Result<ProcessExit, ProcessEr
         Process::reset_syscall_stack_policy();
     }
 
-    let mut finished = unsafe { CURRENT_PROCESS.take() }.ok_or(ProcessError::NoCurrentProcess)?;
-    let status = if let Some((_code, status)) = take_process_exit_request() {
-        match status {
-            ProcessExitStatus::Exited(code) => finished.exit(code),
-            ProcessExitStatus::Fault(fault) => finished.fault(fault),
-        }
-        status
-    } else if finished.state != ProcessState::Dead {
-        finished.fault(ProcessFault::Unknown);
-        ProcessExitStatus::Fault(ProcessFault::Unknown)
-    } else {
-        finished.status.unwrap_or(ProcessExitStatus::Fault(ProcessFault::Unknown))
-    };
-    let closed = finished.cleanup_fds();
+    let mut status = ProcessExitStatus::Fault(ProcessFault::Unknown);
+    let closed = with_process_mut(pid, |finished| {
+        status = if let Some((_code, requested_status)) = take_process_exit_request() {
+            match requested_status {
+                ProcessExitStatus::Exited(code) => finished.exit(code),
+                ProcessExitStatus::Fault(fault) => finished.fault(fault),
+            }
+            requested_status
+        } else if finished.state != ProcessState::Dead {
+            finished.fault(ProcessFault::Unknown);
+            ProcessExitStatus::Fault(ProcessFault::Unknown)
+        } else {
+            finished.status.unwrap_or(ProcessExitStatus::Fault(ProcessFault::Unknown))
+        };
+        Ok(finished.cleanup_fds())
+    })?;
     if closed > 0 {
         crate::memory::serial_write("[PROCESS-RUN] cleaned fds=");
         serial_write_usize(closed);
@@ -844,9 +954,9 @@ pub fn enter_user_process(mut process: Process) -> Result<ProcessExit, ProcessEr
         crate::memory::serial_write("\r\n");
     }
 
+    CURRENT_PID.store(previous_pid, Ordering::SeqCst);
     unsafe {
-        CURRENT_PROCESS = previous;
-        match CURRENT_PROCESS.as_ref() {
+        match current_process() {
             Some(current) if !current.is_kernel && current.kernel_stack_top().is_some() => {
                 let _ = current.install_syscall_stack();
             }

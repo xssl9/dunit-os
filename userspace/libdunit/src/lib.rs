@@ -18,6 +18,10 @@ pub const SYSCALL_SLEEP: usize = 19;
 pub const SYSCALL_DEBUG_LOG: usize = 20;
 pub const SYSCALL_GETCWD: usize = 22;
 pub const SYSCALL_CHDIR: usize = 23;
+pub const SYSCALL_YIELD: usize = 24;
+
+pub const EAGAIN: isize = -11;
+pub const EOPNOTSUPP: isize = -95;
 
 pub const OPEN_READ: usize = 1 << 0;
 pub const OPEN_WRITE: usize = 1 << 1;
@@ -342,6 +346,10 @@ pub fn spawn(path: &str) -> isize {
 
 pub fn wait(pid: u32, status: &mut WaitStatus) -> isize {
     syscall2(SYSCALL_WAIT_PROCESS, pid as usize, status as *mut WaitStatus as usize)
+}
+
+pub fn yield_now() -> isize {
+    syscall0(SYSCALL_YIELD)
 }
 
 pub fn getcwd(buf: &mut [u8]) -> isize {

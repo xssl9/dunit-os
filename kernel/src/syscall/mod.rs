@@ -30,6 +30,7 @@ pub enum Syscall {
     SmokeDone = 21,
     GetCwd = 22,
     Chdir = 23,
+    Yield = 24,
 }
 
 impl Syscall {
@@ -59,6 +60,7 @@ impl Syscall {
             21 => Some(Syscall::SmokeDone),
             22 => Some(Syscall::GetCwd),
             23 => Some(Syscall::Chdir),
+            24 => Some(Syscall::Yield),
             _ => None,
         }
     }
@@ -78,6 +80,7 @@ pub const EIO: i64 = -5;
 pub const ENFILE: i64 = -23;
 pub const EOPNOTSUPP: i64 = -95;
 pub const ECHILD: i64 = -10;
+pub const EAGAIN: i64 = -11;
 
 pub static mut KERNEL_FB_ADDR: u64 = 0;
 pub static mut KERNEL_FB_WIDTH: u32 = 0;
@@ -330,6 +333,7 @@ pub extern "C" fn syscall_handler(
         Syscall::SmokeDone => sys_smoke_done(arg0 as i32),
         Syscall::GetCwd => sys_getcwd(arg0 as *mut u8, arg1 as usize),
         Syscall::Chdir => sys_chdir(arg0 as *const u8, arg1 as usize),
+        Syscall::Yield => sys_yield(),
     }
 }
 
@@ -552,6 +556,9 @@ fn process_error_to_errno(error: crate::process::ProcessError) -> i64 {
         crate::process::ProcessError::NoCurrentProcess => EINVAL,
         crate::process::ProcessError::NoSuchProcess => ENOENT,
         crate::process::ProcessError::NotChild => ECHILD,
+        crate::process::ProcessError::NotRunnable => EAGAIN,
+        crate::process::ProcessError::SchedulerUnavailable => EAGAIN,
+        crate::process::ProcessError::ProcessAlreadyExists => EEXIST,
         crate::process::ProcessError::InvalidFd => EBADF,
         crate::process::ProcessError::FdTableFull => ENFILE,
         crate::process::ProcessError::NoAddressSpace
@@ -709,8 +716,20 @@ fn sys_spawn_process(path: *const u8, path_len: usize) -> i64 {
         Ok(pid) => pid,
         Err(error) => return process_error_to_errno(error),
     };
+
+    let argv0 = resolved.rsplit('/').find(|part| !part.is_empty()).unwrap_or(resolved.as_str());
+    let argv = [String::from(argv0)];
+    if crate::elf::prepare_process_elf(pid, &data, &argv).is_err() {
+        syscall_log(format_args!(
+            "[SPAWN] prepare failed pid={} path={}\n",
+            pid.0,
+            resolved
+        ));
+        return EIO;
+    }
+
     syscall_log(format_args!(
-        "[SPAWN] prepared pid={} path={} execution=not-started\n",
+        "[SPAWN] ready pid={} path={} execution=not-started\n",
         pid.0,
         resolved
     ));
@@ -768,6 +787,32 @@ fn sys_getcwd(buf: *mut u8, len: usize) -> i64 {
     }
 
     cwd.len() as i64
+}
+
+fn sys_yield() -> i64 {
+    let current = crate::process::current_process()
+        .map(|process| process.pid.0)
+        .unwrap_or(0);
+    let queued = crate::process::scheduler::ready_len();
+    match crate::process::scheduler::pick_next_candidate() {
+        Some(pid) => {
+            syscall_log(format_args!(
+                "[YIELD] current={} candidate={} queue={} switch=not-implemented\n",
+                current,
+                pid.0,
+                queued
+            ));
+            EOPNOTSUPP
+        }
+        None => {
+            syscall_log(format_args!(
+                "[YIELD] current={} candidate=none queue={} switch=not-implemented\n",
+                current,
+                queued
+            ));
+            EAGAIN
+        }
+    }
 }
 
 fn sys_chdir(path: *const u8, path_len: usize) -> i64 {

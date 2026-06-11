@@ -1,0 +1,11 @@
+[package]
+name = "spawn_ready_test"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "spawn_ready_test"
+path = "src/main.rs"
+
+[dependencies]
+libdunit = { path = "../../libdunit" }

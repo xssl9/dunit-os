@@ -21,7 +21,7 @@ fn expect_wait_error(pid: u32, label: &str) {
     }
 }
 
-fn spawn_and_reap(label: &str, use_wait_any: bool) -> u32 {
+fn spawn_and_expect_ready(label: &str, use_wait_any: bool) -> u32 {
     let pid = libdunit::spawn("elf_demo");
     if pid < 0 {
         libdunit::print("path_test: spawn failed: ");
@@ -35,25 +35,16 @@ fn spawn_and_reap(label: &str, use_wait_any: bool) -> u32 {
     } else {
         libdunit::wait(pid as u32, &mut status)
     };
-    if waited < 0 {
-        libdunit::print("path_test: wait failed: ");
+    if waited != libdunit::EAGAIN {
+        libdunit::print("path_test: wait should report runnable child not ready: ");
         libdunit::println(label);
         libdunit::exit(2);
     }
-    if waited as u32 != pid as u32 {
-        libdunit::print("path_test: wrong waited pid: ");
-        libdunit::println(label);
-        libdunit::exit(3);
-    }
-    if status.exited() {
-        libdunit::print("path_test: spawn falsely reported exit: ");
+
+    if status.kind != libdunit::WAIT_KIND_EMPTY || status.code != 0 {
+        libdunit::print("path_test: wait mutated status unexpectedly: ");
         libdunit::println(label);
         libdunit::exit(4);
-    }
-    if !status.spawn_prepared() || status.code != 0 {
-        libdunit::print("path_test: bad prepared status: ");
-        libdunit::println(label);
-        libdunit::exit(5);
     }
 
     pid as u32
@@ -66,18 +57,12 @@ pub extern "C" fn _start() -> ! {
     expect_wait_error(0xFFFF_FFFE, "invalid-pid");
     expect_wait_error(libdunit::get_pid(), "non-child-self");
 
-    let reaped_pid = spawn_and_reap("prepared-by-pid", false);
-    expect_wait_error(reaped_pid, "reaped-pid");
+    let ready_pid = spawn_and_expect_ready("ready-by-pid", false);
+    expect_wait_error(ready_pid, "ready-pid-repeat-wait");
 
-    let any_pid = spawn_and_reap("prepared-by-wait-any", true);
-    expect_wait_error(any_pid, "wait-any-reaped-pid");
+    let any_pid = spawn_and_expect_ready("ready-by-wait-any", true);
+    expect_wait_error(any_pid, "wait-any-ready-repeat");
     expect_wait_error(0, "empty-wait-any");
-
-    let mut index = 0;
-    while index < 3 {
-        spawn_and_reap("repeated", false);
-        index += 1;
-    }
 
     let cleanup_pid = libdunit::spawn("elf_demo");
     if cleanup_pid < 0 {
@@ -85,6 +70,6 @@ pub extern "C" fn _start() -> ! {
         libdunit::exit(6);
     }
 
-    libdunit::println("path_test: prepared/reap OK");
+    libdunit::println("path_test: ready/not-exited OK");
     libdunit::exit(0);
 }
