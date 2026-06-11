@@ -95,27 +95,6 @@ The project is still intentionally single-process-at-a-time for real execution.
 The process table and scheduler queue are being shaped so real cooperative
 multitasking can be added without fake success behavior.
 
-## Build And Test
-
-The main automation path is:
-
-```powershell
-python build_and_run_multipass.py --qemu-timeout 30 --qemu-log qemu_serial.log
-```
-
-With regression commands:
-
-```powershell
-python build_and_run_multipass.py --qemu-timeout 30 --qemu-log regression.log --qemu-test-commands "exec scheduler_test;exec spawn_ready_test;exec path_test;exec args_test one two;exec fs_test;exec elf_demo;ps;pwd;ls /app"
-```
-
-The script uploads the workspace to the configured Multipass VM, builds the ISO
-there, downloads it, runs QEMU locally, injects terminal commands through QMP,
-and captures the serial log.
-
-Local Makefile targets still exist for development, but the scripted Multipass
-flow is the canonical build/test workflow for current milestones.
-
 ## Boot Modes
 
 `limine.conf` currently boots Terminal Mode immediately:
