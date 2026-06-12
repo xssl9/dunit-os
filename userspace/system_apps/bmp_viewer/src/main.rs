@@ -191,8 +191,26 @@ fn draw_bmp(data: &[u8], info: BmpInfo, fb: &libdunit::FbInfo) -> DrawArea {
     area
 }
 
+fn drain_stale_keys() {
+    let mut quiet_ticks = 0usize;
+    while quiet_ticks < 8 {
+        if libdunit::get_key().is_some() {
+            quiet_ticks = 0;
+        } else {
+            quiet_ticks += 1;
+            libdunit::sleep_ms(10);
+        }
+    }
+}
+
 fn wait_for_key() {
-    while libdunit::get_key().is_none() {
+    drain_stale_keys();
+    loop {
+        if let Some(scancode) = libdunit::get_key() {
+            if (scancode & 0x80) == 0 {
+                break;
+            }
+        }
         libdunit::sleep_ms(20);
     }
 }
