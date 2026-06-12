@@ -1,5 +1,6 @@
 use crate::gui::renderer::{BackBuffer, DamageTracker, Framebuffer, Rect};
 use crate::drivers::mouse;
+use crate::serial_write;
 use crate::window_manager::{self, AppType};
 
 const BG: u32 = 0x030504;
@@ -405,9 +406,16 @@ fn handle_dock_click(mx: usize, my: usize, width: usize, height: usize) -> bool 
 }
 
 pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize) -> ! {
+    serial_write("[GUI] renderer init start\r\n");
     let front = Framebuffer::new(fb_addr, width, height, pitch);
     let back_buffer = BackBuffer::init(width, height);
     let scene = back_buffer.as_ref().map(|buffer| buffer.canvas()).unwrap_or(front);
+    if back_buffer.is_some() {
+        serial_write("[GUI] back buffer enabled\r\n");
+    } else {
+        serial_write("[GUI] back buffer unavailable, direct framebuffer fallback\r\n");
+    }
+    serial_write("[GUI] dirty cursor redraw enabled\r\n");
     mouse::set_bounds(width, height);
     mouse::set_position((width / 2) as i32, (height / 2) as i32);
 

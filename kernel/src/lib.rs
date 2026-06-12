@@ -87,7 +87,7 @@ static mut TERMINAL_CWD: [u8; 256] = [0; 256];
 static mut TERMINAL_CWD_LEN: usize = 0;
 static mut TERMINAL_DIR_ENTRIES: [fs::vfs::DirEntry; 16] = [fs::vfs::DirEntry::empty(); 16];
 
-fn serial_write(s: &str) {
+pub(crate) fn serial_write(s: &str) {
     for byte in s.bytes() {
         unsafe {
             loop {
