@@ -1,10 +1,10 @@
-.PHONY: all clean hal kernel userspace iso run
+.PHONY: all clean hal kernel userspace iso run run-gui
 
 CC = gcc
 AS = nasm
 CARGO = cargo
 QEMU = qemu-system-x86_64
-QEMU_DISPLAY = sdl
+QEMU_DISPLAY ?= sdl,grab-mod=lctrl-lalt,show-cursor=off
 LIMINE_CONFIG ?= limine.conf
 
 HAL_DIR = hal
@@ -151,6 +151,9 @@ grub-iso: $(BUILD_DIR)/kernel.elf
 	@echo "GRUB ISO created at $(BUILD_DIR)/os.iso"
 
 run: iso
+	$(QEMU) -boot d -cdrom $(BUILD_DIR)/microkernel.iso -m 512M -serial stdio -display $(QEMU_DISPLAY) -boot menu=on
+
+run-gui: iso-test-gui
 	$(QEMU) -boot d -cdrom $(BUILD_DIR)/microkernel.iso -m 512M -serial stdio -display $(QEMU_DISPLAY) -boot menu=on
 
 run-terminal: iso
