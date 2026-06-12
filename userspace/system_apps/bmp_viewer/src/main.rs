@@ -8,6 +8,7 @@ const MAX_BMP_SIZE: usize = 6 * 1024 * 1024;
 const READ_CHUNK_SIZE: usize = 4096;
 const PAD_X: u32 = 16;
 const PAD_Y: u32 = 4;
+const MAX_UPSCALE: usize = 12;
 
 static mut FILE_BUF: [u8; MAX_BMP_SIZE] = [0; MAX_BMP_SIZE];
 
@@ -45,6 +46,7 @@ struct RenderPlan {
     width: usize,
     height: usize,
     src_step: usize,
+    dst_scale: usize,
 }
 
 fn read_u16(data: &[u8], offset: usize) -> Option<u16> {
@@ -141,19 +143,29 @@ fn render_plan(info: BmpInfo, fb: &libdunit::FbInfo) -> RenderPlan {
     let src_step = ceil_div(info.width, max_w)
         .max(ceil_div(info.height, max_h))
         .max(1);
+    let width = (info.width / src_step).max(1);
+    let height = (info.height / src_step).max(1);
+    let max_scale = (max_w / width).min(max_h / height).max(1);
+    let target_width = (max_w * 2 / 3).max(width);
+    let dst_scale = ceil_div(target_width, width)
+        .max(1)
+        .min(max_scale)
+        .min(MAX_UPSCALE);
+
     RenderPlan {
         x: x0,
         y: y0,
-        width: (info.width / src_step).max(1),
-        height: (info.height / src_step).max(1),
+        width,
+        height,
         src_step,
+        dst_scale,
     }
 }
 
 fn draw_bmp(data: &[u8], info: BmpInfo, fb: &libdunit::FbInfo) -> DrawArea {
     let plan = render_plan(info, fb);
-    let image_w = plan.width as u32;
-    let image_h = plan.height as u32;
+    let image_w = (plan.width * plan.dst_scale) as u32;
+    let image_h = (plan.height * plan.dst_scale) as u32;
     let bytes_per_pixel = (info.bpp / 8) as usize;
     let area = DrawArea {
         x: plan.x.saturating_sub(2),
@@ -184,7 +196,19 @@ fn draw_bmp(data: &[u8], info: BmpInfo, fb: &libdunit::FbInfo) -> DrawArea {
             let g = data[offset + 1] as u32;
             let r = data[offset + 2] as u32;
             let color = (r << 16) | (g << 8) | b;
-            libdunit::draw_pixel(plan.x + x as u32, plan.y + y as u32, color);
+            let dst_x = plan.x + (x * plan.dst_scale) as u32;
+            let dst_y = plan.y + (y * plan.dst_scale) as u32;
+            if plan.dst_scale == 1 {
+                libdunit::draw_pixel(dst_x, dst_y, color);
+            } else {
+                libdunit::draw_rect(
+                    dst_x,
+                    dst_y,
+                    plan.dst_scale as u32,
+                    plan.dst_scale as u32,
+                    color,
+                );
+            }
         }
     }
 
