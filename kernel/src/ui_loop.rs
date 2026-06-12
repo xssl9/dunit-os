@@ -2,18 +2,20 @@ use crate::gui::renderer::{BackBuffer, DamageTracker, Framebuffer, Rect};
 use crate::drivers::mouse;
 use crate::window_manager::{self, AppType};
 
-const BG: u32 = 0x122025;
-const BG_ALT: u32 = 0x172a31;
-const PANEL: u32 = 0x1f353d;
-const PANEL_DARK: u32 = 0x0f1a1f;
-const TEXT: u32 = 0xd9e7e7;
-const MUTED: u32 = 0x8fa7a9;
-const ACCENT: u32 = 0x5cc8ff;
-const GREEN: u32 = 0x7bd88f;
-const YELLOW: u32 = 0xffcc66;
-const RED: u32 = 0xff6b6b;
-const PURPLE: u32 = 0xb79cff;
-const ORANGE: u32 = 0xffb86c;
+const BG: u32 = 0x030504;
+const BG_ALT: u32 = 0x0b1510;
+const PANEL: u32 = 0x17251d;
+const PANEL_DARK: u32 = 0x070a08;
+const PANEL_LIGHT: u32 = 0x24362a;
+const TEXT: u32 = 0xf4f1e8;
+const MUTED: u32 = 0x93aa91;
+const ACCENT: u32 = 0xa7bca4;
+const GREEN: u32 = 0x2f7b51;
+const GREEN_DARK: u32 = 0x185238;
+const YELLOW: u32 = 0xe5d4a6;
+const RED: u32 = 0xd86a62;
+const PURPLE: u32 = 0x8ea88a;
+const ORANGE: u32 = 0xd7b772;
 const CURSOR_W: usize = 16;
 const CURSOR_H: usize = 22;
 const CURSOR_AREA: usize = CURSOR_W * CURSOR_H;
@@ -147,8 +149,8 @@ fn scene_pixel(x: usize, y: usize, width: usize, height: usize) -> u32 {
                     return ACCENT;
                 }
                 return match window.app_type {
-                    AppType::Terminal => 0x05090b,
-                    _ => 0x18282f,
+                    AppType::Terminal => 0x020302,
+                    _ => 0x101912,
                 };
             }
         }
@@ -157,7 +159,7 @@ fn scene_pixel(x: usize, y: usize, width: usize, height: usize) -> u32 {
     let (dock_x, dock_y, dock_width, icon_size, icon_spacing) = dock_layout(width, height);
     if x >= dock_x && x < dock_x + dock_width && y >= dock_y && y < dock_y + 68 {
         let first_icon_x = dock_x + 24;
-        let colors = [ACCENT, GREEN, YELLOW, RED, PURPLE];
+        let colors = [GREEN, ACCENT, YELLOW, RED, PURPLE];
         for i in 0..5 {
             let icon_x = first_icon_x + i * (icon_size + icon_spacing);
             let icon_y = dock_y + 10;
@@ -168,7 +170,9 @@ fn scene_pixel(x: usize, y: usize, width: usize, height: usize) -> u32 {
         return PANEL;
     }
 
-    if ((x / 28) + (y / 28)) % 2 == 0 {
+    if y % 96 == 0 || x % 128 == 0 {
+        0x0e1d14
+    } else if ((x / 32) + (y / 32)) % 2 == 0 {
         BG
     } else {
         BG_ALT
@@ -205,12 +209,13 @@ fn draw_icon_symbol(fb: Framebuffer, width: usize, height: usize, x: usize, y: u
 
 fn draw_dock(fb: Framebuffer, width: usize, height: usize) {
     let (dock_x, dock_y, dock_width, icon_size, icon_spacing) = dock_layout(width, height);
-    draw_rect(fb, width, height, dock_x, dock_y, dock_width, 68, PANEL);
-    draw_rect_border(fb, width, height, dock_x, dock_y, dock_width, 68, 0x38535d);
+    draw_rect(fb, width, height, dock_x, dock_y, dock_width, 68, PANEL_DARK);
+    draw_rect(fb, width, height, dock_x + 2, dock_y + 2, dock_width.saturating_sub(4), 64, PANEL);
+    draw_rect_border(fb, width, height, dock_x, dock_y, dock_width, 68, GREEN_DARK);
 
     let apps = [
-        (AppType::Terminal, ACCENT, "Term"),
-        (AppType::Files, GREEN, "Files"),
+        (AppType::Terminal, GREEN, "Term"),
+        (AppType::Files, ACCENT, "Files"),
         (AppType::Settings, YELLOW, "Prefs"),
         (AppType::Monitor, RED, "Stats"),
         (AppType::Editor, PURPLE, "Edit"),
@@ -221,15 +226,16 @@ fn draw_dock(fb: Framebuffer, width: usize, height: usize) {
         let icon_x = first_icon_x + i * (icon_size + icon_spacing);
         let icon_y = dock_y + 10;
         draw_rect(fb, width, height, icon_x, icon_y, icon_size, icon_size, apps[i].1);
-        draw_rect_border(fb, width, height, icon_x, icon_y, icon_size, icon_size, 0xeef7f7);
+        draw_rect_border(fb, width, height, icon_x, icon_y, icon_size, icon_size, 0xf4f1e8);
         draw_icon_symbol(fb, width, height, icon_x, icon_y, apps[i].0);
         draw_text(fb, width, height, icon_x + 8, icon_y + icon_size + 5, apps[i].2, MUTED);
     }
 }
 
 fn draw_window(fb: Framebuffer, width: usize, height: usize, window: &window_manager::Window) {
-    draw_rect(fb, width, height, window.x, window.y, window.width, window.height, 0x18282f);
+    draw_rect(fb, width, height, window.x, window.y, window.width, window.height, 0x101912);
     draw_rect(fb, width, height, window.x, window.y, window.width, 32, PANEL);
+    draw_rect(fb, width, height, window.x, window.y + 31, window.width, 1, GREEN_DARK);
     draw_rect_border(fb, width, height, window.x, window.y, window.width, window.height, ACCENT);
     draw_text(fb, width, height, window.x + 12, window.y + 12, window.title, TEXT);
     draw_rect(fb, width, height, window.x + window.width.saturating_sub(25), window.y + 11, 10, 10, RED);
@@ -238,7 +244,7 @@ fn draw_window(fb: Framebuffer, width: usize, height: usize, window: &window_man
     let y = window.y + 50;
     match window.app_type {
         AppType::Terminal => {
-            draw_rect(fb, width, height, window.x + 8, window.y + 40, window.width.saturating_sub(16), window.height.saturating_sub(50), 0x05090b);
+            draw_rect(fb, width, height, window.x + 8, window.y + 40, window.width.saturating_sub(16), window.height.saturating_sub(50), 0x020302);
             draw_text(fb, width, height, x, y, "root@dunit:~# dufetch", GREEN);
             draw_text(fb, width, height, x, y + 20, "Dunit OS  Green Tea", TEXT);
             draw_text(fb, width, height, x, y + 40, "VFS MemFS userspace runtime", MUTED);
@@ -290,28 +296,32 @@ fn redraw_full_screen(fb: Framebuffer, width: usize, height: usize) {
     }
 
     draw_rect(fb, width, height, 0, 0, width, 42, PANEL_DARK);
-    draw_rect(fb, width, height, 0, 41, width, 1, 0x39525b);
+    draw_rect(fb, width, height, 0, 40, width, 2, GREEN_DARK);
     draw_text(fb, width, height, 14, 14, "Dunit OS", TEXT);
-    draw_text(fb, width, height, 104, 14, "GUI Mode", ACCENT);
+    draw_text(fb, width, height, 104, 14, "GUI Mode", GREEN);
     draw_text(fb, width, height, width.saturating_sub(190), 14, "Single-task runtime", MUTED);
 
-    draw_text(fb, width, height, 60, 92, "Dunit Desktop", TEXT);
-    draw_text(fb, width, height, 60, 116, "VFS / MemFS / ELF exec ready", MUTED);
+    draw_text(fb, width, height, 60, 82, "Dunit Desktop", TEXT);
+    draw_text(fb, width, height, 60, 106, "Double buffered kernel GUI", MUTED);
+    draw_text(fb, width, height, 60, 130, "VFS / MemFS / ELF exec ready", GREEN);
 
-    draw_rect(fb, width, height, 60, 158, 220, 86, PANEL);
-    draw_rect_border(fb, width, height, 60, 158, 220, 86, 0x39525b);
-    draw_text(fb, width, height, 78, 178, "Runtime", ACCENT);
-    draw_text(fb, width, height, 78, 204, "single process", TEXT);
+    draw_rect(fb, width, height, 60, 176, 220, 86, PANEL);
+    draw_rect(fb, width, height, 60, 176, 8, 86, GREEN_DARK);
+    draw_rect_border(fb, width, height, 60, 176, 220, 86, PANEL_LIGHT);
+    draw_text(fb, width, height, 78, 196, "Runtime", ACCENT);
+    draw_text(fb, width, height, 78, 222, "single process", TEXT);
 
-    draw_rect(fb, width, height, 304, 158, 220, 86, PANEL);
-    draw_rect_border(fb, width, height, 304, 158, 220, 86, 0x39525b);
-    draw_text(fb, width, height, 322, 178, "Filesystem", GREEN);
-    draw_text(fb, width, height, 322, 204, "MemFS over VFS", TEXT);
+    draw_rect(fb, width, height, 304, 176, 220, 86, PANEL);
+    draw_rect(fb, width, height, 304, 176, 8, 86, GREEN);
+    draw_rect_border(fb, width, height, 304, 176, 220, 86, PANEL_LIGHT);
+    draw_text(fb, width, height, 322, 196, "Filesystem", GREEN);
+    draw_text(fb, width, height, 322, 222, "MemFS over VFS", TEXT);
 
-    draw_rect(fb, width, height, 548, 158, 220, 86, PANEL);
-    draw_rect_border(fb, width, height, 548, 158, 220, 86, 0x39525b);
-    draw_text(fb, width, height, 566, 178, "Pointer", ORANGE);
-    draw_text(fb, width, height, 566, 204, "PS/2 packet sync", TEXT);
+    draw_rect(fb, width, height, 548, 176, 220, 86, PANEL);
+    draw_rect(fb, width, height, 548, 176, 8, 86, ORANGE);
+    draw_rect_border(fb, width, height, 548, 176, 220, 86, PANEL_LIGHT);
+    draw_text(fb, width, height, 566, 196, "Pointer", ORANGE);
+    draw_text(fb, width, height, 566, 222, "PS/2 packet sync", TEXT);
 
     draw_windows(fb, width, height);
     draw_dock(fb, width, height);
