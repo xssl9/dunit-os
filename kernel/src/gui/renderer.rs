@@ -73,6 +73,14 @@ impl Framebuffer {
         }
     }
 
+    pub fn read_pixel(self, x: usize, y: usize) -> u32 {
+        if x < self.width && y < self.height {
+            unsafe { core::ptr::read_volatile(self.addr.add(y * self.pitch_pixels + x)) }
+        } else {
+            0
+        }
+    }
+
     pub fn fill_rect(self, rect: Rect, color: u32) {
         let Some(rect) = rect.clipped(self.width, self.height) else {
             return;
@@ -110,6 +118,98 @@ impl Framebuffer {
                 }
             }
         }
+    }
+}
+
+const MAX_BACKBUFFER_WIDTH: usize = 1920;
+const MAX_BACKBUFFER_HEIGHT: usize = 1080;
+const MAX_BACKBUFFER_PIXELS: usize = MAX_BACKBUFFER_WIDTH * MAX_BACKBUFFER_HEIGHT;
+
+static mut GUI_BACK_BUFFER: [u32; MAX_BACKBUFFER_PIXELS] = [0; MAX_BACKBUFFER_PIXELS];
+
+pub struct BackBuffer {
+    canvas: Framebuffer,
+}
+
+impl BackBuffer {
+    pub fn init(width: usize, height: usize) -> Option<Self> {
+        if width == 0 || height == 0 || width > MAX_BACKBUFFER_WIDTH || height > MAX_BACKBUFFER_HEIGHT {
+            return None;
+        }
+
+        Some(Self {
+            canvas: Framebuffer::new(core::ptr::addr_of_mut!(GUI_BACK_BUFFER).cast::<u32>(), width, height, width * 4),
+        })
+    }
+
+    pub fn canvas(&self) -> Framebuffer {
+        self.canvas
+    }
+
+    pub fn present_full(&self, front: Framebuffer) {
+        self.present_rect(front, Rect::new(0, 0, self.canvas.width(), self.canvas.height()));
+    }
+
+    pub fn present_rect(&self, front: Framebuffer, rect: Rect) {
+        let Some(rect) = rect.clipped(self.canvas.width(), self.canvas.height()) else {
+            return;
+        };
+
+        for y in rect.y..rect.bottom() {
+            for x in rect.x..rect.right() {
+                front.put_pixel(x, y, self.canvas.read_pixel(x, y));
+            }
+        }
+    }
+}
+
+const MAX_DAMAGE_RECTS: usize = 16;
+
+pub struct DamageTracker {
+    rects: [Rect; MAX_DAMAGE_RECTS],
+    len: usize,
+    overflow: bool,
+}
+
+impl DamageTracker {
+    pub const fn new() -> Self {
+        Self {
+            rects: [Rect::new(0, 0, 0, 0); MAX_DAMAGE_RECTS],
+            len: 0,
+            overflow: false,
+        }
+    }
+
+    pub fn mark(&mut self, rect: Rect) {
+        if rect.width == 0 || rect.height == 0 {
+            return;
+        }
+
+        if self.len < MAX_DAMAGE_RECTS {
+            self.rects[self.len] = rect;
+            self.len += 1;
+        } else {
+            self.overflow = true;
+            self.rects[0] = self.rects[0].union(rect);
+            self.len = 1;
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.len = 0;
+        self.overflow = false;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn rects(&self) -> &[Rect] {
+        &self.rects[..self.len]
+    }
+
+    pub fn overflowed(&self) -> bool {
+        self.overflow
     }
 }
 
