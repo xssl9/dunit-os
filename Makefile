@@ -5,6 +5,7 @@ AS = nasm
 CARGO = cargo
 QEMU = qemu-system-x86_64
 QEMU_DISPLAY = sdl
+LIMINE_CONFIG ?= limine.conf
 
 HAL_DIR = hal
 KERNEL_DIR = kernel
@@ -110,10 +111,11 @@ userspace:
 	@echo "Userspace programs built in $(USERSPACE_BUILD_DIR)/"
 
 iso: $(BUILD_DIR)/kernel.elf userspace
+	test -f $(LIMINE_CONFIG)
 	mkdir -p $(ISO_DIR)/boot/limine
 	mkdir -p $(ISO_DIR)/boot/userspace
 	cp $(BUILD_DIR)/kernel.elf $(ISO_DIR)/boot/
-	cp limine.conf $(ISO_DIR)/boot/limine/
+	cp $(LIMINE_CONFIG) $(ISO_DIR)/boot/limine/limine.conf
 	test -f background.png && cp background.png $(ISO_DIR)/boot/background.png || true
 	cp $(USERSPACE_BUILD_DIR)/* $(ISO_DIR)/boot/userspace/ 2>/dev/null || true
 	cp limine/limine-bios.sys $(ISO_DIR)/boot/limine/
@@ -132,7 +134,13 @@ iso: $(BUILD_DIR)/kernel.elf userspace
 		-efi-boot-part --efi-boot-image --protective-msdos-label \
 		"$$(pwd)/$(ISO_DIR)" -o "$$(pwd)/$(BUILD_DIR)/microkernel.iso"
 	./limine/limine bios-install $(BUILD_DIR)/microkernel.iso
-	@echo "ISO created at $(BUILD_DIR)/microkernel.iso"
+	@echo "ISO created at $(BUILD_DIR)/microkernel.iso using $(LIMINE_CONFIG)"
+
+iso-test-terminal:
+	$(MAKE) iso LIMINE_CONFIG=limine_test_terminal.conf
+
+iso-test-gui:
+	$(MAKE) iso LIMINE_CONFIG=limine_test_gui.conf
 
 grub-iso: $(BUILD_DIR)/kernel.elf
 	rm -rf $(BUILD_DIR)/iso_grub

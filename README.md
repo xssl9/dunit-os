@@ -97,17 +97,23 @@ multitasking can be added without fake success behavior.
 
 ## Boot Modes
 
-`limine.conf` currently boots Terminal Mode immediately:
+`limine.conf` is the normal interactive boot menu:
 
 ```text
-timeout: 0
-
-/Dunit OS - Terminal Mode
-    cmdline: mode=terminal
+timeout: 5
 
 /Dunit OS - GUI Mode
     resolution: 1600x900x32
+
+/Dunit OS - Terminal Mode
+    cmdline: mode=terminal
 ```
+
+Automated tests use separate configs so they never depend on the normal boot
+menu:
+
+- `limine_test_terminal.conf`: terminal mode, timeout 0.
+- `limine_test_gui.conf`: GUI mode, timeout 0.
 
 Terminal Mode is the reliable development path. GUI Mode exists, but it is not
 the focus of the current runtime milestones.
@@ -181,7 +187,9 @@ userspace/libdunit/          Userspace syscall/startup helper library
 userspace/system_apps/       Small Rust ELF apps embedded into /app
 docs/                        Design notes and milestone context
 build_and_run_multipass.py   Canonical build/test automation
-limine.conf                  Boot menu and mode configuration
+limine.conf                  Normal interactive boot menu
+limine_test_terminal.conf    Automated terminal test boot config
+limine_test_gui.conf         Automated GUI test boot config
 ```
 
 ## License
