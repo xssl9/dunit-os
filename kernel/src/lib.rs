@@ -1101,13 +1101,17 @@ pub extern "C" fn kernel_main(
         initrd::init();
         screen_log("[ OK ] Initrd ready", false);
         
-        screen_log("[ .. ] Initializing PS/2 keyboard only", false);
+        screen_log("[ .. ] Initializing PS/2 keyboard and mouse", false);
         serial_write("[DRV] Calling keyboard::init()...\r\n");
         screen_log("[ .. ] [DRV] Calling keyboard::init()", false);
         drivers::keyboard::init();
         serial_write("[DRV] keyboard::init() returned\r\n");
         screen_log("[ OK ] [DRV] keyboard::init() returned", false);
+        serial_write("[DRV] Calling mouse::init() for terminal wheel support...\r\n");
+        drivers::mouse::init();
+        serial_write("[DRV] mouse::init() returned\r\n");
         screen_log("[ OK ] Keyboard driver ready", false);
+        screen_log("[ OK ] Mouse wheel driver ready", false);
     }
 
     screen_log("[ .. ] Running process kernel stack smoke test", false);
@@ -1135,12 +1139,13 @@ pub extern "C" fn kernel_main(
         screen_log("[ OK ] IRQ 12: PS/2 mouse interrupt enabled", false);
     } else {
         unsafe {
-            hal::hal_outb(0x21, 0xFD);
-            hal::hal_outb(0xA1, 0xFF);
+            hal::hal_outb(0x21, 0xF9);
+            hal::hal_outb(0xA1, 0xEF);
         }
-        serial_write("[IRQ] Terminal input enabled: IRQ1 keyboard only\r\n");
+        serial_write("[IRQ] Terminal input enabled: IRQ1 keyboard, IRQ12 mouse wheel\r\n");
         screen_log("[ OK ] IRQ 1: Keyboard interrupt enabled", false);
-        screen_log("[ OK ] IRQ 0/12 masked for terminal mode", false);
+        screen_log("[ OK ] IRQ 12: PS/2 mouse wheel interrupt enabled", false);
+        screen_log("[ OK ] IRQ 0 masked for terminal mode", false);
     }
     screen_log("[ OK ] Hardware interrupts configured", false);
     
@@ -1225,6 +1230,11 @@ pub extern "C" fn kernel_main(
                 serial_write("[TERM-007] Starting main loop\r\n");
                 
                 loop {
+                    let wheel_delta = drivers::mouse::take_scroll_delta();
+                    if wheel_delta != 0 {
+                        console.scroll_view(-wheel_delta * 3);
+                    }
+
                     if let Some(scancode) = drivers::keyboard::read_scancode() {
                         unsafe {
                             if scancode & 0x80 == 0 {

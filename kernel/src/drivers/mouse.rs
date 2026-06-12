@@ -1,11 +1,13 @@
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicUsize, Ordering};
 
 static MOUSE_X: AtomicI32 = AtomicI32::new(512);
 static MOUSE_Y: AtomicI32 = AtomicI32::new(384);
 static MOUSE_BUTTONS: AtomicU8 = AtomicU8::new(0);
 static MOUSE_MAX_X: AtomicI32 = AtomicI32::new(1023);
 static MOUSE_MAX_Y: AtomicI32 = AtomicI32::new(767);
-static mut PACKET: [u8; 3] = [0; 3];
+static MOUSE_WHEEL_DELTA: AtomicI32 = AtomicI32::new(0);
+static PACKET_SIZE: AtomicUsize = AtomicUsize::new(3);
+static mut PACKET: [u8; 4] = [0; 4];
 static mut PACKET_INDEX: usize = 0;
 static PACKET_LOCK: AtomicBool = AtomicBool::new(false);
 
@@ -28,6 +30,19 @@ pub fn init() {
 
         mouse_write(0xF6);
         let _ = mouse_read_ack();
+
+        mouse_set_sample_rate(200);
+        mouse_set_sample_rate(100);
+        mouse_set_sample_rate(80);
+        mouse_write(0xF2);
+        let _ = mouse_read_ack();
+        let device_id = mouse_read_ack();
+        if device_id == 3 {
+            PACKET_SIZE.store(4, Ordering::Relaxed);
+        } else {
+            PACKET_SIZE.store(3, Ordering::Relaxed);
+        }
+
         mouse_write(0xF4);
         let _ = mouse_read_ack();
 
@@ -87,7 +102,8 @@ fn push_packet_byte_locked(byte: u8) {
         PACKET[PACKET_INDEX] = byte;
         PACKET_INDEX += 1;
 
-        if PACKET_INDEX == 3 {
+        let packet_size = PACKET_SIZE.load(Ordering::Relaxed);
+        if PACKET_INDEX == packet_size {
             MOUSE_BUTTONS.store(PACKET[0] & 0x07, Ordering::Relaxed);
             let dx = PACKET[1] as i8 as i32;
             let dy = -(PACKET[2] as i8 as i32);
@@ -98,6 +114,17 @@ fn push_packet_byte_locked(byte: u8) {
             let y = (MOUSE_Y.load(Ordering::Relaxed) + dy).max(0).min(max_y);
             MOUSE_X.store(x, Ordering::Relaxed);
             MOUSE_Y.store(y, Ordering::Relaxed);
+            if packet_size == 4 {
+                let raw = PACKET[3] & 0x0F;
+                let wheel = if (raw & 0x08) != 0 {
+                    (raw | 0xF0) as i8 as i32
+                } else {
+                    raw as i32
+                };
+                if wheel != 0 {
+                    MOUSE_WHEEL_DELTA.fetch_add(wheel, Ordering::Relaxed);
+                }
+            }
             PACKET_INDEX = 0;
         }
     }
@@ -112,6 +139,10 @@ pub fn get_position() -> (i32, i32) {
 
 pub fn get_buttons() -> u8 {
     MOUSE_BUTTONS.load(Ordering::Relaxed)
+}
+
+pub fn take_scroll_delta() -> i32 {
+    MOUSE_WHEEL_DELTA.swap(0, Ordering::Relaxed)
 }
 
 fn clamp_position() {
@@ -156,6 +187,13 @@ unsafe fn mouse_write(value: u8) {
     outb(0x64, 0xD4);
     wait_write();
     outb(0x60, value);
+}
+
+unsafe fn mouse_set_sample_rate(rate: u8) {
+    mouse_write(0xF3);
+    let _ = mouse_read_ack();
+    mouse_write(rate);
+    let _ = mouse_read_ack();
 }
 
 unsafe fn mouse_read_ack() -> u8 {

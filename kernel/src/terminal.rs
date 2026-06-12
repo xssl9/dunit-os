@@ -1,6 +1,3 @@
-use alloc::boxed::Box;
-use core::mem::MaybeUninit;
-
 pub struct Framebuffer {
     pub address: *mut u32,
     pub width: usize,
@@ -18,6 +15,16 @@ pub struct FbConsole {
     bg_color: u32,
     stride: usize,
 }
+
+const MAX_COLS: usize = 160;
+const SCROLLBACK_LINES: usize = 512;
+
+static mut SCROLLBACK: [[u8; MAX_COLS]; SCROLLBACK_LINES] = [[b' '; MAX_COLS]; SCROLLBACK_LINES];
+static mut SCROLLBACK_LENS: [usize; SCROLLBACK_LINES] = [0; SCROLLBACK_LINES];
+static mut SCROLLBACK_LEN: usize = 1;
+static mut ACTIVE_LINE: usize = 0;
+static mut VIEWPORT_TOP: usize = 0;
+static mut VIEW_AT_BOTTOM: bool = true;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -75,34 +82,155 @@ impl FbConsole {
     pub fn clear(&mut self) {
         self.cursor_x = 0;
         self.cursor_y = 0;
+        self.reset_scrollback();
     }
-    
-    fn clear_line(&mut self, line_y: usize) {
-        let px_y = line_y * self.char_height;
+
+    fn max_chars(&self) -> usize {
+        (self.fb.width / self.char_width).min(MAX_COLS)
+    }
+
+    fn visible_rows(&self) -> usize {
+        self.fb.height / self.char_height
+    }
+
+    fn reset_scrollback(&mut self) {
         unsafe {
-            for row in 0..self.char_height {
-                if px_y + row >= self.fb.height {
-                    break;
-                }
-                for x in 0..self.fb.width {
-                    let offset = (px_y + row) * self.stride + x;
-                    self.fb.address.add(offset).write_volatile(self.bg_color);
+            for row in 0..SCROLLBACK_LINES {
+                SCROLLBACK_LENS[row] = 0;
+                for col in 0..MAX_COLS {
+                    SCROLLBACK[row][col] = b' ';
                 }
             }
+            SCROLLBACK_LEN = 1;
+            ACTIVE_LINE = 0;
+            VIEWPORT_TOP = 0;
+            VIEW_AT_BOTTOM = true;
         }
     }
-    
-    pub fn clear_screen(&mut self) {
+
+    fn clear_pixels(&mut self) {
         unsafe {
             let ptr = self.fb.address;
             let color = self.bg_color;
-            let lines_to_clear = 50;
-            let count = lines_to_clear * self.stride;
-            
+            let count = self.fb.height * self.stride;
+
             for i in 0..count {
                 ptr.add(i).write_volatile(color);
             }
         }
+    }
+
+    fn follow_bottom(&mut self) {
+        unsafe {
+            let rows = self.visible_rows();
+            VIEWPORT_TOP = SCROLLBACK_LEN.saturating_sub(rows);
+            VIEW_AT_BOTTOM = true;
+            self.cursor_y = ACTIVE_LINE.saturating_sub(VIEWPORT_TOP);
+        }
+    }
+
+    fn append_history_line(&mut self) {
+        unsafe {
+            if SCROLLBACK_LEN < SCROLLBACK_LINES {
+                ACTIVE_LINE = SCROLLBACK_LEN;
+                SCROLLBACK_LEN += 1;
+            } else {
+                for row in 1..SCROLLBACK_LINES {
+                    SCROLLBACK[row - 1] = SCROLLBACK[row];
+                    SCROLLBACK_LENS[row - 1] = SCROLLBACK_LENS[row];
+                }
+                ACTIVE_LINE = SCROLLBACK_LINES - 1;
+            }
+
+            SCROLLBACK_LENS[ACTIVE_LINE] = 0;
+            for col in 0..MAX_COLS {
+                SCROLLBACK[ACTIVE_LINE][col] = b' ';
+            }
+        }
+    }
+
+    fn write_history_char(&mut self, ch: u8) {
+        unsafe {
+            let max_chars = self.max_chars();
+            if self.cursor_x >= max_chars {
+                self.cursor_x = 0;
+                self.append_history_line();
+                self.follow_bottom();
+                self.render_viewport();
+            }
+
+            let line = ACTIVE_LINE;
+            let col = self.cursor_x;
+            if line < SCROLLBACK_LINES && col < MAX_COLS {
+                SCROLLBACK[line][col] = ch;
+                if SCROLLBACK_LENS[line] <= col {
+                    SCROLLBACK_LENS[line] = col + 1;
+                }
+            }
+        }
+    }
+
+    fn erase_history_char(&mut self) {
+        unsafe {
+            if self.cursor_x == 0 {
+                return;
+            }
+            self.cursor_x -= 1;
+            let line = ACTIVE_LINE;
+            let col = self.cursor_x;
+            if line < SCROLLBACK_LINES && col < MAX_COLS {
+                SCROLLBACK[line][col] = b' ';
+                while SCROLLBACK_LENS[line] > 0
+                    && SCROLLBACK[line][SCROLLBACK_LENS[line] - 1] == b' '
+                {
+                    SCROLLBACK_LENS[line] -= 1;
+                }
+            }
+        }
+    }
+
+    fn render_viewport(&mut self) {
+        self.clear_pixels();
+        unsafe {
+            let rows = self.visible_rows();
+            let max_chars = self.max_chars();
+            for screen_row in 0..rows {
+                let history_row = VIEWPORT_TOP + screen_row;
+                if history_row >= SCROLLBACK_LEN {
+                    break;
+                }
+                let len = SCROLLBACK_LENS[history_row].min(max_chars);
+                for col in 0..len {
+                    self.draw_glyph(col, screen_row, SCROLLBACK[history_row][col]);
+                }
+            }
+
+            if ACTIVE_LINE >= VIEWPORT_TOP && ACTIVE_LINE < VIEWPORT_TOP + rows {
+                self.cursor_y = ACTIVE_LINE - VIEWPORT_TOP;
+            } else {
+                self.cursor_y = rows.saturating_sub(1);
+            }
+        }
+    }
+
+    pub fn scroll_view(&mut self, lines: i32) {
+        unsafe {
+            let rows = self.visible_rows();
+            let max_top = SCROLLBACK_LEN.saturating_sub(rows);
+            if lines < 0 {
+                VIEWPORT_TOP = VIEWPORT_TOP.saturating_sub((-lines) as usize);
+            } else {
+                VIEWPORT_TOP = (VIEWPORT_TOP + lines as usize).min(max_top);
+            }
+            VIEW_AT_BOTTOM = VIEWPORT_TOP == max_top;
+            self.render_viewport();
+            self.draw_cursor(VIEW_AT_BOTTOM);
+        }
+    }
+    
+    pub fn clear_screen(&mut self) {
+        self.clear_pixels();
+        self.reset_scrollback();
         self.cursor_x = 0;
         self.cursor_y = 0;
     }
@@ -131,10 +259,9 @@ impl FbConsole {
     pub fn draw_char(&mut self, c: char) {
         if c == '\n' {
             self.cursor_x = 0;
-            self.cursor_y += 1;
-            if self.cursor_y * self.char_height >= self.fb.height {
-                self.scroll();
-            }
+            self.append_history_line();
+            self.follow_bottom();
+            self.render_viewport();
             return;
         }
 
@@ -143,24 +270,35 @@ impl FbConsole {
             return;
         }
 
+        unsafe {
+            if !VIEW_AT_BOTTOM {
+                self.follow_bottom();
+                self.render_viewport();
+            }
+        }
+
         if c == '\x08' {
             if self.cursor_x > 0 {
-                self.cursor_x -= 1;
+                self.erase_history_char();
                 self.draw_glyph(self.cursor_x, self.cursor_y, b' ');
             }
             return;
         }
 
-        let max_chars = self.fb.width / self.char_width;
+        let max_chars = self.max_chars();
         if self.cursor_x >= max_chars {
             self.cursor_x = 0;
-            self.cursor_y += 1;
-            if self.cursor_y * self.char_height >= self.fb.height {
-                self.scroll();
-            }
+            self.append_history_line();
+            self.follow_bottom();
+            self.render_viewport();
         }
 
-        self.draw_glyph(self.cursor_x, self.cursor_y, c as u8);
+        self.write_history_char(c as u8);
+        unsafe {
+            if VIEW_AT_BOTTOM {
+                self.draw_glyph(self.cursor_x, self.cursor_y, c as u8);
+            }
+        }
         self.cursor_x += 1;
     }
 
@@ -187,27 +325,6 @@ impl FbConsole {
                 }
             }
         }
-    }
-
-    fn scroll(&mut self) {
-        let line_height = self.char_height;
-        unsafe {
-            for y in line_height..self.fb.height {
-                for x in 0..self.fb.width {
-                    let src_offset = y * self.stride + x;
-                    let dst_offset = (y - line_height) * self.stride + x;
-                    let pixel = self.fb.address.add(src_offset).read_volatile();
-                    self.fb.address.add(dst_offset).write_volatile(pixel);
-                }
-            }
-            for y in (self.fb.height - line_height)..self.fb.height {
-                for x in 0..self.fb.width {
-                    let offset = y * self.stride + x;
-                    self.fb.address.add(offset).write_volatile(self.bg_color);
-                }
-            }
-        }
-        self.cursor_y -= 1;
     }
 
     pub fn write_str(&mut self, s: &str) {
