@@ -48,50 +48,62 @@ impl WindowManager {
         }
     }
 
-    pub fn toggle_window(&mut self, app_type: AppType) {
+    fn default_window(app_type: AppType) -> Window {
+        let (x, y, width, height, title) = match app_type {
+            AppType::Terminal => (50, 80, 420, 310, "Terminal"),
+            AppType::Files => (500, 88, 390, 310, "Files"),
+            AppType::Settings => (285, 155, 390, 300, "System Settings"),
+            AppType::Monitor => (70, 410, 820, 210, "Activity Monitor"),
+            AppType::Editor => (170, 125, 610, 410, "TextEdit"),
+        };
+
+        Window {
+            x,
+            y,
+            width,
+            height,
+            title,
+            visible: true,
+            app_type,
+        }
+    }
+
+    pub fn toggle_window(&mut self, app_type: AppType) -> bool {
         for i in 0..self.window_count {
             if let Some(ref mut window) = self.windows[i] {
                 if window.app_type == app_type {
                     window.visible = !window.visible;
-                    return;
+                    return window.visible;
                 }
             }
         }
-        
-        let (x, y, width, height, title) = match app_type {
-            AppType::Terminal => (50, 80, 400, 300, "Terminal"),
-            AppType::Files => (470, 80, 400, 300, "Files"),
-            AppType::Settings => (260, 150, 400, 300, "Settings"),
-            AppType::Monitor => (50, 400, 820, 200, "System Monitor"),
-            AppType::Editor => (150, 120, 600, 400, "Text Editor"),
-        };
-        
-        self.add_window(Window {
-            x, y, width, height, title, visible: true, app_type
-        });
+
+        self.add_window(Self::default_window(app_type));
+        true
     }
 
     pub fn get_windows(&self) -> impl Iterator<Item = &Window> {
         self.windows[..self.window_count].iter().filter_map(|w| w.as_ref())
     }
 
-    pub fn close_at(&mut self, x: usize, y: usize) -> bool {
+    pub fn close_at(&mut self, x: usize, y: usize) -> Option<(usize, usize, usize, usize, AppType)> {
         for i in (0..self.window_count).rev() {
             if let Some(ref mut window) = self.windows[i] {
                 if !window.visible {
                     continue;
                 }
 
-                let close_x = window.x + window.width.saturating_sub(25);
+                let close_x = window.x + 12;
                 let close_y = window.y + 11;
-                if x >= close_x && x < close_x + 10 && y >= close_y && y < close_y + 10 {
+                if x >= close_x && x < close_x + 12 && y >= close_y && y < close_y + 12 {
+                    let bounds = (window.x, window.y, window.width, window.height, window.app_type);
                     window.visible = false;
-                    return true;
+                    return Some(bounds);
                 }
             }
         }
 
-        false
+        None
     }
 
     pub fn begin_drag_at(&self, x: usize, y: usize) -> Option<(usize, usize, usize)> {
@@ -103,8 +115,8 @@ impl WindowManager {
 
                 let inside_x = x >= window.x && x < window.x + window.width;
                 let inside_title = y >= window.y && y < window.y + 32;
-                let close_x = window.x + window.width.saturating_sub(25);
-                let over_close = x >= close_x && x < close_x + 10 && y >= window.y + 11 && y < window.y + 21;
+                let close_x = window.x + 12;
+                let over_close = x >= close_x && x < close_x + 12 && y >= window.y + 11 && y < window.y + 23;
 
                 if inside_x && inside_title && !over_close {
                     return Some((i, x - window.x, y - window.y));
@@ -126,6 +138,39 @@ impl WindowManager {
             window.x = x.min(max_x);
             window.y = y.min(max_y).max(42);
         }
+    }
+
+    pub fn window_bounds(&self, idx: usize) -> Option<(usize, usize, usize, usize)> {
+        if idx >= self.window_count {
+            return None;
+        }
+
+        self.windows[idx].map(|window| (window.x, window.y, window.width, window.height))
+    }
+
+    pub fn app_bounds(&self, app_type: AppType) -> Option<(usize, usize, usize, usize)> {
+        for i in 0..self.window_count {
+            if let Some(window) = self.windows[i] {
+                if window.app_type == app_type {
+                    return Some((window.x, window.y, window.width, window.height));
+                }
+            }
+        }
+
+        let window = Self::default_window(app_type);
+        Some((window.x, window.y, window.width, window.height))
+    }
+
+    pub fn app_visible(&self, app_type: AppType) -> bool {
+        for i in 0..self.window_count {
+            if let Some(window) = self.windows[i] {
+                if window.app_type == app_type {
+                    return window.visible;
+                }
+            }
+        }
+
+        false
     }
 
     pub fn move_window(&mut self, idx: usize, x: usize, y: usize) {
