@@ -1,4 +1,4 @@
-use crate::gui::renderer::{Framebuffer, Rect};
+use crate::gui::renderer::{BackBuffer, Framebuffer, Rect};
 use crate::drivers::mouse;
 use crate::window_manager::{self, AppType};
 
@@ -317,7 +317,7 @@ fn redraw_full_screen(fb: Framebuffer, width: usize, height: usize) {
     draw_dock(fb, width, height);
 }
 
-fn save_cursor_area(fb: Framebuffer, width: usize, height: usize, x: i32, y: i32, buffer: &mut [u32; CURSOR_AREA]) {
+fn save_cursor_area(fb: Framebuffer, _width: usize, _height: usize, x: i32, y: i32, buffer: &mut [u32; CURSOR_AREA]) {
     let start_x = x.max(0) as usize;
     let start_y = y.max(0) as usize;
     for dy in 0..CURSOR_H {
@@ -392,10 +392,15 @@ fn handle_dock_click(mx: usize, my: usize, width: usize, height: usize) -> bool 
 
 pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize) -> ! {
     let front = Framebuffer::new(fb_addr, width, height, pitch);
+    let back_buffer = BackBuffer::init(width, height);
+    let scene = back_buffer.as_ref().map(|buffer| buffer.canvas()).unwrap_or(front);
     mouse::set_bounds(width, height);
     mouse::set_position((width / 2) as i32, (height / 2) as i32);
 
-    redraw_full_screen(front, width, height);
+    redraw_full_screen(scene, width, height);
+    if let Some(buffer) = back_buffer.as_ref() {
+        buffer.present_full(front);
+    }
 
     let (mut old_mouse_x, mut old_mouse_y) = mouse::get_position();
     let mut old_buttons = mouse::get_buttons();
@@ -453,7 +458,10 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
         }
 
         if full_redraw {
-            redraw_full_screen(front, width, height);
+            redraw_full_screen(scene, width, height);
+            if let Some(buffer) = back_buffer.as_ref() {
+                buffer.present_full(front);
+            }
             save_cursor_area(front, width, height, mouse_x, mouse_y, &mut cursor_background);
             draw_cursor(front, width, height, mouse_x, mouse_y);
         } else if cursor_moved {
