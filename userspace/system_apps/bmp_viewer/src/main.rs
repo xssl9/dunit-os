@@ -9,6 +9,8 @@ const READ_CHUNK_SIZE: usize = 4096;
 const PAD_X: u32 = 16;
 const PAD_Y: u32 = 4;
 const MAX_UPSCALE: usize = 12;
+const MIN_USEFUL_HEIGHT_NUM: u32 = 2;
+const MIN_USEFUL_HEIGHT_DEN: u32 = 3;
 
 static mut FILE_BUF: [u8; MAX_BMP_SIZE] = [0; MAX_BMP_SIZE];
 
@@ -133,10 +135,12 @@ fn render_plan(info: BmpInfo, fb: &libdunit::FbInfo) -> RenderPlan {
     } else {
         PAD_X
     };
-    let y0 = if has_cursor {
-        cursor.y.saturating_add(PAD_Y)
+    let prompt_y = cursor.y.saturating_add(PAD_Y);
+    let min_useful_h = fb.height.saturating_mul(MIN_USEFUL_HEIGHT_NUM) / MIN_USEFUL_HEIGHT_DEN;
+    let y0 = if has_cursor && fb.height.saturating_sub(prompt_y) >= min_useful_h {
+        prompt_y
     } else {
-        fb.height.saturating_sub(info.height as u32) / 2
+        PAD_Y
     };
     let max_w = fb.width.saturating_sub(x0 + PAD_X).max(1) as usize;
     let max_h = fb.height.saturating_sub(y0 + cursor.char_height + PAD_Y).max(1) as usize;
