@@ -29,6 +29,14 @@ struct BmpInfo {
     row_stride: usize,
 }
 
+#[derive(Clone, Copy)]
+struct DrawArea {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
 fn read_u16(data: &[u8], offset: usize) -> Option<u16> {
     Some(u16::from_le_bytes([*data.get(offset)?, *data.get(offset + 1)?]))
 }
@@ -93,18 +101,24 @@ fn parse_bmp(data: &[u8]) -> Option<BmpInfo> {
     })
 }
 
-fn draw_bmp(data: &[u8], info: BmpInfo, fb: &libdunit::FbInfo) {
+fn draw_bmp(data: &[u8], info: BmpInfo, fb: &libdunit::FbInfo) -> DrawArea {
     let image_w = info.width as u32 * SCALE;
     let image_h = info.height as u32 * SCALE;
     let x0 = fb.width.saturating_sub(image_w) / 2;
     let y0 = fb.height.saturating_sub(image_h) / 2;
     let bytes_per_pixel = (info.bpp / 8) as usize;
+    let area = DrawArea {
+        x: x0.saturating_sub(18),
+        y: y0.saturating_sub(18),
+        width: image_w + 36,
+        height: image_h + 36,
+    };
 
     libdunit::draw_rect(
-        x0.saturating_sub(18),
-        y0.saturating_sub(18),
-        image_w + 36,
-        image_h + 36,
+        area.x,
+        area.y,
+        area.width,
+        area.height,
         0x0008_1014,
     );
 
@@ -124,6 +138,14 @@ fn draw_bmp(data: &[u8], info: BmpInfo, fb: &libdunit::FbInfo) {
                 color,
             );
         }
+    }
+
+    area
+}
+
+fn wait_for_key() {
+    while libdunit::get_key().is_none() {
+        libdunit::sleep_ms(20);
     }
 }
 
@@ -198,7 +220,9 @@ pub extern "C" fn _start(
         libdunit::exit(6);
     }
 
-    draw_bmp(data, info, &fb);
-    libdunit::println("bmp_viewer: rendered BMP");
+    let area = draw_bmp(data, info, &fb);
+    libdunit::println("bmp_viewer: rendered BMP, press any key to close");
+    wait_for_key();
+    libdunit::draw_rect(area.x, area.y, area.width, area.height, 0x0000_0000);
     libdunit::exit(0);
 }
