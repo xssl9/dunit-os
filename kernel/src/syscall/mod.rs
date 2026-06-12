@@ -31,6 +31,7 @@ pub enum Syscall {
     GetCwd = 22,
     Chdir = 23,
     Yield = 24,
+    GetTerminalCursor = 25,
 }
 
 impl Syscall {
@@ -61,6 +62,7 @@ impl Syscall {
             22 => Some(Syscall::GetCwd),
             23 => Some(Syscall::Chdir),
             24 => Some(Syscall::Yield),
+            25 => Some(Syscall::GetTerminalCursor),
             _ => None,
         }
     }
@@ -93,6 +95,14 @@ pub struct FbInfo {
     pub width: u32,
     pub height: u32,
     pub pitch: u32,
+}
+
+#[repr(C)]
+pub struct TerminalCursorInfo {
+    pub x: u32,
+    pub y: u32,
+    pub char_width: u32,
+    pub char_height: u32,
 }
 
 const USER_SPACE_START: u64 = 0x0000_0000_0000_0000;
@@ -334,6 +344,7 @@ pub extern "C" fn syscall_handler(
         Syscall::GetCwd => sys_getcwd(arg0 as *mut u8, arg1 as usize),
         Syscall::Chdir => sys_chdir(arg0 as *const u8, arg1 as usize),
         Syscall::Yield => sys_yield(),
+        Syscall::GetTerminalCursor => sys_get_terminal_cursor(arg0 as *mut TerminalCursorInfo),
     }
 }
 
@@ -622,6 +633,28 @@ fn sys_get_framebuffer(info: *mut FbInfo) -> i64 {
         if let Err(error) = copy_buffer_to_user(info as *mut u8, bytes) {
             return error;
         }
+    }
+    0
+}
+
+fn sys_get_terminal_cursor(info: *mut TerminalCursorInfo) -> i64 {
+    let Some(cursor) = crate::terminal::get_cursor_info() else {
+        return EINVAL;
+    };
+    let user_info = TerminalCursorInfo {
+        x: cursor.x,
+        y: cursor.y,
+        char_width: cursor.char_width,
+        char_height: cursor.char_height,
+    };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            &user_info as *const TerminalCursorInfo as *const u8,
+            core::mem::size_of::<TerminalCursorInfo>(),
+        )
+    };
+    if let Err(error) = copy_buffer_to_user(info as *mut u8, bytes) {
+        return error;
     }
     0
 }

@@ -6,7 +6,8 @@ use core::panic::PanicInfo;
 const DEFAULT_PATH: &str = "/assets/logo.bmp";
 const MAX_BMP_SIZE: usize = 6 * 1024 * 1024;
 const READ_CHUNK_SIZE: usize = 4096;
-const SCALE: u32 = 1;
+const PAD_X: u32 = 16;
+const PAD_Y: u32 = 4;
 
 static mut FILE_BUF: [u8; MAX_BMP_SIZE] = [0; MAX_BMP_SIZE];
 
@@ -35,6 +36,15 @@ struct DrawArea {
     y: u32,
     width: u32,
     height: u32,
+}
+
+#[derive(Clone, Copy)]
+struct RenderPlan {
+    x: u32,
+    y: u32,
+    width: usize,
+    height: usize,
+    src_step: usize,
 }
 
 fn read_u16(data: &[u8], offset: usize) -> Option<u16> {
@@ -101,17 +111,55 @@ fn parse_bmp(data: &[u8]) -> Option<BmpInfo> {
     })
 }
 
+fn ceil_div(value: usize, by: usize) -> usize {
+    if by == 0 {
+        return value;
+    }
+    (value + by - 1) / by
+}
+
+fn render_plan(info: BmpInfo, fb: &libdunit::FbInfo) -> RenderPlan {
+    let mut cursor = libdunit::TerminalCursorInfo {
+        x: 0,
+        y: 0,
+        char_width: 8,
+        char_height: 16,
+    };
+    let has_cursor = libdunit::get_terminal_cursor(&mut cursor);
+    let x0 = if has_cursor {
+        cursor.char_width.saturating_mul(2)
+    } else {
+        PAD_X
+    };
+    let y0 = if has_cursor {
+        cursor.y.saturating_add(PAD_Y)
+    } else {
+        fb.height.saturating_sub(info.height as u32) / 2
+    };
+    let max_w = fb.width.saturating_sub(x0 + PAD_X).max(1) as usize;
+    let max_h = fb.height.saturating_sub(y0 + cursor.char_height + PAD_Y).max(1) as usize;
+    let src_step = ceil_div(info.width, max_w)
+        .max(ceil_div(info.height, max_h))
+        .max(1);
+    RenderPlan {
+        x: x0,
+        y: y0,
+        width: (info.width / src_step).max(1),
+        height: (info.height / src_step).max(1),
+        src_step,
+    }
+}
+
 fn draw_bmp(data: &[u8], info: BmpInfo, fb: &libdunit::FbInfo) -> DrawArea {
-    let image_w = info.width as u32 * SCALE;
-    let image_h = info.height as u32 * SCALE;
-    let x0 = fb.width.saturating_sub(image_w) / 2;
-    let y0 = fb.height.saturating_sub(image_h) / 2;
+    let plan = render_plan(info, fb);
+    let image_w = plan.width as u32;
+    let image_h = plan.height as u32;
     let bytes_per_pixel = (info.bpp / 8) as usize;
     let area = DrawArea {
-        x: x0.saturating_sub(18),
-        y: y0.saturating_sub(18),
-        width: image_w + 36,
-        height: image_h + 36,
+        x: plan.x.saturating_sub(2),
+        y: plan.y.saturating_sub(2),
+        width: image_w + 4,
+        height: image_h + 4,
     };
 
     libdunit::draw_rect(
@@ -122,21 +170,21 @@ fn draw_bmp(data: &[u8], info: BmpInfo, fb: &libdunit::FbInfo) -> DrawArea {
         0x0008_1014,
     );
 
-    for y in 0..info.height {
-        let file_y = if info.top_down { y } else { info.height - 1 - y };
-        for x in 0..info.width {
-            let offset = info.data_offset + file_y * info.row_stride + x * bytes_per_pixel;
+    for y in 0..plan.height {
+        let src_y = y * plan.src_step;
+        let file_y = if info.top_down {
+            src_y
+        } else {
+            info.height - 1 - src_y
+        };
+        for x in 0..plan.width {
+            let src_x = x * plan.src_step;
+            let offset = info.data_offset + file_y * info.row_stride + src_x * bytes_per_pixel;
             let b = data[offset] as u32;
             let g = data[offset + 1] as u32;
             let r = data[offset + 2] as u32;
             let color = (r << 16) | (g << 8) | b;
-            libdunit::draw_rect(
-                x0 + x as u32 * SCALE,
-                y0 + y as u32 * SCALE,
-                SCALE,
-                SCALE,
-                color,
-            );
+            libdunit::draw_pixel(plan.x + x as u32, plan.y + y as u32, color);
         }
     }
 
@@ -147,6 +195,27 @@ fn wait_for_key() {
     while libdunit::get_key().is_none() {
         libdunit::sleep_ms(20);
     }
+}
+
+fn is_no_wait_arg(arg: &str) -> bool {
+    arg.as_bytes() == b"--no-wait"
+}
+
+fn parse_args(argc: usize, argv: libdunit::RawArgv) -> (&'static str, bool) {
+    let mut path = DEFAULT_PATH;
+    let mut wait = true;
+    let mut index = 1usize;
+    while index < argc {
+        if let Some(arg) = unsafe { libdunit::argv_get(argc, argv, index) } {
+            if is_no_wait_arg(arg) {
+                wait = false;
+            } else {
+                path = arg;
+            }
+        }
+        index += 1;
+    }
+    (path, wait)
 }
 
 fn read_file(path: &str) -> Result<&'static [u8], i32> {
@@ -187,11 +256,7 @@ pub extern "C" fn _start(
     argv: libdunit::RawArgv,
     _envp: libdunit::RawEnvp,
 ) -> ! {
-    let path = if argc > 1 {
-        unsafe { libdunit::argv_get(argc, argv, 1) }.unwrap_or(DEFAULT_PATH)
-    } else {
-        DEFAULT_PATH
-    };
+    let (path, wait) = parse_args(argc, argv);
 
     let data = match read_file(path) {
         Ok(data) => data,
@@ -221,8 +286,12 @@ pub extern "C" fn _start(
     }
 
     let area = draw_bmp(data, info, &fb);
-    libdunit::println("bmp_viewer: rendered BMP, press any key to close");
-    wait_for_key();
-    libdunit::draw_rect(area.x, area.y, area.width, area.height, 0x0000_0000);
+    if wait {
+        libdunit::println("bmp_viewer: rendered BMP, press any key to close");
+        wait_for_key();
+        libdunit::draw_rect(area.x, area.y, area.width, area.height, 0x0000_0000);
+    } else {
+        libdunit::println("bmp_viewer: rendered BMP");
+    }
     libdunit::exit(0);
 }

@@ -19,6 +19,15 @@ pub struct FbConsole {
     stride: usize,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CursorInfo {
+    pub x: u32,
+    pub y: u32,
+    pub char_width: u32,
+    pub char_height: u32,
+}
+
 impl FbConsole {
     pub fn new(fb_addr: *mut u32, width: usize, height: usize, pitch: usize) -> Self {
         unsafe {
@@ -107,6 +116,15 @@ impl FbConsole {
             for i in 0..count {
                 ptr.add(i).write_volatile(color);
             }
+        }
+    }
+
+    pub fn cursor_info(&self) -> CursorInfo {
+        CursorInfo {
+            x: (self.cursor_x * self.char_width) as u32,
+            y: (self.cursor_y * self.char_height) as u32,
+            char_width: self.char_width as u32,
+            char_height: self.char_height as u32,
         }
     }
 
@@ -430,4 +448,8 @@ pub fn get_console() -> Option<&'static mut FbConsole> {
             None
         }
     }
+}
+
+pub fn get_cursor_info() -> Option<CursorInfo> {
+    get_console().map(|console| console.cursor_info())
 }

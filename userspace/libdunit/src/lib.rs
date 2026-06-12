@@ -19,6 +19,7 @@ pub const SYSCALL_DEBUG_LOG: usize = 20;
 pub const SYSCALL_GETCWD: usize = 22;
 pub const SYSCALL_CHDIR: usize = 23;
 pub const SYSCALL_YIELD: usize = 24;
+pub const SYSCALL_GET_TERMINAL_CURSOR: usize = 25;
 
 pub const EAGAIN: isize = -11;
 pub const EOPNOTSUPP: isize = -95;
@@ -39,6 +40,15 @@ pub struct FbInfo {
     pub width: u32,
     pub height: u32,
     pub pitch: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TerminalCursorInfo {
+    pub x: u32,
+    pub y: u32,
+    pub char_width: u32,
+    pub char_height: u32,
 }
 
 #[inline(always)]
@@ -306,6 +316,13 @@ unsafe fn cstr_at<'a>(ptr: *const u8) -> Option<&'a str> {
 
 pub fn get_framebuffer(info: &mut FbInfo) -> bool {
     syscall1(SYSCALL_GET_FRAMEBUFFER, info as *mut FbInfo as usize) == 0
+}
+
+pub fn get_terminal_cursor(info: &mut TerminalCursorInfo) -> bool {
+    syscall1(
+        SYSCALL_GET_TERMINAL_CURSOR,
+        info as *mut TerminalCursorInfo as usize,
+    ) == 0
 }
 
 pub fn draw_pixel(x: u32, y: u32, color: u32) {
