@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="image.png" width="400" alt="Dunit OS logo"/>
+  <img src="image.png" width="700" alt="Dunit OS logo"/>
 </p>
 
 # Dunit OS
