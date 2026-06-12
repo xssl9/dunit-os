@@ -18,8 +18,11 @@ pub struct FbConsole {
 
 const MAX_COLS: usize = 160;
 const SCROLLBACK_LINES: usize = 512;
+const DEFAULT_FG_COLOR: u32 = 0xFFFFFF;
 
 static mut SCROLLBACK: [[u8; MAX_COLS]; SCROLLBACK_LINES] = [[b' '; MAX_COLS]; SCROLLBACK_LINES];
+static mut SCROLLBACK_COLORS: [[u32; MAX_COLS]; SCROLLBACK_LINES] =
+    [[DEFAULT_FG_COLOR; MAX_COLS]; SCROLLBACK_LINES];
 static mut SCROLLBACK_LENS: [usize; SCROLLBACK_LINES] = [0; SCROLLBACK_LINES];
 static mut SCROLLBACK_LEN: usize = 1;
 static mut ACTIVE_LINE: usize = 0;
@@ -67,7 +70,7 @@ impl FbConsole {
             cursor_y: 0,
             char_width: 8,
             char_height: 16,
-            fg_color: 0xFFFFFF,
+            fg_color: DEFAULT_FG_COLOR,
             bg_color: 0x000000,
             stride,
         };
@@ -99,6 +102,7 @@ impl FbConsole {
                 SCROLLBACK_LENS[row] = 0;
                 for col in 0..MAX_COLS {
                     SCROLLBACK[row][col] = b' ';
+                    SCROLLBACK_COLORS[row][col] = DEFAULT_FG_COLOR;
                 }
             }
             SCROLLBACK_LEN = 1;
@@ -137,6 +141,7 @@ impl FbConsole {
             } else {
                 for row in 1..SCROLLBACK_LINES {
                     SCROLLBACK[row - 1] = SCROLLBACK[row];
+                    SCROLLBACK_COLORS[row - 1] = SCROLLBACK_COLORS[row];
                     SCROLLBACK_LENS[row - 1] = SCROLLBACK_LENS[row];
                 }
                 ACTIVE_LINE = SCROLLBACK_LINES - 1;
@@ -145,6 +150,7 @@ impl FbConsole {
             SCROLLBACK_LENS[ACTIVE_LINE] = 0;
             for col in 0..MAX_COLS {
                 SCROLLBACK[ACTIVE_LINE][col] = b' ';
+                SCROLLBACK_COLORS[ACTIVE_LINE][col] = self.fg_color;
             }
         }
     }
@@ -163,6 +169,7 @@ impl FbConsole {
             let col = self.cursor_x;
             if line < SCROLLBACK_LINES && col < MAX_COLS {
                 SCROLLBACK[line][col] = ch;
+                SCROLLBACK_COLORS[line][col] = self.fg_color;
                 if SCROLLBACK_LENS[line] <= col {
                     SCROLLBACK_LENS[line] = col + 1;
                 }
@@ -180,6 +187,7 @@ impl FbConsole {
             let col = self.cursor_x;
             if line < SCROLLBACK_LINES && col < MAX_COLS {
                 SCROLLBACK[line][col] = b' ';
+                SCROLLBACK_COLORS[line][col] = self.fg_color;
                 while SCROLLBACK_LENS[line] > 0
                     && SCROLLBACK[line][SCROLLBACK_LENS[line] - 1] == b' '
                 {
@@ -201,7 +209,12 @@ impl FbConsole {
                 }
                 let len = SCROLLBACK_LENS[history_row].min(max_chars);
                 for col in 0..len {
-                    self.draw_glyph(col, screen_row, SCROLLBACK[history_row][col]);
+                    self.draw_glyph_color(
+                        col,
+                        screen_row,
+                        SCROLLBACK[history_row][col],
+                        SCROLLBACK_COLORS[history_row][col],
+                    );
                 }
             }
 
@@ -256,6 +269,14 @@ impl FbConsole {
         }
     }
 
+    pub fn set_fg_color(&mut self, color: u32) {
+        self.fg_color = color;
+    }
+
+    pub fn reset_fg_color(&mut self) {
+        self.fg_color = DEFAULT_FG_COLOR;
+    }
+
     pub fn draw_char(&mut self, c: char) {
         if c == '\n' {
             self.cursor_x = 0;
@@ -303,6 +324,10 @@ impl FbConsole {
     }
 
     fn draw_glyph(&mut self, char_x: usize, char_y: usize, ch: u8) {
+        self.draw_glyph_color(char_x, char_y, ch, self.fg_color);
+    }
+
+    fn draw_glyph_color(&mut self, char_x: usize, char_y: usize, ch: u8, fg_color: u32) {
         let glyph = get_font_glyph(ch);
         let px_x = char_x * self.char_width;
         let px_y = char_y * self.char_height;
@@ -320,7 +345,7 @@ impl FbConsole {
                         break;
                     }
                     let bit = (glyph_row >> (7 - col)) & 1;
-                    let color = if bit == 1 { self.fg_color } else { self.bg_color };
+                    let color = if bit == 1 { fg_color } else { self.bg_color };
                     *self.fb.address.add(offset + col) = color;
                 }
             }

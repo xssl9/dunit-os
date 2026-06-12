@@ -4,6 +4,10 @@ use crate::{memory, process, terminal};
 
 const LOGO_WIDTH: usize = 80;
 const LOGO: &str = include_str!("../../assets/dufetch_logo.txt");
+const COLOR_DARK_GREEN: u32 = 0x2f7a4e;
+const COLOR_SAGE: u32 = 0x9bb59c;
+const COLOR_SOFT_WHITE: u32 = 0xfffdf1;
+const COLOR_MUTED: u32 = 0xa9bda8;
 
 struct ConsoleWriter<'a> {
     console: &'a mut terminal::FbConsole,
@@ -17,12 +21,39 @@ impl core::fmt::Write for ConsoleWriter<'_> {
 }
 
 fn write_padded(console: &mut terminal::FbConsole, text: &str, width: usize) {
-    console.write_str(text);
     let mut written = text.len();
+    for ch in text.chars() {
+        match ch {
+            '@' | '%' => console.set_fg_color(COLOR_SOFT_WHITE),
+            '*' | '+' => console.set_fg_color(COLOR_SAGE),
+            '=' | '-' | ':' | '.' => console.set_fg_color(COLOR_DARK_GREEN),
+            _ => console.set_fg_color(COLOR_MUTED),
+        }
+        let mut buf = [0u8; 4];
+        console.write_str(ch.encode_utf8(&mut buf));
+    }
     while written < width {
         console.write_str(" ");
         written += 1;
     }
+    console.reset_fg_color();
+}
+
+fn write_label(console: &mut terminal::FbConsole, label: &str) {
+    console.set_fg_color(COLOR_DARK_GREEN);
+    console.write_str(label);
+    console.reset_fg_color();
+}
+
+fn write_value(console: &mut terminal::FbConsole, value: &str) {
+    console.set_fg_color(COLOR_SOFT_WHITE);
+    console.write_str(value);
+    console.reset_fg_color();
+}
+
+fn write_info(console: &mut terminal::FbConsole, label: &str, value: &str) {
+    write_label(console, label);
+    write_value(console, value);
 }
 
 pub fn run(console: &mut terminal::FbConsole, cwd: &str) {
@@ -42,33 +73,57 @@ pub fn run(console: &mut terminal::FbConsole, cwd: &str) {
         console.write_str("  ");
 
         match idx {
-            4 => console.write_str("OS: Dunit OS"),
-            5 => console.write_str("Kernel: 1.0.0 Green Tea"),
-            6 => console.write_str("Arch: x86_64"),
-            7 => console.write_str("Mode: Terminal"),
-            8 => console.write_str("Shell: Dunit Terminal"),
-            9 => console.write_str("FS: MemFS over VFS"),
+            3 => {
+                console.set_fg_color(COLOR_SOFT_WHITE);
+                console.write_str("Dunit OS");
+                console.reset_fg_color();
+            }
+            4 => write_info(console, "OS: ", "Dunit OS"),
+            5 => write_info(console, "Kernel: ", "1.0.0 Green Tea"),
+            6 => write_info(console, "Arch: ", "x86_64"),
+            7 => write_info(console, "Mode: ", "Terminal"),
+            8 => write_info(console, "Shell: ", "Dunit Terminal"),
+            9 => write_info(console, "FS: ", "MemFS over VFS"),
             10 => {
-                let _ = write!(ConsoleWriter { console: &mut *console }, "PID: {}", pid);
+                write_label(console, "PID: ");
+                console.set_fg_color(COLOR_SOFT_WHITE);
+                let _ = write!(ConsoleWriter { console: &mut *console }, "{}", pid);
+                console.reset_fg_color();
             }
             11 => {
-                console.write_str("CWD: ");
-                console.write_str(cwd);
+                write_label(console, "CWD: ");
+                write_value(console, cwd);
             }
             12 => {
                 if memory_total_kib > 0 {
                     let used_kib = memory_total_kib.saturating_sub(memory_available_kib);
+                    write_label(console, "Memory: ");
+                    console.set_fg_color(COLOR_SOFT_WHITE);
                     let _ = write!(
                         ConsoleWriter { console: &mut *console },
-                        "Memory: {} KiB / {} KiB",
+                        "{} KiB / {} KiB",
                         used_kib,
                         memory_total_kib
                     );
+                    console.reset_fg_color();
                 } else {
-                    console.write_str("Memory: available");
+                    write_info(console, "Memory: ", "available");
                 }
             }
-            13 => console.write_str("Display: Framebuffer"),
+            13 => write_info(console, "Display: ", "Framebuffer"),
+            15 => {
+                console.set_fg_color(COLOR_DARK_GREEN);
+                console.write_str("green");
+                console.reset_fg_color();
+                console.write_str("  ");
+                console.set_fg_color(COLOR_SAGE);
+                console.write_str("sage");
+                console.reset_fg_color();
+                console.write_str("  ");
+                console.set_fg_color(COLOR_SOFT_WHITE);
+                console.write_str("white");
+                console.reset_fg_color();
+            }
             _ => {}
         }
 
