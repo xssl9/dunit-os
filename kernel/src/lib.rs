@@ -1527,6 +1527,7 @@ pub extern "C" fn kernel_main(
         let fb_addr = fb.address as *mut u32;
         let width = fb.width as usize;
         let height = fb.height as usize;
+        let pitch = fb.pitch as usize;
         
         serial_write("[GUI-006] Framebuffer address obtained\r\n");
         serial_write("[GUI-007] Starting UI rendering\r\n");
@@ -1696,7 +1697,7 @@ pub extern "C" fn kernel_main(
         
         screen_log("[ OK ] Starting built-in GUI shell", false);
         serial_write("[GUI] Starting built-in desktop loop\r\n");
-        ui_loop::run_ui_loop(fb_addr, width, height);
+        ui_loop::run_ui_loop(fb_addr, width, height, pitch);
     } else {
         serial_write("[GRAPHICS] No framebuffer available\r\n");
         serial_write("[GRAPHICS] Running in headless mode\r\n");

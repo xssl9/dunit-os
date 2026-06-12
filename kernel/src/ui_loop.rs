@@ -1,3 +1,4 @@
+use crate::gui::renderer::{Framebuffer, Rect};
 use crate::drivers::mouse;
 use crate::window_manager::{self, AppType};
 
@@ -17,32 +18,16 @@ const CURSOR_W: usize = 16;
 const CURSOR_H: usize = 22;
 const CURSOR_AREA: usize = CURSOR_W * CURSOR_H;
 
-fn put_pixel(fb: *mut u32, width: usize, height: usize, x: usize, y: usize, color: u32) {
-    if x < width && y < height {
-        unsafe {
-            core::ptr::write_volatile(fb.add(y * width + x), color);
-        }
-    }
+fn put_pixel(fb: Framebuffer, _width: usize, _height: usize, x: usize, y: usize, color: u32) {
+    fb.put_pixel(x, y, color);
 }
 
-fn draw_rect(fb: *mut u32, width: usize, height: usize, x: usize, y: usize, w: usize, h: usize, color: u32) {
-    let x_end = x.saturating_add(w).min(width);
-    let y_end = y.saturating_add(h).min(height);
-    for py in y..y_end {
-        for px in x..x_end {
-            put_pixel(fb, width, height, px, py, color);
-        }
-    }
+fn draw_rect(fb: Framebuffer, _width: usize, _height: usize, x: usize, y: usize, w: usize, h: usize, color: u32) {
+    fb.fill_rect(Rect::new(x, y, w, h), color);
 }
 
-fn draw_rect_border(fb: *mut u32, width: usize, height: usize, x: usize, y: usize, w: usize, h: usize, color: u32) {
-    if w == 0 || h == 0 {
-        return;
-    }
-    draw_rect(fb, width, height, x, y, w, 1, color);
-    draw_rect(fb, width, height, x, y + h.saturating_sub(1), w, 1, color);
-    draw_rect(fb, width, height, x, y, 1, h, color);
-    draw_rect(fb, width, height, x + w.saturating_sub(1), y, 1, h, color);
+fn draw_rect_border(fb: Framebuffer, _width: usize, _height: usize, x: usize, y: usize, w: usize, h: usize, color: u32) {
+    fb.stroke_rect(Rect::new(x, y, w, h), color);
 }
 
 fn glyph(ch: u8) -> [u8; 5] {
@@ -118,7 +103,7 @@ fn glyph(ch: u8) -> [u8; 5] {
     }
 }
 
-fn draw_char(fb: *mut u32, width: usize, height: usize, x: usize, y: usize, ch: u8, color: u32) {
+fn draw_char(fb: Framebuffer, width: usize, height: usize, x: usize, y: usize, ch: u8, color: u32) {
     let font = glyph(ch);
     for dx in 0..5 {
         let col = font[dx];
@@ -130,7 +115,7 @@ fn draw_char(fb: *mut u32, width: usize, height: usize, x: usize, y: usize, ch: 
     }
 }
 
-fn draw_text(fb: *mut u32, width: usize, height: usize, x: usize, y: usize, text: &str, color: u32) {
+fn draw_text(fb: Framebuffer, width: usize, height: usize, x: usize, y: usize, text: &str, color: u32) {
     for (i, ch) in text.bytes().enumerate() {
         draw_char(fb, width, height, x + i * 6, y, ch, color);
     }
@@ -190,7 +175,7 @@ fn scene_pixel(x: usize, y: usize, width: usize, height: usize) -> u32 {
     }
 }
 
-fn draw_icon_symbol(fb: *mut u32, width: usize, height: usize, x: usize, y: usize, app_type: AppType) {
+fn draw_icon_symbol(fb: Framebuffer, width: usize, height: usize, x: usize, y: usize, app_type: AppType) {
     let cx = x + 24;
     let cy = y + 24;
     match app_type {
@@ -218,7 +203,7 @@ fn draw_icon_symbol(fb: *mut u32, width: usize, height: usize, x: usize, y: usiz
     }
 }
 
-fn draw_dock(fb: *mut u32, width: usize, height: usize) {
+fn draw_dock(fb: Framebuffer, width: usize, height: usize) {
     let (dock_x, dock_y, dock_width, icon_size, icon_spacing) = dock_layout(width, height);
     draw_rect(fb, width, height, dock_x, dock_y, dock_width, 68, PANEL);
     draw_rect_border(fb, width, height, dock_x, dock_y, dock_width, 68, 0x38535d);
@@ -242,7 +227,7 @@ fn draw_dock(fb: *mut u32, width: usize, height: usize) {
     }
 }
 
-fn draw_window(fb: *mut u32, width: usize, height: usize, window: &window_manager::Window) {
+fn draw_window(fb: Framebuffer, width: usize, height: usize, window: &window_manager::Window) {
     draw_rect(fb, width, height, window.x, window.y, window.width, window.height, 0x18282f);
     draw_rect(fb, width, height, window.x, window.y, window.width, 32, PANEL);
     draw_rect_border(fb, width, height, window.x, window.y, window.width, window.height, ACCENT);
@@ -287,7 +272,7 @@ fn draw_window(fb: *mut u32, width: usize, height: usize, window: &window_manage
     }
 }
 
-fn draw_windows(fb: *mut u32, width: usize, height: usize) {
+fn draw_windows(fb: Framebuffer, width: usize, height: usize) {
     if let Some(wm) = window_manager::get_wm() {
         for window in wm.get_windows() {
             if window.visible {
@@ -297,7 +282,7 @@ fn draw_windows(fb: *mut u32, width: usize, height: usize) {
     }
 }
 
-fn redraw_full_screen(fb: *mut u32, width: usize, height: usize) {
+fn redraw_full_screen(fb: Framebuffer, width: usize, height: usize) {
     for y in 0..height {
         for x in 0..width {
             put_pixel(fb, width, height, x, y, scene_pixel(x, y, width, height));
@@ -332,7 +317,7 @@ fn redraw_full_screen(fb: *mut u32, width: usize, height: usize) {
     draw_dock(fb, width, height);
 }
 
-fn save_cursor_area(fb: *mut u32, width: usize, height: usize, x: i32, y: i32, buffer: &mut [u32; CURSOR_AREA]) {
+fn save_cursor_area(fb: Framebuffer, width: usize, height: usize, x: i32, y: i32, buffer: &mut [u32; CURSOR_AREA]) {
     let start_x = x.max(0) as usize;
     let start_y = y.max(0) as usize;
     for dy in 0..CURSOR_H {
@@ -340,16 +325,12 @@ fn save_cursor_area(fb: *mut u32, width: usize, height: usize, x: i32, y: i32, b
             let px = start_x + dx;
             let py = start_y + dy;
             let index = dy * CURSOR_W + dx;
-            buffer[index] = if px < width && py < height {
-                unsafe { core::ptr::read_volatile(fb.add(py * width + px)) }
-            } else {
-                0
-            };
+            buffer[index] = fb.read_pixel(px, py);
         }
     }
 }
 
-fn restore_cursor_area(fb: *mut u32, width: usize, height: usize, x: i32, y: i32, buffer: &[u32; CURSOR_AREA]) {
+fn restore_cursor_area(fb: Framebuffer, width: usize, height: usize, x: i32, y: i32, buffer: &[u32; CURSOR_AREA]) {
     let start_x = x.max(0) as usize;
     let start_y = y.max(0) as usize;
     for dy in 0..CURSOR_H {
@@ -364,7 +345,7 @@ fn restore_cursor_area(fb: *mut u32, width: usize, height: usize, x: i32, y: i32
     }
 }
 
-fn draw_cursor(fb: *mut u32, width: usize, height: usize, x: i32, y: i32) {
+fn draw_cursor(fb: Framebuffer, width: usize, height: usize, x: i32, y: i32) {
     let x = x.max(0) as usize;
     let y = y.max(0) as usize;
     for dy in 0..18 {
@@ -409,18 +390,19 @@ fn handle_dock_click(mx: usize, my: usize, width: usize, height: usize) -> bool 
     false
 }
 
-pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize) -> ! {
+pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize) -> ! {
+    let front = Framebuffer::new(fb_addr, width, height, pitch);
     mouse::set_bounds(width, height);
     mouse::set_position((width / 2) as i32, (height / 2) as i32);
 
-    redraw_full_screen(fb_addr, width, height);
+    redraw_full_screen(front, width, height);
 
     let (mut old_mouse_x, mut old_mouse_y) = mouse::get_position();
     let mut old_buttons = mouse::get_buttons();
     let mut dragging: Option<(usize, usize, usize)> = None;
     let mut cursor_background = [0u32; CURSOR_AREA];
-    save_cursor_area(fb_addr, width, height, old_mouse_x, old_mouse_y, &mut cursor_background);
-    draw_cursor(fb_addr, width, height, old_mouse_x, old_mouse_y);
+    save_cursor_area(front, width, height, old_mouse_x, old_mouse_y, &mut cursor_background);
+    draw_cursor(front, width, height, old_mouse_x, old_mouse_y);
 
     loop {
         mouse::update();
@@ -471,13 +453,13 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize) -> ! {
         }
 
         if full_redraw {
-            redraw_full_screen(fb_addr, width, height);
-            save_cursor_area(fb_addr, width, height, mouse_x, mouse_y, &mut cursor_background);
-            draw_cursor(fb_addr, width, height, mouse_x, mouse_y);
+            redraw_full_screen(front, width, height);
+            save_cursor_area(front, width, height, mouse_x, mouse_y, &mut cursor_background);
+            draw_cursor(front, width, height, mouse_x, mouse_y);
         } else if cursor_moved {
-            restore_cursor_area(fb_addr, width, height, old_mouse_x, old_mouse_y, &cursor_background);
-            save_cursor_area(fb_addr, width, height, mouse_x, mouse_y, &mut cursor_background);
-            draw_cursor(fb_addr, width, height, mouse_x, mouse_y);
+            restore_cursor_area(front, width, height, old_mouse_x, old_mouse_y, &cursor_background);
+            save_cursor_area(front, width, height, mouse_x, mouse_y, &mut cursor_background);
+            draw_cursor(front, width, height, mouse_x, mouse_y);
         }
 
         old_mouse_x = mouse_x;
