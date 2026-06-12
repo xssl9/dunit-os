@@ -1079,7 +1079,7 @@ pub extern "C" fn kernel_main(
         serial_write("[WM] window_manager::init() returned\r\n");
         screen_log("[ OK ] Window manager: 5 applications registered", false);
         screen_log("[ OK ] Compositor: Double buffering enabled", false);
-        screen_log("[ OK ] Desktop theme: Solarized Dark loaded", false);
+        screen_log("[ OK ] Desktop theme: Green Tea Dark loaded", false);
         screen_log("[ OK ] Window manager ready", false);
     } else {
         screen_log("[ .. ] Terminal mode: Minimal initialization", false);
