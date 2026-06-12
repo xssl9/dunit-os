@@ -1,4 +1,4 @@
-use crate::gui::renderer::{BackBuffer, Framebuffer, Rect};
+use crate::gui::renderer::{BackBuffer, DamageTracker, Framebuffer, Rect};
 use crate::drivers::mouse;
 use crate::window_manager::{self, AppType};
 
@@ -361,6 +361,10 @@ fn draw_cursor(fb: Framebuffer, width: usize, height: usize, x: i32, y: i32) {
     draw_rect(fb, width, height, x + 7, y + 14, 4, 4, ACCENT);
 }
 
+fn cursor_rect(x: i32, y: i32) -> Rect {
+    Rect::new(x.max(0) as usize, y.max(0) as usize, CURSOR_W, CURSOR_H)
+}
+
 fn handle_dock_click(mx: usize, my: usize, width: usize, height: usize) -> bool {
     let (dock_x, dock_y, _dock_width, icon_size, icon_spacing) = dock_layout(width, height);
     if my < dock_y || my >= dock_y + 68 {
@@ -406,7 +410,10 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
     let mut old_buttons = mouse::get_buttons();
     let mut dragging: Option<(usize, usize, usize)> = None;
     let mut cursor_background = [0u32; CURSOR_AREA];
-    save_cursor_area(front, width, height, old_mouse_x, old_mouse_y, &mut cursor_background);
+    let mut damage = DamageTracker::new();
+    if back_buffer.is_none() {
+        save_cursor_area(front, width, height, old_mouse_x, old_mouse_y, &mut cursor_background);
+    }
     draw_cursor(front, width, height, old_mouse_x, old_mouse_y);
 
     loop {
@@ -461,13 +468,24 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
             redraw_full_screen(scene, width, height);
             if let Some(buffer) = back_buffer.as_ref() {
                 buffer.present_full(front);
+            } else {
+                save_cursor_area(front, width, height, mouse_x, mouse_y, &mut cursor_background);
             }
-            save_cursor_area(front, width, height, mouse_x, mouse_y, &mut cursor_background);
             draw_cursor(front, width, height, mouse_x, mouse_y);
         } else if cursor_moved {
-            restore_cursor_area(front, width, height, old_mouse_x, old_mouse_y, &cursor_background);
-            save_cursor_area(front, width, height, mouse_x, mouse_y, &mut cursor_background);
-            draw_cursor(front, width, height, mouse_x, mouse_y);
+            if let Some(buffer) = back_buffer.as_ref() {
+                damage.clear();
+                damage.mark(cursor_rect(old_mouse_x, old_mouse_y));
+                damage.mark(cursor_rect(mouse_x, mouse_y));
+                for rect in damage.rects() {
+                    buffer.present_rect(front, *rect);
+                }
+                draw_cursor(front, width, height, mouse_x, mouse_y);
+            } else {
+                restore_cursor_area(front, width, height, old_mouse_x, old_mouse_y, &cursor_background);
+                save_cursor_area(front, width, height, mouse_x, mouse_y, &mut cursor_background);
+                draw_cursor(front, width, height, mouse_x, mouse_y);
+            }
         }
 
         old_mouse_x = mouse_x;
