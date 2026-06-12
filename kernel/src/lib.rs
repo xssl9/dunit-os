@@ -13,6 +13,7 @@ pub mod dpkg;
 pub mod drivers;
 pub mod elf;
 pub mod fs;
+pub mod gui;
 pub mod hal;
 pub mod initrd;
 pub mod interrupts;
