@@ -1,0 +1,11 @@
+[package]
+name = "yield_test"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "yield_test"
+path = "src/main.rs"
+
+[dependencies]
+libdunit = { path = "../../libdunit" }

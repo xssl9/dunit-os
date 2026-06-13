@@ -390,6 +390,14 @@ unsafe fn write_cr3(cr3: usize) {
     core::arch::asm!("mov cr3, {}", in(reg) cr3, options(nostack, preserves_flags));
 }
 
+pub unsafe fn active_root_frame() -> usize {
+    read_cr3()
+}
+
+pub unsafe fn switch_to_root_frame(root_frame: usize) {
+    write_cr3(root_frame);
+}
+
 pub struct VirtualMemoryManager {
     page_table: &'static mut PageTable,
 }

@@ -1,0 +1,11 @@
+[package]
+name = "ipc_parent"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libdunit = { path = "../../libdunit" }
+
+[[bin]]
+name = "ipc_parent"
+path = "src/main.rs"

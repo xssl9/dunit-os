@@ -15,6 +15,14 @@ static IMAGE_DEMO_BYTES: &[u8] = include_bytes!("../../../build/userspace/image_
 static BMP_VIEWER_BYTES: &[u8] = include_bytes!("../../../build/userspace/bmp_viewer");
 static SCHEDULER_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/scheduler_test");
 static SPAWN_READY_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/spawn_ready_test");
+static YIELD_CHILD_BYTES: &[u8] = include_bytes!("../../../build/userspace/yield_child");
+static YIELD_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/yield_test");
+static RESUMABLE_CHILD_BYTES: &[u8] = include_bytes!("../../../build/userspace/resumable_child");
+static RESUMABLE_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/resumable_test");
+static IPC_CHILD_BYTES: &[u8] = include_bytes!("../../../build/userspace/ipc_child");
+static IPC_PARENT_BYTES: &[u8] = include_bytes!("../../../build/userspace/ipc_parent");
+static GUI_PING_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_ping");
+static GUI_TERMINAL_STUB_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_terminal_stub");
 static STDIN_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/stdin_test");
 static DTOP_BYTES: &[u8] = include_bytes!("../../../build/userspace/dtop");
 static FAULT_PF_BYTES: &[u8] = include_bytes!("../../../build/userspace/fault_pf");
@@ -580,6 +588,38 @@ pub fn init() -> Result<()> {
         let mut spawn_ready_test = Vec::new();
         spawn_ready_test.extend_from_slice(SPAWN_READY_TEST_BYTES);
         ROOT_MEMFS.add_file("/app/spawn_ready_test", spawn_ready_test);
+
+        let mut yield_child = Vec::new();
+        yield_child.extend_from_slice(YIELD_CHILD_BYTES);
+        ROOT_MEMFS.add_file("/app/yield_child", yield_child);
+
+        let mut yield_test = Vec::new();
+        yield_test.extend_from_slice(YIELD_TEST_BYTES);
+        ROOT_MEMFS.add_file("/app/yield_test", yield_test);
+
+        let mut resumable_child = Vec::new();
+        resumable_child.extend_from_slice(RESUMABLE_CHILD_BYTES);
+        ROOT_MEMFS.add_file("/app/resumable_child", resumable_child);
+
+        let mut resumable_test = Vec::new();
+        resumable_test.extend_from_slice(RESUMABLE_TEST_BYTES);
+        ROOT_MEMFS.add_file("/app/resumable_test", resumable_test);
+
+        let mut ipc_child = Vec::new();
+        ipc_child.extend_from_slice(IPC_CHILD_BYTES);
+        ROOT_MEMFS.add_file("/app/ipc_child", ipc_child);
+
+        let mut ipc_parent = Vec::new();
+        ipc_parent.extend_from_slice(IPC_PARENT_BYTES);
+        ROOT_MEMFS.add_file("/app/ipc_parent", ipc_parent);
+
+        let mut gui_ping = Vec::new();
+        gui_ping.extend_from_slice(GUI_PING_BYTES);
+        ROOT_MEMFS.add_file("/app/gui_ping", gui_ping);
+
+        let mut gui_terminal_stub = Vec::new();
+        gui_terminal_stub.extend_from_slice(GUI_TERMINAL_STUB_BYTES);
+        ROOT_MEMFS.add_file("/app/gui_terminal_stub", gui_terminal_stub);
 
         let mut stdin_test = Vec::new();
         stdin_test.extend_from_slice(STDIN_TEST_BYTES);

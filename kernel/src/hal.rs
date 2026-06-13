@@ -16,8 +16,13 @@ extern "C" {
     pub fn hal_inl(port: u16) -> u32;
     pub fn syscall_set_kernel_stack_top(stack_top: u64);
     pub fn syscall_reset_kernel_stack();
+    pub fn syscall_get_escape_kernel_rsp() -> u64;
+    pub fn syscall_get_escape_active() -> u64;
+    pub fn syscall_restore_escape_state(kernel_rsp: u64, active: u64);
+    pub fn syscall_capture_user_context(context: *mut crate::process::CpuContext, return_rax: u64);
     pub fn run_user_syscall_smoke(entry: u64, stack_top: u64);
     pub fn run_user_process(entry: u64, stack_top: u64, argc: u64, argv: u64, envp: u64);
+    pub fn run_user_context(context: *const crate::process::CpuContext);
 }
 
 #[no_mangle]

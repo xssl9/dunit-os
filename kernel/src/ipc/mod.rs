@@ -2,6 +2,9 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use crate::process::ProcessId;
 
+pub const MAX_MESSAGE_SIZE: usize = 256;
+pub const MAX_QUEUE_MESSAGES: usize = 16;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SharedMemoryId(pub u64);
 
@@ -46,7 +49,8 @@ pub enum MessageType {
 pub struct Message {
     pub sender: ProcessId,
     pub msg_type: MessageType,
-    pub data: [u8; 256],
+    pub len: usize,
+    pub data: [u8; MAX_MESSAGE_SIZE],
 }
 
 impl Message {
@@ -54,16 +58,27 @@ impl Message {
         Self {
             sender,
             msg_type,
-            data: [0; 256],
+            len: 0,
+            data: [0; MAX_MESSAGE_SIZE],
         }
     }
 
     pub fn with_data(sender: ProcessId, msg_type: MessageType, data: &[u8]) -> Self {
         let mut msg = Self::new(sender, msg_type);
-        let len = data.len().min(256);
+        let len = data.len().min(MAX_MESSAGE_SIZE);
         msg.data[..len].copy_from_slice(&data[..len]);
+        msg.len = len;
         msg
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IpcError {
+    InvalidTarget,
+    MessageTooLarge,
+    QueueFull,
+    NoMessage,
+    Unavailable,
 }
 
 pub struct IpcManager {
@@ -130,8 +145,14 @@ impl IpcManager {
         self.shared_regions.get(&id)
     }
 
-    pub fn send_message(&mut self, target: ProcessId, msg: Message) -> Result<(), ()> {
+    pub fn send_message(&mut self, target: ProcessId, msg: Message) -> Result<(), IpcError> {
+        if !crate::process::process_exists(target) {
+            return Err(IpcError::InvalidTarget);
+        }
         let queue = self.message_queues.entry(target).or_insert_with(Vec::new);
+        if queue.len() >= MAX_QUEUE_MESSAGES {
+            return Err(IpcError::QueueFull);
+        }
         queue.push(msg);
         Ok(())
     }
@@ -160,10 +181,40 @@ impl IpcManager {
 static mut IPC_MANAGER_INSTANCE: Option<IpcManager> = None;
 
 pub fn init() {
+    unsafe {
+        IPC_MANAGER_INSTANCE = Some(IpcManager::new());
+    }
+    crate::memory::serial_write("[IPC] manager ready: message-queue smoke only\r\n");
     // Временно пропускаем инициализацию IPC
     // TODO: инициализировать после настройки аллокатора
 }
 
 pub fn get_ipc_manager() -> Option<&'static mut IpcManager> {
     unsafe { IPC_MANAGER_INSTANCE.as_mut() }
+}
+
+pub fn send_bytes(sender: ProcessId, target: ProcessId, data: &[u8]) -> Result<(), IpcError> {
+    if data.is_empty() || data.len() > MAX_MESSAGE_SIZE {
+        return Err(IpcError::MessageTooLarge);
+    }
+    let manager = get_ipc_manager().ok_or(IpcError::Unavailable)?;
+    manager.send_message(
+        target,
+        Message::with_data(sender, MessageType::WindowClose { window_id: 0 }, data),
+    )
+}
+
+pub fn recv_bytes(pid: ProcessId, out: &mut [u8]) -> Result<usize, IpcError> {
+    let manager = get_ipc_manager().ok_or(IpcError::Unavailable)?;
+    let queue = manager.message_queues.get_mut(&pid).ok_or(IpcError::NoMessage)?;
+    if queue.is_empty() {
+        return Err(IpcError::NoMessage);
+    }
+    let len = queue[0].len;
+    if out.len() < len {
+        return Err(IpcError::MessageTooLarge);
+    }
+    let message = queue.remove(0);
+    out[..len].copy_from_slice(&message.data[..len]);
+    Ok(len)
 }

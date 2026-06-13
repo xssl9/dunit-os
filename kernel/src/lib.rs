@@ -1575,7 +1575,7 @@ pub extern "C" fn kernel_main(
         serial_write("[DE] Desktop environment ready (PID: 4)\r\n\r\n");
         
         serial_write("[APP] Starting default applications...\r\n");
-        serial_write("[APP] Terminal emulator started (PID: 5)\r\n");
+        serial_write("[APP] GUI shell ready for runtime bridge launch\r\n");
         serial_write("[APP] File manager started (PID: 6)\r\n");
         serial_write("[APP] System monitor started (PID: 7)\r\n\r\n");
         

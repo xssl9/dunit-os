@@ -31,7 +31,7 @@ impl Scheduler {
         }
     }
 
-    pub fn pick_next(&mut self) -> Option<ProcessId> {
+    pub fn pick_next_excluding(&mut self, excluded: Option<ProcessId>) -> Option<ProcessId> {
         if self.ready_queue.is_empty() {
             return None;
         }
@@ -44,6 +44,11 @@ impl Scheduler {
             }
 
             let pid = self.ready_queue[self.cursor];
+            if Some(pid) == excluded {
+                self.ready_queue.remove(self.cursor);
+                checked += 1;
+                continue;
+            }
             if super::is_pid_runnable(pid) {
                 self.cursor = (self.cursor + 1) % self.ready_queue.len();
                 return Some(pid);
@@ -54,6 +59,10 @@ impl Scheduler {
         }
 
         None
+    }
+
+    pub fn pick_next(&mut self) -> Option<ProcessId> {
+        self.pick_next_excluding(None)
     }
 
     pub fn len(&self) -> usize {
@@ -91,6 +100,10 @@ pub fn remove(pid: ProcessId) {
 
 pub fn pick_next_candidate() -> Option<ProcessId> {
     with_scheduler_mut(|scheduler| scheduler.pick_next()).flatten()
+}
+
+pub fn pick_next_candidate_excluding(pid: ProcessId) -> Option<ProcessId> {
+    with_scheduler_mut(|scheduler| scheduler.pick_next_excluding(Some(pid))).flatten()
 }
 
 pub fn ready_len() -> usize {

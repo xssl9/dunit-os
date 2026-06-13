@@ -1,0 +1,11 @@
+[package]
+name = "gui_terminal_stub"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libdunit = { path = "../../libdunit" }
+
+[[bin]]
+name = "gui_terminal_stub"
+path = "src/main.rs"

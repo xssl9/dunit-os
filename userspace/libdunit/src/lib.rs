@@ -5,6 +5,8 @@ pub const SYSCALL_READ: usize = 3;
 pub const SYSCALL_WRITE: usize = 4;
 pub const SYSCALL_OPEN: usize = 5;
 pub const SYSCALL_CLOSE: usize = 6;
+pub const SYSCALL_SEND_MESSAGE: usize = 8;
+pub const SYSCALL_RECEIVE_MESSAGE: usize = 9;
 pub const SYSCALL_GET_FRAMEBUFFER: usize = 10;
 pub const SYSCALL_DRAW_PIXEL: usize = 11;
 pub const SYSCALL_DRAW_RECT: usize = 12;
@@ -24,6 +26,17 @@ pub const SYSCALL_GET_TERMINAL_CURSOR: usize = 25;
 pub const EAGAIN: isize = -11;
 pub const EOPNOTSUPP: isize = -95;
 
+pub const GUI_SHELL_PID: u32 = 1;
+pub const GUI_MSG_MAGIC: u32 = 0x3149_5547; // GUI1
+pub const GUI_MSG_VERSION: u16 = 1;
+pub const GUI_MSG_CREATE_WINDOW: u16 = 1;
+pub const GUI_MSG_DRAW_TEXT: u16 = 2;
+pub const GUI_MSG_SET_STATUS: u16 = 3;
+pub const GUI_MSG_EXIT: u16 = 4;
+pub const GUI_MSG_KEY_EVENT: u16 = 101;
+pub const GUI_MSG_CLOSE_EVENT: u16 = 102;
+pub const GUI_MSG_DATA_CAP: usize = 160;
+
 pub const OPEN_READ: usize = 1 << 0;
 pub const OPEN_WRITE: usize = 1 << 1;
 pub const OPEN_CREATE: usize = 1 << 2;
@@ -33,6 +46,57 @@ pub const OPEN_READ_WRITE: usize = OPEN_READ | OPEN_WRITE;
 
 pub type RawArgv = *const *const u8;
 pub type RawEnvp = *const *const u8;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GuiMessage {
+    pub magic: u32,
+    pub version: u16,
+    pub kind: u16,
+    pub window_id: u32,
+    pub a: i32,
+    pub b: i32,
+    pub c: u32,
+    pub len: u32,
+    pub data: [u8; GUI_MSG_DATA_CAP],
+}
+
+impl GuiMessage {
+    pub const fn new(kind: u16) -> Self {
+        Self {
+            magic: GUI_MSG_MAGIC,
+            version: GUI_MSG_VERSION,
+            kind,
+            window_id: 0,
+            a: 0,
+            b: 0,
+            c: 0,
+            len: 0,
+            data: [0; GUI_MSG_DATA_CAP],
+        }
+    }
+
+    pub fn set_data(&mut self, data: &[u8]) {
+        let len = if data.len() > GUI_MSG_DATA_CAP { GUI_MSG_DATA_CAP } else { data.len() };
+        let mut index = 0usize;
+        while index < len {
+            self.data[index] = data[index];
+            index += 1;
+        }
+        self.len = len as u32;
+    }
+
+    pub fn data(&self) -> &[u8] {
+        let len = (self.len as usize).min(GUI_MSG_DATA_CAP);
+        &self.data[..len]
+    }
+
+    pub fn valid(&self) -> bool {
+        self.magic == GUI_MSG_MAGIC
+            && self.version == GUI_MSG_VERSION
+            && (self.len as usize) <= GUI_MSG_DATA_CAP
+    }
+}
 
 #[repr(C)]
 pub struct FbInfo {
@@ -363,6 +427,65 @@ pub fn spawn(path: &str) -> isize {
 
 pub fn wait(pid: u32, status: &mut WaitStatus) -> isize {
     syscall2(SYSCALL_WAIT_PROCESS, pid as usize, status as *mut WaitStatus as usize)
+}
+
+pub fn ipc_send(pid: u32, data: &[u8]) -> isize {
+    syscall3(SYSCALL_SEND_MESSAGE, pid as usize, data.as_ptr() as usize, data.len())
+}
+
+pub fn ipc_recv(buf: &mut [u8]) -> isize {
+    syscall2(SYSCALL_RECEIVE_MESSAGE, buf.as_mut_ptr() as usize, buf.len())
+}
+
+pub fn gui_send(message: &GuiMessage) -> isize {
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            message as *const GuiMessage as *const u8,
+            core::mem::size_of::<GuiMessage>(),
+        )
+    };
+    ipc_send(GUI_SHELL_PID, bytes)
+}
+
+pub fn gui_create_window(window_id: u32, title: &str, width: u32, height: u32) -> isize {
+    let mut message = GuiMessage::new(GUI_MSG_CREATE_WINDOW);
+    message.window_id = window_id;
+    message.a = width as i32;
+    message.b = height as i32;
+    message.set_data(title.as_bytes());
+    gui_send(&message)
+}
+
+pub fn gui_draw_text(window_id: u32, x: i32, y: i32, text: &str) -> isize {
+    let mut message = GuiMessage::new(GUI_MSG_DRAW_TEXT);
+    message.window_id = window_id;
+    message.a = x;
+    message.b = y;
+    message.set_data(text.as_bytes());
+    gui_send(&message)
+}
+
+pub fn gui_set_status(text: &str) -> isize {
+    let mut message = GuiMessage::new(GUI_MSG_SET_STATUS);
+    message.set_data(text.as_bytes());
+    gui_send(&message)
+}
+
+pub fn gui_recv_event(message: &mut GuiMessage) -> isize {
+    let bytes = unsafe {
+        core::slice::from_raw_parts_mut(
+            message as *mut GuiMessage as *mut u8,
+            core::mem::size_of::<GuiMessage>(),
+        )
+    };
+    let received = ipc_recv(bytes);
+    if received == core::mem::size_of::<GuiMessage>() as isize && message.valid() {
+        received
+    } else if received < 0 {
+        received
+    } else {
+        EAGAIN
+    }
 }
 
 pub fn yield_now() -> isize {

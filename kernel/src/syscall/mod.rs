@@ -83,6 +83,8 @@ pub const ENFILE: i64 = -23;
 pub const EOPNOTSUPP: i64 = -95;
 pub const ECHILD: i64 = -10;
 pub const EAGAIN: i64 = -11;
+pub const EMSGSIZE: i64 = -90;
+pub const ENOBUFS: i64 = -105;
 
 pub static mut KERNEL_FB_ADDR: u64 = 0;
 pub static mut KERNEL_FB_WIDTH: u32 = 0;
@@ -327,8 +329,8 @@ pub extern "C" fn syscall_handler(
         Syscall::Open => sys_open(arg0 as *const u8, arg1 as usize, arg2 as u32),
         Syscall::Close => sys_close(arg0 as u32),
         Syscall::Mmap => sys_mmap(arg0 as usize, arg1 as usize, arg2 as u32, arg3 as u32),
-        Syscall::SendMessage => sys_send_message(arg0 as u32, arg1 as *const u8),
-        Syscall::ReceiveMessage => sys_receive_message(arg0 as *mut u8),
+        Syscall::SendMessage => sys_send_message(arg0 as u32, arg1 as *const u8, arg2 as usize),
+        Syscall::ReceiveMessage => sys_receive_message(arg0 as *mut u8, arg1 as usize),
         Syscall::GetFramebuffer => sys_get_framebuffer(arg0 as *mut FbInfo),
         Syscall::DrawPixel => sys_draw_pixel(arg0 as u32, arg1 as u32, arg2 as u32),
         Syscall::DrawRect => sys_draw_rect(arg0 as u32, arg1 as u32, arg2 as u32, arg3 as u32, arg4 as u32),
@@ -594,25 +596,69 @@ fn vfs_error_to_errno(error: crate::fs::vfs::VfsError) -> i64 {
     }
 }
 
-fn sys_send_message(target_pid: u32, msg: *const u8) -> i64 {
+fn ipc_error_to_errno(error: crate::ipc::IpcError) -> i64 {
+    match error {
+        crate::ipc::IpcError::InvalidTarget => ENOENT,
+        crate::ipc::IpcError::MessageTooLarge => EMSGSIZE,
+        crate::ipc::IpcError::QueueFull => ENOBUFS,
+        crate::ipc::IpcError::NoMessage => EAGAIN,
+        crate::ipc::IpcError::Unavailable => EAGAIN,
+    }
+}
+
+fn sys_send_message(target_pid: u32, msg: *const u8, len: usize) -> i64 {
     if target_pid == 0 {
         return EINVAL;
     }
-    
-    if let Err(error) = copy_buffer_from_user(msg, 256).map(|_| ()) {
-        return error;
+    if len == 0 || len > crate::ipc::MAX_MESSAGE_SIZE {
+        return EMSGSIZE;
     }
-    
-    ENOSYS
+
+    let data = match copy_buffer_from_user(msg, len) {
+        Ok(data) => data,
+        Err(error) => return error,
+    };
+    let sender = match crate::process::current_process() {
+        Some(process) => process.pid,
+        None => return EINVAL,
+    };
+    let target = crate::process::ProcessId(target_pid as u64);
+    match crate::ipc::send_bytes(sender, target, &data) {
+        Ok(()) => {
+            syscall_log(format_args!(
+                "[IPC] send from={} to={} len={}\n",
+                sender.0,
+                target.0,
+                len
+            ));
+            len as i64
+        }
+        Err(error) => ipc_error_to_errno(error),
+    }
 }
 
-fn sys_receive_message(msg: *mut u8) -> i64 {
-    let empty = [0u8; 256];
-    if let Err(error) = copy_buffer_to_user(msg, &empty) {
+fn sys_receive_message(msg: *mut u8, len: usize) -> i64 {
+    if len == 0 || len > crate::ipc::MAX_MESSAGE_SIZE {
+        return EMSGSIZE;
+    }
+    let pid = match crate::process::current_process() {
+        Some(process) => process.pid,
+        None => return EINVAL,
+    };
+    let mut buffer = [0u8; crate::ipc::MAX_MESSAGE_SIZE];
+    let received = match crate::ipc::recv_bytes(pid, &mut buffer[..len]) {
+        Ok(received) => received,
+        Err(error) => return ipc_error_to_errno(error),
+    };
+    if let Err(error) = copy_buffer_to_user(msg, &buffer[..received]) {
         return error;
     }
-    
-    ENOSYS
+    syscall_log(format_args!(
+        "[IPC] recv pid={} len={}\n",
+        pid.0,
+        received
+    ));
+    received as i64
 }
 
 fn sys_get_framebuffer(info: *mut FbInfo) -> i64 {
@@ -824,27 +870,34 @@ fn sys_getcwd(buf: *mut u8, len: usize) -> i64 {
 }
 
 fn sys_yield() -> i64 {
-    let current = crate::process::current_process()
-        .map(|process| process.pid.0)
-        .unwrap_or(0);
+    let current_pid = crate::process::current_process()
+        .map(|process| process.pid)
+        .unwrap_or(crate::process::ProcessId(0));
+    let current = current_pid.0;
     let queued = crate::process::scheduler::ready_len();
-    match crate::process::scheduler::pick_next_candidate() {
+    match crate::process::scheduler::pick_next_candidate_excluding(current_pid) {
         Some(pid) => {
             syscall_log(format_args!(
-                "[YIELD] current={} candidate={} queue={} switch=not-implemented\n",
+                "[YIELD] current={} candidate={} queue={} switch=resumable\n",
                 current,
                 pid.0,
                 queued
             ));
-            EOPNOTSUPP
+            match crate::process::save_current_user_context_for_yield(pid) {
+                Ok(_) => SMOKE_RETURN_MAGIC,
+                Err(error) => process_error_to_errno(error),
+            }
         }
         None => {
             syscall_log(format_args!(
-                "[YIELD] current={} candidate=none queue={} switch=not-implemented\n",
+                "[YIELD] current={} candidate=kernel queue={} switch=cooperative-return\n",
                 current,
                 queued
             ));
-            EAGAIN
+            match crate::process::save_current_user_context_for_yield(current_pid) {
+                Ok(_) => SMOKE_RETURN_MAGIC,
+                Err(error) => process_error_to_errno(error),
+            }
         }
     }
 }

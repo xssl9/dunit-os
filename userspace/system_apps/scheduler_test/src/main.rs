@@ -45,10 +45,21 @@ pub extern "C" fn _start() -> ! {
 
     expect_wait_again(pid as u32, "ready-child");
 
-    let candidate = libdunit::yield_now();
-    if candidate != libdunit::EOPNOTSUPP {
-        libdunit::println("scheduler_test: yield should report switch unsupported");
+    let yielded = libdunit::yield_now();
+    if yielded != 0 {
+        libdunit::println("scheduler_test: yield should run ready child");
         libdunit::exit(5);
+    }
+
+    let mut status = libdunit::WaitStatus::empty();
+    let waited = libdunit::wait(pid as u32, &mut status);
+    if waited != pid {
+        libdunit::println("scheduler_test: wait should reap yielded child");
+        libdunit::exit(6);
+    }
+    if !status.exited() || status.code != 0 {
+        libdunit::println("scheduler_test: child exit status mismatch");
+        libdunit::exit(7);
     }
 
     libdunit::println("scheduler_test: OK");

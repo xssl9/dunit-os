@@ -48,9 +48,26 @@ pub extern "C" fn _start() -> ! {
     }
 
     let yielded = libdunit::yield_now();
-    if yielded != libdunit::EOPNOTSUPP {
-        libdunit::println("spawn_ready_test: yield should see ready queue");
+    if yielded != 0 {
+        libdunit::println("spawn_ready_test: yield should run one ready child");
         libdunit::exit(5);
+    }
+
+    let mut status = libdunit::WaitStatus::empty();
+    let waited = libdunit::wait(first, &mut status);
+    if waited != first as isize {
+        libdunit::println("spawn_ready_test: first child wait failed");
+        libdunit::exit(6);
+    }
+    if !status.exited() || status.code != 0 {
+        libdunit::println("spawn_ready_test: first child status mismatch");
+        libdunit::exit(7);
+    }
+
+    let second_wait = libdunit::wait(second, &mut status);
+    if second_wait != libdunit::EAGAIN {
+        libdunit::println("spawn_ready_test: second child should still be ready");
+        libdunit::exit(8);
     }
 
     libdunit::println("spawn_ready_test: OK");

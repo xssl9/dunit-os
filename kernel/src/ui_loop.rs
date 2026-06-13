@@ -1,8 +1,10 @@
-use crate::fs::vfs;
 use crate::gui::renderer::{BackBuffer, DamageTracker, Framebuffer, Rect};
 use crate::drivers::{keyboard, mouse};
+use crate::fs::vfs::{self, OpenFlags};
 use crate::serial_write;
 use crate::window_manager::{self, AppType};
+use alloc::string::String;
+use alloc::vec::Vec;
 
 const BG: u32 = 0x030504;
 const PANEL: u32 = 0x11161b;
@@ -30,6 +32,21 @@ const WALLPAPER_HEIGHT: usize = 900;
 const WALLPAPER_OFFSET: usize = 54;
 const WALLPAPER_STRIDE: usize = WALLPAPER_WIDTH * 3;
 const WALLPAPER_PATH: &str = "/assets/wallpaper.bmp";
+const GUI_PING_PATH: &str = "/app/gui_ping";
+const GUI_PING_MESSAGE: &[u8] = b"gui_ping: hello from userspace";
+const GUI_BRIDGE_MESSAGE_CAP: usize = 96;
+const GUI_TERMINAL_STUB_PATH: &str = "/app/gui_terminal_stub";
+const GUI_MSG_MAGIC: u32 = 0x3149_5547;
+const GUI_MSG_VERSION: u16 = 1;
+const GUI_MSG_CREATE_WINDOW: u16 = 1;
+const GUI_MSG_DRAW_TEXT: u16 = 2;
+const GUI_MSG_SET_STATUS: u16 = 3;
+const GUI_MSG_EXIT: u16 = 4;
+const GUI_MSG_KEY_EVENT: u16 = 101;
+const GUI_MSG_DATA_CAP: usize = 160;
+const GUI_APP_LINES: usize = 8;
+const GUI_APP_TEXT_CAP: usize = 96;
+const GUI_APP_TITLE_CAP: usize = 32;
 const ICON_SIZE: usize = 44;
 const TERMINAL_ICON: &[u8] = include_bytes!("../assets/terminal.rgba");
 const TEXT_ICON: &[u8] = include_bytes!("../assets/text.rgba");
@@ -60,6 +77,168 @@ struct UiState {
     notifications_open: bool,
     brightness: u8,
     keyboard_extended: bool,
+    terminal_bridge: GuiRuntimeBridge,
+    gui_app: GuiAppRuntime,
+}
+
+#[derive(Clone, Copy)]
+struct GuiRuntimeBridge {
+    attempted: bool,
+    launched: bool,
+    ok: bool,
+    pid: u64,
+    exit_code: i32,
+    message: [u8; GUI_BRIDGE_MESSAGE_CAP],
+    message_len: usize,
+    error: &'static str,
+}
+
+impl GuiRuntimeBridge {
+    const fn new() -> Self {
+        Self {
+            attempted: false,
+            launched: false,
+            ok: false,
+            pid: 0,
+            exit_code: 0,
+            message: [0; GUI_BRIDGE_MESSAGE_CAP],
+            message_len: 0,
+            error: "",
+        }
+    }
+
+    fn set_error(&mut self, error: &'static str) {
+        self.attempted = true;
+        self.ok = false;
+        self.error = error;
+    }
+
+    fn set_message(&mut self, data: &[u8]) {
+        let len = data.len().min(self.message.len());
+        self.message[..len].copy_from_slice(&data[..len]);
+        self.message_len = len;
+    }
+
+    fn message_str(&self) -> &str {
+        core::str::from_utf8(&self.message[..self.message_len]).unwrap_or("<invalid utf8>")
+    }
+}
+
+#[derive(Clone, Copy)]
+struct GuiTextLine {
+    x: i32,
+    y: i32,
+    len: usize,
+    data: [u8; GUI_APP_TEXT_CAP],
+}
+
+impl GuiTextLine {
+    const fn empty() -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            len: 0,
+            data: [0; GUI_APP_TEXT_CAP],
+        }
+    }
+
+    fn set(&mut self, x: i32, y: i32, data: &[u8]) {
+        self.x = x;
+        self.y = y;
+        self.len = data.len().min(self.data.len());
+        self.data[..self.len].copy_from_slice(&data[..self.len]);
+    }
+
+    fn text(&self) -> &str {
+        core::str::from_utf8(&self.data[..self.len]).unwrap_or("<invalid utf8>")
+    }
+}
+
+#[derive(Clone, Copy)]
+struct GuiAppRuntime {
+    launched: bool,
+    running: bool,
+    key_sent: bool,
+    exited: bool,
+    pid: u64,
+    window_id: u32,
+    owner_pid: u64,
+    width: usize,
+    height: usize,
+    title_len: usize,
+    title: [u8; GUI_APP_TITLE_CAP],
+    status_len: usize,
+    status: [u8; GUI_APP_TEXT_CAP],
+    lines: [GuiTextLine; GUI_APP_LINES],
+    line_count: usize,
+}
+
+impl GuiAppRuntime {
+    const fn new() -> Self {
+        Self {
+            launched: false,
+            running: false,
+            key_sent: false,
+            exited: false,
+            pid: 0,
+            window_id: 0,
+            owner_pid: 0,
+            width: 420,
+            height: 260,
+            title_len: 0,
+            title: [0; GUI_APP_TITLE_CAP],
+            status_len: 0,
+            status: [0; GUI_APP_TEXT_CAP],
+            lines: [GuiTextLine::empty(); GUI_APP_LINES],
+            line_count: 0,
+        }
+    }
+
+    fn set_title(&mut self, data: &[u8]) {
+        self.title_len = data.len().min(self.title.len());
+        self.title[..self.title_len].copy_from_slice(&data[..self.title_len]);
+    }
+
+    fn title(&self) -> &str {
+        core::str::from_utf8(&self.title[..self.title_len]).unwrap_or("GUI App")
+    }
+
+    fn set_status(&mut self, data: &[u8]) {
+        self.status_len = data.len().min(self.status.len());
+        self.status[..self.status_len].copy_from_slice(&data[..self.status_len]);
+    }
+
+    fn status(&self) -> &str {
+        core::str::from_utf8(&self.status[..self.status_len]).unwrap_or("<invalid status>")
+    }
+
+    fn push_line(&mut self, x: i32, y: i32, data: &[u8]) {
+        if self.line_count < self.lines.len() {
+            self.lines[self.line_count].set(x, y, data);
+            self.line_count += 1;
+            return;
+        }
+        let mut index = 1usize;
+        while index < self.lines.len() {
+            self.lines[index - 1] = self.lines[index];
+            index += 1;
+        }
+        self.lines[self.lines.len() - 1].set(x, y, data);
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct GuiMessage {
+    magic: u32,
+    version: u16,
+    kind: u16,
+    window_id: u32,
+    a: i32,
+    b: i32,
+    c: u32,
+    len: u32,
+    data: [u8; GUI_MSG_DATA_CAP],
 }
 
 impl UiState {
@@ -70,6 +249,8 @@ impl UiState {
             notifications_open: true,
             brightness: 80,
             keyboard_extended: false,
+            terminal_bridge: GuiRuntimeBridge::new(),
+            gui_app: GuiAppRuntime::new(),
         }
     }
 }
@@ -150,6 +331,389 @@ fn wallpaper_bytes() -> Option<&'static [u8]> {
             None
         }
     }
+}
+
+fn serial_write_u64(mut value: u64) {
+    let mut buf = [0u8; 20];
+    let mut index = buf.len();
+    if value == 0 {
+        serial_write("0");
+        return;
+    }
+    while value > 0 {
+        index -= 1;
+        buf[index] = b'0' + (value % 10) as u8;
+        value /= 10;
+    }
+    let text = core::str::from_utf8(&buf[index..]).unwrap_or("?");
+    serial_write(text);
+}
+
+fn serial_write_i32(value: i32) {
+    if value < 0 {
+        serial_write("-");
+        serial_write_u64(value.saturating_abs() as u64);
+    } else {
+        serial_write_u64(value as u64);
+    }
+}
+
+fn append_str(out: &mut [u8], len: &mut usize, text: &str) {
+    for byte in text.bytes() {
+        if *len >= out.len() {
+            return;
+        }
+        out[*len] = byte;
+        *len += 1;
+    }
+}
+
+fn append_u64(out: &mut [u8], len: &mut usize, mut value: u64) {
+    let mut digits = [0u8; 20];
+    let mut count = 0usize;
+    if value == 0 {
+        digits[0] = b'0';
+        count = 1;
+    } else {
+        while value > 0 {
+            digits[count] = b'0' + (value % 10) as u8;
+            count += 1;
+            value /= 10;
+        }
+    }
+    while count > 0 {
+        count -= 1;
+        if *len >= out.len() {
+            return;
+        }
+        out[*len] = digits[count];
+        *len += 1;
+    }
+}
+
+fn append_i32(out: &mut [u8], len: &mut usize, value: i32) {
+    if value < 0 {
+        append_str(out, len, "-");
+        append_u64(out, len, value.saturating_abs() as u64);
+    } else {
+        append_u64(out, len, value as u64);
+    }
+}
+
+fn line_str(buf: &[u8], len: usize) -> &str {
+    core::str::from_utf8(&buf[..len]).unwrap_or("<invalid utf8>")
+}
+
+fn read_vfs_file(path: &str) -> Option<Vec<u8>> {
+    let vfs = vfs::get_vfs()?;
+    let fd = vfs.open(path, OpenFlags::READ).ok()?;
+    let mut data = Vec::new();
+    let mut chunk = [0u8; 4096];
+
+    loop {
+        let read = match vfs.read(fd, &mut chunk) {
+            Ok(read) => read,
+            Err(_) => {
+                let _ = vfs.close(fd);
+                return None;
+            }
+        };
+        if read == 0 {
+            break;
+        }
+        data.extend_from_slice(&chunk[..read]);
+    }
+
+    let _ = vfs.close(fd);
+    Some(data)
+}
+
+fn launch_terminal_bridge(state: &mut UiState) {
+    if state.terminal_bridge.attempted {
+        return;
+    }
+    state.terminal_bridge.attempted = true;
+    serial_write("[GUI-BRIDGE] launching /app/gui_ping\r\n");
+
+    let Some(data) = read_vfs_file(GUI_PING_PATH) else {
+        serial_write("[GUI-BRIDGE] failed: /app/gui_ping missing\r\n");
+        state.terminal_bridge.set_error("missing /app/gui_ping");
+        return;
+    };
+
+    let pid = match crate::process::create_user_process_record(String::from(GUI_PING_PATH), true) {
+        Ok(pid) => pid,
+        Err(_) => {
+            serial_write("[GUI-BRIDGE] failed: process create\r\n");
+            state.terminal_bridge.set_error("process create failed");
+            return;
+        }
+    };
+
+    let argv = [String::from("gui_ping")];
+    if crate::elf::prepare_process_elf(pid, &data, &argv).is_err() {
+        serial_write("[GUI-BRIDGE] failed: ELF prepare\r\n");
+        let _ = crate::process::autoreap_process(pid, "gui-bridge-prepare-failed");
+        state.terminal_bridge.set_error("ELF prepare failed");
+        return;
+    }
+
+    state.terminal_bridge.launched = true;
+    state.terminal_bridge.pid = pid.0;
+    serial_write("[GUI-BRIDGE] launched /app/gui_ping pid=");
+    serial_write_u64(pid.0);
+    serial_write("\r\n");
+
+    let exit = match crate::process::enter_user_process(pid) {
+        Ok(exit) => exit,
+        Err(_) => {
+            serial_write("[GUI-BRIDGE] failed: process run\r\n");
+            let _ = crate::process::autoreap_process(pid, "gui-bridge-run-failed");
+            state.terminal_bridge.set_error("process run failed");
+            return;
+        }
+    };
+
+    match exit.status {
+        crate::process::ProcessExitStatus::Exited(code) => {
+            state.terminal_bridge.exit_code = code;
+            serial_write("[GUI-BRIDGE] exit code=");
+            serial_write_i32(code);
+            serial_write("\r\n");
+        }
+        _ => {
+            serial_write("[GUI-BRIDGE] failed: process faulted\r\n");
+            let _ = crate::process::autoreap_process(pid, "gui-bridge-faulted");
+            state.terminal_bridge.set_error("process did not exit cleanly");
+            return;
+        }
+    }
+
+    let mut msg = [0u8; GUI_BRIDGE_MESSAGE_CAP];
+    let len = match crate::ipc::recv_bytes(crate::process::ProcessId(1), &mut msg) {
+        Ok(len) => len,
+        Err(_) => {
+            serial_write("[GUI-BRIDGE] failed: no IPC message\r\n");
+            let _ = crate::process::autoreap_process(pid, "gui-bridge-no-message");
+            state.terminal_bridge.set_error("no IPC message from gui_ping");
+            return;
+        }
+    };
+
+    state.terminal_bridge.set_message(&msg[..len]);
+    serial_write("[GUI-BRIDGE] message: ");
+    serial_write(state.terminal_bridge.message_str());
+    serial_write("\r\n");
+
+    if &msg[..len] != GUI_PING_MESSAGE {
+        let _ = crate::process::autoreap_process(pid, "gui-bridge-message-mismatch");
+        state.terminal_bridge.set_error("IPC message mismatch");
+        return;
+    }
+
+    let _ = crate::process::autoreap_process(pid, "gui-bridge");
+    state.terminal_bridge.ok = state.terminal_bridge.exit_code == 0;
+    if state.terminal_bridge.ok {
+        serial_write("[GUI-BRIDGE] Terminal runtime bridge OK\r\n");
+    } else {
+        state.terminal_bridge.set_error("gui_ping exit code was nonzero");
+    }
+}
+
+fn gui_message_from_bytes(data: &[u8]) -> Option<GuiMessage> {
+    if data.len() != core::mem::size_of::<GuiMessage>() {
+        return None;
+    }
+    let message = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const GuiMessage) };
+    if message.magic != GUI_MSG_MAGIC
+        || message.version != GUI_MSG_VERSION
+        || (message.len as usize) > GUI_MSG_DATA_CAP
+    {
+        return None;
+    }
+    Some(message)
+}
+
+fn gui_message_data(message: &GuiMessage) -> &[u8] {
+    &message.data[..(message.len as usize).min(GUI_MSG_DATA_CAP)]
+}
+
+fn gui_message_text(message: &GuiMessage) -> &str {
+    core::str::from_utf8(gui_message_data(message)).unwrap_or("<invalid utf8>")
+}
+
+fn send_gui_key_event(app: &mut GuiAppRuntime, key: u8) {
+    if app.pid == 0 || app.window_id == 0 || app.key_sent {
+        return;
+    }
+
+    let mut message = GuiMessage {
+        magic: GUI_MSG_MAGIC,
+        version: GUI_MSG_VERSION,
+        kind: GUI_MSG_KEY_EVENT,
+        window_id: app.window_id,
+        a: key as i32,
+        b: 0,
+        c: 0,
+        len: 0,
+        data: [0; GUI_MSG_DATA_CAP],
+    };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            &mut message as *mut GuiMessage as *const u8,
+            core::mem::size_of::<GuiMessage>(),
+        )
+    };
+
+    match crate::ipc::send_bytes(crate::process::ProcessId(1), crate::process::ProcessId(app.pid), bytes) {
+        Ok(()) => {
+            app.key_sent = true;
+            serial_write("[GUI-PROTO] send KEY_EVENT pid=");
+            serial_write_u64(app.pid);
+            serial_write(" window_id=");
+            serial_write_u64(app.window_id as u64);
+            serial_write(" key=x\r\n");
+        }
+        Err(_) => serial_write("[GUI-PROTO] failed to send KEY_EVENT\r\n"),
+    }
+}
+
+fn process_gui_messages(state: &mut UiState) {
+    loop {
+        let mut raw = [0u8; 256];
+        let len = match crate::ipc::recv_bytes(crate::process::ProcessId(1), &mut raw) {
+            Ok(len) => len,
+            Err(_) => break,
+        };
+        let Some(message) = gui_message_from_bytes(&raw[..len]) else {
+            serial_write("[GUI-PROTO] ignored invalid IPC payload\r\n");
+            continue;
+        };
+        let pid = state.gui_app.pid;
+        match message.kind {
+            GUI_MSG_CREATE_WINDOW => {
+                state.gui_app.window_id = message.window_id;
+                state.gui_app.owner_pid = pid;
+                state.gui_app.width = (message.a.max(220) as usize).min(720);
+                state.gui_app.height = (message.b.max(140) as usize).min(420);
+                state.gui_app.set_title(gui_message_data(&message));
+                serial_write("[GUI-PROTO] recv CREATE_WINDOW pid=");
+                serial_write_u64(pid);
+                serial_write(" window_id=");
+                serial_write_u64(message.window_id as u64);
+                serial_write(" title=");
+                serial_write(gui_message_text(&message));
+                serial_write("\r\n");
+                serial_write("[GUI-PROTO] created window owner_pid=");
+                serial_write_u64(pid);
+                serial_write(" window_id=");
+                serial_write_u64(message.window_id as u64);
+                serial_write("\r\n");
+            }
+            GUI_MSG_DRAW_TEXT => {
+                state.gui_app.push_line(message.a, message.b, gui_message_data(&message));
+                serial_write("[GUI-PROTO] recv DRAW_TEXT pid=");
+                serial_write_u64(pid);
+                serial_write(" window_id=");
+                serial_write_u64(message.window_id as u64);
+                serial_write(" text=");
+                serial_write(gui_message_text(&message));
+                serial_write("\r\n");
+                serial_write("[GUI-PROTO] render text window_id=");
+                serial_write_u64(message.window_id as u64);
+                serial_write("\r\n");
+            }
+            GUI_MSG_SET_STATUS => {
+                state.gui_app.set_status(gui_message_data(&message));
+                serial_write("[GUI-PROTO] recv SET_STATUS pid=");
+                serial_write_u64(pid);
+                serial_write(" text=");
+                serial_write(gui_message_text(&message));
+                serial_write("\r\n");
+            }
+            GUI_MSG_EXIT => {
+                state.gui_app.running = false;
+                state.gui_app.exited = true;
+                serial_write("[GUI-PROTO] recv EXIT pid=");
+                serial_write_u64(pid);
+                serial_write("\r\n");
+            }
+            _ => serial_write("[GUI-PROTO] ignored unknown message\r\n"),
+        }
+    }
+}
+
+fn run_gui_app_once(state: &mut UiState) {
+    if state.gui_app.pid == 0 || state.gui_app.exited {
+        return;
+    }
+    let pid = crate::process::ProcessId(state.gui_app.pid);
+    match crate::process::enter_user_process(pid) {
+        Ok(exit) => {
+            state.gui_app.running = false;
+            state.gui_app.exited = true;
+            serial_write("[GUI-PROTO] app exited pid=");
+            serial_write_u64(pid.0);
+            serial_write(" code=");
+            serial_write_i32(exit.status.exit_code());
+            serial_write("\r\n");
+            let _ = crate::process::autoreap_process(pid, "gui-proto-exit");
+        }
+        Err(crate::process::ProcessError::SchedulerUnavailable) if crate::process::is_pid_runnable(pid) => {
+            serial_write("[GUI-PROTO] app yielded pid=");
+            serial_write_u64(pid.0);
+            serial_write("\r\n");
+        }
+        Err(_) => {
+            state.gui_app.running = false;
+            serial_write("[GUI-PROTO] app run failed pid=");
+            serial_write_u64(pid.0);
+            serial_write("\r\n");
+            let _ = crate::process::autoreap_process(pid, "gui-proto-run-failed");
+        }
+    }
+    process_gui_messages(state);
+}
+
+fn launch_gui_terminal_app(state: &mut UiState) {
+    if state.gui_app.launched {
+        return;
+    }
+    state.gui_app.launched = true;
+    state.gui_app.running = true;
+    serial_write("[GUI-PROTO] launching /app/gui_terminal_stub\r\n");
+
+    let Some(data) = read_vfs_file(GUI_TERMINAL_STUB_PATH) else {
+        serial_write("[GUI-PROTO] failed: /app/gui_terminal_stub missing\r\n");
+        state.gui_app.running = false;
+        return;
+    };
+
+    let pid = match crate::process::create_user_process_record(String::from(GUI_TERMINAL_STUB_PATH), true) {
+        Ok(pid) => pid,
+        Err(_) => {
+            serial_write("[GUI-PROTO] failed: process create\r\n");
+            state.gui_app.running = false;
+            return;
+        }
+    };
+    state.gui_app.pid = pid.0;
+    serial_write("[GUI-PROTO] app pid=");
+    serial_write_u64(pid.0);
+    serial_write("\r\n");
+
+    let argv = [String::from("gui_terminal_stub")];
+    if crate::elf::prepare_process_elf(pid, &data, &argv).is_err() {
+        serial_write("[GUI-PROTO] failed: ELF prepare\r\n");
+        let _ = crate::process::autoreap_process(pid, "gui-proto-prepare-failed");
+        state.gui_app.running = false;
+        return;
+    }
+
+    run_gui_app_once(state);
+    send_gui_key_event(&mut state.gui_app, b'x');
+    run_gui_app_once(state);
+    process_gui_messages(state);
 }
 
 fn put_pixel(fb: Framebuffer, _width: usize, _height: usize, x: usize, y: usize, color: u32) {
@@ -463,6 +1027,8 @@ fn glyph(ch: u8) -> [u8; 5] {
         b'.' => [0x00, 0x60, 0x60, 0x00, 0x00],
         b':' => [0x00, 0x36, 0x36, 0x00, 0x00],
         b'-' => [0x08, 0x08, 0x08, 0x08, 0x08],
+        b'_' => [0x40, 0x40, 0x40, 0x40, 0x40],
+        b'=' => [0x14, 0x14, 0x14, 0x14, 0x14],
         b'/' => [0x20, 0x10, 0x08, 0x04, 0x02],
         b'%' => [0x62, 0x64, 0x08, 0x13, 0x23],
         _ => [0x00, 0x00, 0x00, 0x00, 0x00],
@@ -484,6 +1050,53 @@ fn draw_char(fb: Framebuffer, width: usize, height: usize, x: usize, y: usize, c
 fn draw_text(fb: Framebuffer, width: usize, height: usize, x: usize, y: usize, text: &str, color: u32) {
     for (i, ch) in text.bytes().enumerate() {
         draw_char(fb, width, height, x + i * 6, y, ch, color);
+    }
+}
+
+fn draw_terminal_bridge(
+    fb: Framebuffer,
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    bridge: &GuiRuntimeBridge,
+) {
+    if !bridge.attempted {
+        draw_text(fb, width, height, x, y, "Terminal runtime bridge pending", MUTED);
+        return;
+    }
+
+    if !bridge.launched {
+        draw_text(fb, width, height, x, y, "Terminal runtime bridge failed", RED);
+        draw_text(fb, width, height, x, y + 20, bridge.error, MUTED);
+        return;
+    }
+
+    let mut line = [0u8; 80];
+    let mut len = 0usize;
+    append_str(&mut line, &mut len, "launched /app/gui_ping pid=");
+    append_u64(&mut line, &mut len, bridge.pid);
+    draw_text(fb, width, height, x, y, line_str(&line, len), GREEN);
+
+    let mut exit_line = [0u8; 40];
+    let mut exit_len = 0usize;
+    append_str(&mut exit_line, &mut exit_len, "exit code=");
+    append_i32(&mut exit_line, &mut exit_len, bridge.exit_code);
+    draw_text(fb, width, height, x, y + 20, line_str(&exit_line, exit_len), TEXT);
+
+    if bridge.message_len > 0 {
+        draw_text(fb, width, height, x, y + 40, "message:", MUTED);
+        draw_text(fb, width, height, x + 58, y + 40, bridge.message_str(), TEXT);
+    } else {
+        draw_text(fb, width, height, x, y + 40, "message: <none>", RED);
+    }
+
+    if bridge.ok {
+        draw_text(fb, width, height, x, y + 66, "Terminal runtime bridge OK", GREEN);
+        draw_text(fb, width, height, x, y + 86, "interactive input not implemented", MUTED);
+    } else {
+        draw_text(fb, width, height, x, y + 66, "Terminal runtime bridge failed", RED);
+        draw_text(fb, width, height, x, y + 86, bridge.error, MUTED);
     }
 }
 
@@ -613,9 +1226,7 @@ fn draw_window(fb: Framebuffer, width: usize, height: usize, window: &window_man
     match window.app_type {
         AppType::Terminal => {
             draw_round_rect(fb, width, height, window.x + 8, window.y + 42, window.width.saturating_sub(16), window.height.saturating_sub(50), 8, TERMINAL_BG);
-            draw_text(fb, width, height, x, y, "dunit@kernel ~ % dufetch", GREEN);
-            draw_text(fb, width, height, x, y + 20, "Dunit OS 2026 Green Tea", TEXT);
-            draw_text(fb, width, height, x, y + 40, "VFS MemFS userspace runtime", MUTED);
+            draw_terminal_bridge(fb, width, height, x, y, &state.terminal_bridge);
         }
         AppType::Files => {
             draw_round_rect(fb, width, height, window.x + 8, window.y + 42, 92, window.height.saturating_sub(50), 8, 0x111820);
@@ -649,6 +1260,56 @@ fn draw_window(fb: Framebuffer, width: usize, height: usize, window: &window_man
     }
 }
 
+fn draw_gui_app_window(fb: Framebuffer, width: usize, height: usize, app: &GuiAppRuntime) {
+    if app.window_id == 0 || app.owner_pid == 0 {
+        return;
+    }
+
+    let window_width = app.width.max(300);
+    let window_height = app.height.max(180);
+    let x = width.saturating_sub(window_width) / 2;
+    let y = height.saturating_sub(window_height) / 2;
+    draw_round_rect(fb, width, height, x + 10, y + 12, window_width, window_height, 14, SHADOW);
+    draw_round_rect(fb, width, height, x, y, window_width, window_height, 14, WINDOW_BG);
+    draw_rect(fb, width, height, x, y, window_width, 34, WINDOW_TITLE);
+    draw_rect(fb, width, height, x, y + 33, window_width, 1, 0x2f3a42);
+    draw_round_rect_border(fb, width, height, x, y, window_width, window_height, 14, GLASS_EDGE);
+    draw_traffic_button(fb, width, height, x + 12, y + 11, RED);
+    draw_traffic_button(fb, width, height, x + 32, y + 11, YELLOW);
+    draw_traffic_button(fb, width, height, x + 52, y + 11, GREEN);
+    draw_text(fb, width, height, x + 82, y + 13, app.title(), TEXT);
+
+    draw_round_rect(fb, width, height, x + 8, y + 42, window_width.saturating_sub(16), window_height.saturating_sub(50), 8, TERMINAL_BG);
+    let content_x = x + 18;
+    let content_y = y + 50;
+    let mut owner_line = [0u8; 64];
+    let mut owner_len = 0usize;
+    append_str(&mut owner_line, &mut owner_len, "owner_pid=");
+    append_u64(&mut owner_line, &mut owner_len, app.owner_pid);
+    append_str(&mut owner_line, &mut owner_len, " window_id=");
+    append_u64(&mut owner_line, &mut owner_len, app.window_id as u64);
+    draw_text(fb, width, height, content_x, content_y, line_str(&owner_line, owner_len), MUTED);
+
+    for index in 0..app.line_count {
+        let line = &app.lines[index];
+        let draw_x = content_x.saturating_add(line.x.max(0) as usize);
+        let draw_y = content_y.saturating_add(line.y.max(0) as usize);
+        draw_text(fb, width, height, draw_x, draw_y, line.text(), if index == 0 { GREEN } else { TEXT });
+    }
+
+    if app.status_len > 0 {
+        draw_text(
+            fb,
+            width,
+            height,
+            content_x,
+            y + window_height.saturating_sub(24),
+            app.status(),
+            MUTED,
+        );
+    }
+}
+
 fn draw_windows(fb: Framebuffer, width: usize, height: usize, state: &UiState) {
     if let Some(wm) = window_manager::get_wm() {
         for window in wm.get_windows() {
@@ -657,6 +1318,7 @@ fn draw_windows(fb: Framebuffer, width: usize, height: usize, state: &UiState) {
             }
         }
     }
+    draw_gui_app_window(fb, width, height, &state.gui_app);
 }
 
 fn draw_desktop_widgets(fb: Framebuffer, width: usize, height: usize, state: &UiState) {
@@ -976,7 +1638,9 @@ fn apply_ui_action(state: &mut UiState, action: UiAction) -> bool {
         UiAction::ToggleNotifications => state.notifications_open = !state.notifications_open,
         UiAction::SetBrightness(value) => state.brightness = value.clamp(25, 100),
         UiAction::ToggleApp(app_type) => {
-            if let Some(wm) = window_manager::get_wm() {
+            if app_type == AppType::Terminal {
+                launch_gui_terminal_app(state);
+            } else if let Some(wm) = window_manager::get_wm() {
                 wm.toggle_window(app_type);
             }
         }
@@ -1099,6 +1763,7 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
     let mut state = UiState::new();
 
     load_wallpaper();
+    launch_gui_terminal_app(&mut state);
     rebuild_blur_cache(width, height);
     redraw_full_screen(scene, width, height, &state);
     if let Some(buffer) = back_buffer.as_ref() {
@@ -1172,20 +1837,24 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                 full_redraw = apply_ui_action(&mut state, action);
             } else if let Some(app_type) = handle_dock_click(mx, my, width, height) {
                 pointer_op = None;
-                let dock_rect = dock_icon_rect(dock_app_index(app_type).unwrap_or(0), width, height);
-                let app_state = window_manager::get_wm()
-                    .and_then(|wm| wm.app_bounds(app_type).map(|bounds| (wm.app_visible(app_type), bounds)));
-                if let Some((was_visible, bounds)) = app_state {
-                    let window_rect = rect_from_bounds(bounds);
-                    if was_visible {
-                        if let Some(wm) = window_manager::get_wm() {
-                            wm.toggle_window(app_type);
-                        }
-                        animate_genie(scene, front, back_buffer.as_ref(), width, height, dock_rect, window_rect, false, &state);
-                    } else {
-                        animate_genie(scene, front, back_buffer.as_ref(), width, height, dock_rect, window_rect, true, &state);
-                        if let Some(wm) = window_manager::get_wm() {
-                            wm.toggle_window(app_type);
+                if app_type == AppType::Terminal {
+                    launch_gui_terminal_app(&mut state);
+                } else {
+                    let dock_rect = dock_icon_rect(dock_app_index(app_type).unwrap_or(0), width, height);
+                    let app_state = window_manager::get_wm()
+                        .and_then(|wm| wm.app_bounds(app_type).map(|bounds| (wm.app_visible(app_type), bounds)));
+                    if let Some((was_visible, bounds)) = app_state {
+                        let window_rect = rect_from_bounds(bounds);
+                        if was_visible {
+                            if let Some(wm) = window_manager::get_wm() {
+                                wm.toggle_window(app_type);
+                            }
+                            animate_genie(scene, front, back_buffer.as_ref(), width, height, dock_rect, window_rect, false, &state);
+                        } else {
+                            animate_genie(scene, front, back_buffer.as_ref(), width, height, dock_rect, window_rect, true, &state);
+                            if let Some(wm) = window_manager::get_wm() {
+                                wm.toggle_window(app_type);
+                            }
                         }
                     }
                 }

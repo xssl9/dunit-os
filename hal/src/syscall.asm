@@ -14,6 +14,21 @@ syscall_entry:
     ; syscall stack. This is still a single-active-process policy until the
     ; scheduler/TSS path can select stacks per running process.
     mov [rel syscall_user_rsp], rsp
+    mov [rel syscall_saved_rax], rax
+    mov [rel syscall_saved_rbx], rbx
+    mov [rel syscall_saved_rcx], rcx
+    mov [rel syscall_saved_rdx], rdx
+    mov [rel syscall_saved_rsi], rsi
+    mov [rel syscall_saved_rdi], rdi
+    mov [rel syscall_saved_rbp], rbp
+    mov [rel syscall_saved_r8], r8
+    mov [rel syscall_saved_r9], r9
+    mov [rel syscall_saved_r10], r10
+    mov [rel syscall_saved_r11], r11
+    mov [rel syscall_saved_r12], r12
+    mov [rel syscall_saved_r13], r13
+    mov [rel syscall_saved_r14], r14
+    mov [rel syscall_saved_r15], r15
     mov rsp, [rel syscall_selected_stack_top]
     test rsp, rsp
     jnz .stack_selected
@@ -128,6 +143,64 @@ syscall_reset_kernel_stack:
     mov qword [rel syscall_selected_stack_top], 0
     ret
 
+global syscall_get_escape_kernel_rsp
+syscall_get_escape_kernel_rsp:
+    mov rax, [rel syscall_smoke_kernel_rsp]
+    ret
+
+global syscall_get_escape_active
+syscall_get_escape_active:
+    mov rax, [rel syscall_smoke_active]
+    ret
+
+global syscall_restore_escape_state
+syscall_restore_escape_state:
+    mov [rel syscall_smoke_kernel_rsp], rdi
+    mov [rel syscall_smoke_active], rsi
+    ret
+
+global syscall_capture_user_context
+syscall_capture_user_context:
+    ; Rust extern "C":
+    ;   rdi = *mut CpuContext
+    ;   rsi = resumed syscall return value
+    mov [rdi + 0], rsi
+    mov rax, [rel syscall_saved_rbx]
+    mov [rdi + 8], rax
+    mov rax, [rel syscall_saved_rcx]
+    mov [rdi + 16], rax
+    mov rax, [rel syscall_saved_rdx]
+    mov [rdi + 24], rax
+    mov rax, [rel syscall_saved_rsi]
+    mov [rdi + 32], rax
+    mov rax, [rel syscall_saved_rdi]
+    mov [rdi + 40], rax
+    mov rax, [rel syscall_saved_rbp]
+    mov [rdi + 48], rax
+    mov rax, [rel syscall_user_rsp]
+    mov [rdi + 56], rax
+    mov rax, [rel syscall_saved_r8]
+    mov [rdi + 64], rax
+    mov rax, [rel syscall_saved_r9]
+    mov [rdi + 72], rax
+    mov rax, [rel syscall_saved_r10]
+    mov [rdi + 80], rax
+    mov rax, [rel syscall_saved_r11]
+    mov [rdi + 88], rax
+    mov rax, [rel syscall_saved_r12]
+    mov [rdi + 96], rax
+    mov rax, [rel syscall_saved_r13]
+    mov [rdi + 104], rax
+    mov rax, [rel syscall_saved_r14]
+    mov [rdi + 112], rax
+    mov rax, [rel syscall_saved_r15]
+    mov [rdi + 120], rax
+    mov rax, [rel syscall_saved_rcx]
+    mov [rdi + 128], rax
+    mov rax, [rel syscall_saved_r11]
+    mov [rdi + 136], rax
+    ret
+
 global syscall_escape_user_fault
 syscall_escape_user_fault:
     cmp qword [rel syscall_smoke_active], 1
@@ -225,6 +298,43 @@ run_user_process:
     xor r14, r14
     iretq
 
+global run_user_context
+run_user_context:
+    ; Rust extern "C":
+    ;   rdi = *const CpuContext
+    push rbx
+    push rbp
+    push r12
+    push r13
+    push r14
+    push r15
+    mov [rel syscall_smoke_kernel_rsp], rsp
+    mov qword [rel syscall_smoke_active], 1
+    mov rbx, rdi
+
+    mov rax, [rbx + 0]
+    mov rcx, [rbx + 16]
+    mov rdx, [rbx + 24]
+    mov rsi, [rbx + 32]
+    mov rdi, [rbx + 40]
+    mov rbp, [rbx + 48]
+    mov r8, [rbx + 64]
+    mov r9, [rbx + 72]
+    mov r10, [rbx + 80]
+    mov r11, [rbx + 88]
+    mov r12, [rbx + 96]
+    mov r13, [rbx + 104]
+    mov r14, [rbx + 112]
+    mov r15, [rbx + 120]
+
+    push qword USER_DATA_SELECTOR
+    push qword [rbx + 56]
+    push qword [rbx + 136]
+    push qword USER_CODE_SELECTOR
+    push qword [rbx + 128]
+    mov rbx, [rbx + 8]
+    iretq
+
 section .rodata
 align 8
 syscall_smoke_return_magic:
@@ -239,6 +349,36 @@ syscall_selected_stack_top:
 syscall_smoke_kernel_rsp:
     resq 1
 syscall_smoke_active:
+    resq 1
+syscall_saved_rax:
+    resq 1
+syscall_saved_rbx:
+    resq 1
+syscall_saved_rcx:
+    resq 1
+syscall_saved_rdx:
+    resq 1
+syscall_saved_rsi:
+    resq 1
+syscall_saved_rdi:
+    resq 1
+syscall_saved_rbp:
+    resq 1
+syscall_saved_r8:
+    resq 1
+syscall_saved_r9:
+    resq 1
+syscall_saved_r10:
+    resq 1
+syscall_saved_r11:
+    resq 1
+syscall_saved_r12:
+    resq 1
+syscall_saved_r13:
+    resq 1
+syscall_saved_r14:
+    resq 1
+syscall_saved_r15:
     resq 1
 alignb 16
 syscall_stack:

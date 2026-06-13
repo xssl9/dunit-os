@@ -371,6 +371,9 @@ pub fn prepare_process_elf(
         process.context.rip = parser.entry_point();
         process.context.rsp = initial_stack.rsp as u64;
         process.context.rflags = 0x202;
+        process.context.rdi = initial_stack.argc as u64;
+        process.context.rsi = initial_stack.argv as u64;
+        process.context.rdx = initial_stack.envp as u64;
         process.entry_argc = initial_stack.argc;
         process.entry_argv = initial_stack.argv;
         process.entry_envp = initial_stack.envp;

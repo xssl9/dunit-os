@@ -1,0 +1,11 @@
+[package]
+name = "gui_ping"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libdunit = { path = "../../libdunit" }
+
+[[bin]]
+name = "gui_ping"
+path = "src/main.rs"

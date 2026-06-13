@@ -21,6 +21,8 @@ static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 static mut PROCESS_TABLE: Option<Vec<ProcessRecord>> = None;
 static CURRENT_PID: AtomicU64 = AtomicU64::new(0);
 static PROCESS_EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+static PROCESS_YIELD_REQUESTED: AtomicBool = AtomicBool::new(false);
+static PROCESS_SCHEDULE_HINT: AtomicU64 = AtomicU64::new(0);
 static PROCESS_EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 static PROCESS_EXIT_KIND: AtomicI32 = AtomicI32::new(0);
 
@@ -233,6 +235,16 @@ impl Process {
         self.address_space()
             .ok_or(ProcessError::NoAddressSpace)
             .map(|address_space| address_space.activate())
+    }
+
+    pub unsafe fn switch_to_address_space(&self) -> Result<(), ProcessError> {
+        let root_frame = self
+            .address_space()
+            .ok_or(ProcessError::NoAddressSpace)?
+            .root_frame()
+            .as_usize();
+        crate::memory::vmm::switch_to_root_frame(root_frame);
+        Ok(())
     }
 
     pub fn terminate(&mut self) {
@@ -609,10 +621,39 @@ pub fn mark_process_started(pid: ProcessId) {
         let from = record.state;
         record.state = ProcessState::Running;
         record.has_run = true;
+        crate::process::scheduler::remove(pid);
         if from != ProcessState::Running {
             log_process_transition(pid, from, ProcessState::Running, "enter-user");
         }
     }
+}
+
+pub fn save_current_user_context_for_yield(next_pid: ProcessId) -> Result<ProcessId, ProcessError> {
+    let pid = current_pid().ok_or(ProcessError::NoCurrentProcess)?;
+    let table = process_table_mut();
+    let index = process_record_index(table, pid).ok_or(ProcessError::NoSuchProcess)?;
+    let record = &mut table[index];
+    if record.state != ProcessState::Running {
+        return Err(ProcessError::NotRunnable);
+    }
+    let process = record.process.as_mut().ok_or(ProcessError::ProcessNotPrepared)?;
+    if process.is_kernel {
+        return Err(ProcessError::InvalidUserContext);
+    }
+
+    unsafe {
+        crate::hal::syscall_capture_user_context(&mut process.context as *mut CpuContext, 0);
+    }
+    let from = record.state;
+    record.state = ProcessState::Ready;
+    process.state = ProcessState::Ready;
+    PROCESS_YIELD_REQUESTED.store(true, Ordering::SeqCst);
+    PROCESS_SCHEDULE_HINT.store(next_pid.0, Ordering::SeqCst);
+    if from != ProcessState::Ready {
+        log_process_transition(pid, from, ProcessState::Ready, "yield");
+    }
+    crate::process::scheduler::enqueue_ready(pid)?;
+    Ok(pid)
 }
 
 pub fn mark_process_finished(exit: ProcessExit) {
@@ -646,6 +687,9 @@ pub fn reap_process(pid: ProcessId) -> Result<(), ProcessError> {
     record.state = ProcessState::Reaped;
     record.waitable = false;
     crate::process::scheduler::remove(pid);
+    if let Some(ipc) = crate::ipc::get_ipc_manager() {
+        ipc.clear_messages(pid);
+    }
     log_process_transition(pid, from, ProcessState::Reaped, "reap");
     Ok(())
 }
@@ -714,6 +758,9 @@ pub fn wait_for_child(requested_pid: ProcessId) -> Result<WaitRecord, ProcessErr
     let from = record.state;
     log_process_transition(pid, from, ProcessState::Reaped, "wait");
     crate::process::scheduler::remove(pid);
+    if let Some(ipc) = crate::ipc::get_ipc_manager() {
+        ipc.clear_messages(pid);
+    }
     let mut record = table.remove(index);
     if let Some(mut process) = record.process.take() {
         let closed = process.cleanup_fds();
@@ -746,6 +793,9 @@ pub fn cleanup_prepared_children(parent_pid: ProcessId) -> usize {
                 let _ = process.cleanup_fds();
             }
             crate::process::scheduler::remove(pid);
+            if let Some(ipc) = crate::ipc::get_ipc_manager() {
+                ipc.clear_messages(pid);
+            }
             removed += 1;
         } else {
             index += 1;
@@ -760,6 +810,9 @@ pub fn autoreap_process(pid: ProcessId, reason: &str) -> Result<(), ProcessError
     let from = table[index].state;
     log_process_transition(pid, from, ProcessState::Reaped, reason);
     crate::process::scheduler::remove(pid);
+    if let Some(ipc) = crate::ipc::get_ipc_manager() {
+        ipc.clear_messages(pid);
+    }
     let mut record = table.remove(index);
     if let Some(mut process) = record.process.take() {
         let _ = process.cleanup_fds();
@@ -880,9 +933,26 @@ fn take_process_exit_request() -> Option<(i32, ProcessExitStatus)> {
     }
 }
 
+fn take_process_yield_request() -> bool {
+    PROCESS_YIELD_REQUESTED.swap(false, Ordering::SeqCst)
+}
+
+fn take_schedule_hint() -> Option<ProcessId> {
+    let pid = PROCESS_SCHEDULE_HINT.swap(0, Ordering::SeqCst);
+    if pid == 0 {
+        None
+    } else {
+        Some(ProcessId(pid))
+    }
+}
+
 pub fn enter_user_process(pid: ProcessId) -> Result<ProcessExit, ProcessError> {
     let previous_pid = CURRENT_PID.load(Ordering::SeqCst);
-    let (entry, user_stack, entry_argc, entry_argv, entry_envp) = with_process_mut(pid, |process| {
+    let previous_root = unsafe { crate::memory::vmm::active_root_frame() };
+    let root_pid = pid;
+    let mut next_pid = pid;
+    loop {
+        let context = with_process_mut(next_pid, |process| {
         if process.is_kernel {
             return Err(ProcessError::InvalidUserContext);
         }
@@ -897,37 +967,24 @@ pub fn enter_user_process(pid: ProcessId) -> Result<ProcessExit, ProcessError> {
         }
 
         process.state = ProcessState::Running;
-        Ok((
-            process.context.rip,
-            process.context.rsp,
-            process.entry_argc as u64,
-            process.entry_argv as u64,
-            process.entry_envp as u64,
-        ))
-    })?;
+            Ok(process.context)
+        })?;
 
     crate::memory::serial_write("[PROCESS-RUN] starting pid=");
-    serial_write_u64(pid.0);
+        serial_write_u64(next_pid.0);
     crate::memory::serial_write("\r\n");
-    mark_process_started(pid);
-    CURRENT_PID.store(pid.0, Ordering::SeqCst);
+        mark_process_started(next_pid);
+        CURRENT_PID.store(next_pid.0, Ordering::SeqCst);
 
     let run_result = unsafe {
         match current_process() {
             Some(current) => {
                 match current.install_syscall_stack() {
                     Ok(()) => {
-                        match current.activate_address_space() {
-                            Ok(active) => {
+                            match current.switch_to_address_space() {
+                                Ok(()) => {
                                 crate::memory::serial_write("[PROCESS-RUN] entered user mode\r\n");
-                                crate::hal::run_user_process(
-                                    entry,
-                                    user_stack,
-                                    entry_argc,
-                                    entry_argv,
-                                    entry_envp,
-                                );
-                                drop(active);
+                                    crate::hal::run_user_context(&context as *const CpuContext);
                                 Ok(())
                             }
                             Err(error) => Err(error),
@@ -944,47 +1001,91 @@ pub fn enter_user_process(pid: ProcessId) -> Result<ProcessExit, ProcessError> {
         Process::reset_syscall_stack_policy();
     }
 
-    let mut status = ProcessExitStatus::Fault(ProcessFault::Unknown);
-    let closed = with_process_mut(pid, |finished| {
-        status = if let Some((_code, requested_status)) = take_process_exit_request() {
-            match requested_status {
-                ProcessExitStatus::Exited(code) => finished.exit(code),
-                ProcessExitStatus::Fault(fault) => finished.fault(fault),
-            }
-            requested_status
-        } else if finished.state != ProcessState::Dead {
-            finished.fault(ProcessFault::Unknown);
-            ProcessExitStatus::Fault(ProcessFault::Unknown)
+        if take_process_yield_request() {
+            crate::memory::serial_write("[YIELD] pid=");
+            serial_write_u64(next_pid.0);
+            crate::memory::serial_write(" saved-context\r\n");
         } else {
-            finished.status.unwrap_or(ProcessExitStatus::Fault(ProcessFault::Unknown))
-        };
-        Ok(finished.cleanup_fds())
-    })?;
-    if closed > 0 {
-        crate::memory::serial_write("[PROCESS-RUN] cleaned fds=");
-        serial_write_usize(closed);
-        crate::memory::serial_write("\r\n");
-    }
-    let reaped_children = cleanup_prepared_children(pid);
-    if reaped_children > 0 {
-        crate::memory::serial_write("[PROCESS-RUN] reaped prepared children=");
-        serial_write_usize(reaped_children);
-        crate::memory::serial_write("\r\n");
-    }
-
-    CURRENT_PID.store(previous_pid, Ordering::SeqCst);
-    unsafe {
-        match current_process() {
-            Some(current) if !current.is_kernel && current.kernel_stack_top().is_some() => {
-                let _ = current.install_syscall_stack();
+            let mut status = ProcessExitStatus::Fault(ProcessFault::Unknown);
+            let closed = with_process_mut(next_pid, |finished| {
+                status = if let Some((_code, requested_status)) = take_process_exit_request() {
+                    match requested_status {
+                        ProcessExitStatus::Exited(code) => finished.exit(code),
+                        ProcessExitStatus::Fault(fault) => finished.fault(fault),
+                    }
+                    requested_status
+                } else if finished.state != ProcessState::Dead {
+                    finished.fault(ProcessFault::Unknown);
+                    ProcessExitStatus::Fault(ProcessFault::Unknown)
+                } else {
+                    finished.status.unwrap_or(ProcessExitStatus::Fault(ProcessFault::Unknown))
+                };
+                Ok(finished.cleanup_fds())
+            })?;
+            if closed > 0 {
+                crate::memory::serial_write("[PROCESS-RUN] cleaned fds=");
+                serial_write_usize(closed);
+                crate::memory::serial_write("\r\n");
             }
-            _ => Process::reset_syscall_stack_policy(),
+            let exit = ProcessExit { pid: next_pid, status };
+            mark_process_finished(exit);
+            let reaped_children = cleanup_prepared_children(next_pid);
+            if reaped_children > 0 {
+                crate::memory::serial_write("[PROCESS-RUN] reaped prepared children=");
+                serial_write_usize(reaped_children);
+                crate::memory::serial_write("\r\n");
+            }
+            if next_pid == root_pid {
+                CURRENT_PID.store(previous_pid, Ordering::SeqCst);
+                unsafe {
+                    crate::memory::vmm::switch_to_root_frame(previous_root);
+                    match current_process() {
+                        Some(current) if !current.is_kernel && current.kernel_stack_top().is_some() => {
+                            let _ = current.install_syscall_stack();
+                        }
+                        _ => Process::reset_syscall_stack_policy(),
+                    }
+                }
+                return run_result.map(|_| exit);
+            }
+        }
+
+        if let Err(error) = run_result {
+            return Err(error);
+        }
+        let hinted = take_schedule_hint()
+            .filter(|candidate| *candidate != next_pid && is_pid_runnable(*candidate));
+        let preferred_root = (next_pid != root_pid && is_pid_runnable(root_pid)).then_some(root_pid);
+        match hinted
+            .or(preferred_root)
+            .or_else(|| crate::process::scheduler::pick_next_candidate_excluding(next_pid))
+        {
+            Some(candidate) => {
+                crate::memory::serial_write("[SCHED] switch current=");
+                serial_write_u64(next_pid.0);
+                crate::memory::serial_write(" next=");
+                serial_write_u64(candidate.0);
+                crate::memory::serial_write("\r\n");
+                next_pid = candidate;
+            }
+            None => {
+                if next_pid == root_pid {
+                    CURRENT_PID.store(previous_pid, Ordering::SeqCst);
+                    unsafe {
+                        crate::memory::vmm::switch_to_root_frame(previous_root);
+                        match current_process() {
+                            Some(current) if !current.is_kernel && current.kernel_stack_top().is_some() => {
+                                let _ = current.install_syscall_stack();
+                            }
+                            _ => Process::reset_syscall_stack_policy(),
+                        }
+                    }
+                    return Err(ProcessError::SchedulerUnavailable);
+                }
+                next_pid = root_pid;
+            }
         }
     }
-
-    let exit = ProcessExit { pid, status };
-    mark_process_finished(exit);
-    run_result.map(|_| exit)
 }
 
 const fn fault_kind_to_i32(fault: ProcessFault) -> i32 {
