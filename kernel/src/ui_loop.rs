@@ -38,6 +38,18 @@ const DOCK_APPS: [(AppType, u32, &'static str); 3] = [
     (AppType::Monitor, ORANGE, "Stats"),
     (AppType::Editor, PURPLE, "Edit"),
 ];
+const MAX_BLUR_WIDTH: usize = 1920;
+const MAX_BLUR_HEIGHT: usize = 1080;
+const MAX_BLUR_PIXELS: usize = MAX_BLUR_WIDTH * MAX_BLUR_HEIGHT;
+const BLUR_RADIUS: usize = 4;
+const BLUR_WEIGHTS: [u32; BLUR_RADIUS * 2 + 1] = [1, 4, 10, 16, 19, 16, 10, 4, 1];
+const BLUR_WEIGHT_SUM: u32 = 81;
+
+static mut BLUR_TEMP: [u32; MAX_BLUR_PIXELS] = [0; MAX_BLUR_PIXELS];
+static mut BLUR_CACHE: [u32; MAX_BLUR_PIXELS] = [0; MAX_BLUR_PIXELS];
+static mut BLUR_CACHE_WIDTH: usize = 0;
+static mut BLUR_CACHE_HEIGHT: usize = 0;
+static mut BLUR_CACHE_READY: bool = false;
 
 #[derive(Clone, Copy)]
 struct UiState {
@@ -125,30 +137,89 @@ fn rounded_contains(px: usize, py: usize, x: usize, y: usize, w: usize, h: usize
     dx * dx + dy * dy <= r * r
 }
 
-fn blurred_framebuffer_pixel(fb: Framebuffer, x: usize, y: usize, width: usize, height: usize) -> u32 {
+fn blur_sample_horizontal(x: usize, y: usize, width: usize, height: usize) -> u32 {
     let mut r = 0u32;
     let mut g = 0u32;
     let mut b = 0u32;
-    let mut count = 0u32;
-    let offsets = [0usize, 3, 7, 11];
 
-    for oy in offsets {
-        for ox in offsets {
-            let sx = x.saturating_add(ox).saturating_sub(6).min(width.saturating_sub(1));
-            let sy = y.saturating_add(oy).saturating_sub(6).min(height.saturating_sub(1));
-            let color = fb.read_pixel(sx, sy);
-            r += (color >> 16) & 0xff;
-            g += (color >> 8) & 0xff;
-            b += color & 0xff;
-            count += 1;
+    for i in 0..BLUR_WEIGHTS.len() {
+        let weight = BLUR_WEIGHTS[i];
+        let sx = x
+            .saturating_add(i)
+            .saturating_sub(BLUR_RADIUS)
+            .min(width.saturating_sub(1));
+        let color = desktop_pixel(sx, y, width, height);
+        r += ((color >> 16) & 0xff) * weight;
+        g += ((color >> 8) & 0xff) * weight;
+        b += (color & 0xff) * weight;
+    }
+
+    ((r / BLUR_WEIGHT_SUM) << 16) | ((g / BLUR_WEIGHT_SUM) << 8) | (b / BLUR_WEIGHT_SUM)
+}
+
+fn blur_temp_pixel(x: usize, y: usize, width: usize) -> u32 {
+    unsafe { BLUR_TEMP[y * width + x] }
+}
+
+fn rebuild_blur_cache(width: usize, height: usize) {
+    if width == 0 || height == 0 || width > MAX_BLUR_WIDTH || height > MAX_BLUR_HEIGHT {
+        unsafe {
+            BLUR_CACHE_READY = false;
+        }
+        return;
+    }
+
+    unsafe {
+        if BLUR_CACHE_READY && BLUR_CACHE_WIDTH == width && BLUR_CACHE_HEIGHT == height {
+            return;
+        }
+
+        serial_write("[GUI] rebuilding two-pass blur cache\r\n");
+
+        for y in 0..height {
+            for x in 0..width {
+                BLUR_TEMP[y * width + x] = blur_sample_horizontal(x, y, width, height);
+            }
+        }
+
+        for y in 0..height {
+            for x in 0..width {
+                let mut r = 0u32;
+                let mut g = 0u32;
+                let mut b = 0u32;
+
+                for i in 0..BLUR_WEIGHTS.len() {
+                    let weight = BLUR_WEIGHTS[i];
+                    let sy = y
+                        .saturating_add(i)
+                        .saturating_sub(BLUR_RADIUS)
+                        .min(height.saturating_sub(1));
+                    let color = blur_temp_pixel(x, sy, width);
+                    r += ((color >> 16) & 0xff) * weight;
+                    g += ((color >> 8) & 0xff) * weight;
+                    b += (color & 0xff) * weight;
+                }
+
+                BLUR_CACHE[y * width + x] =
+                    ((r / BLUR_WEIGHT_SUM) << 16) | ((g / BLUR_WEIGHT_SUM) << 8) | (b / BLUR_WEIGHT_SUM);
+            }
+        }
+
+        BLUR_CACHE_WIDTH = width;
+        BLUR_CACHE_HEIGHT = height;
+        BLUR_CACHE_READY = true;
+        serial_write("[GUI] two-pass blur cache ready\r\n");
+    }
+}
+
+fn blurred_desktop_pixel(x: usize, y: usize, width: usize, height: usize) -> u32 {
+    unsafe {
+        if BLUR_CACHE_READY && BLUR_CACHE_WIDTH == width && BLUR_CACHE_HEIGHT == height {
+            return BLUR_CACHE[y.min(height.saturating_sub(1)) * width + x.min(width.saturating_sub(1))];
         }
     }
 
-    if count == 0 {
-        return BG;
-    }
-
-    ((r / count) << 16) | ((g / count) << 8) | (b / count)
+    desktop_pixel(x, y, width, height)
 }
 
 fn draw_blur_round_rect(
@@ -170,7 +241,7 @@ fn draw_blur_round_rect(
     for py in rect.y..rect.bottom() {
         for px in rect.x..rect.right() {
             if rounded_contains(px, py, x, y, w, h, radius) {
-                let blurred = blurred_framebuffer_pixel(fb, px, py, width, height);
+                let blurred = blurred_desktop_pixel(px, py, width, height);
                 put_pixel(fb, width, height, px, py, rgb_blend(blurred, tint, tint_alpha));
             }
         }
@@ -924,6 +995,7 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
 
     let mut state = UiState::new();
 
+    rebuild_blur_cache(width, height);
     redraw_full_screen(scene, width, height, &state);
     if let Some(buffer) = back_buffer.as_ref() {
         buffer.present_full(front);
