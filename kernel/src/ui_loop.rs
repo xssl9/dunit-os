@@ -1,3 +1,4 @@
+use crate::fs::vfs;
 use crate::gui::renderer::{BackBuffer, DamageTracker, Framebuffer, Rect};
 use crate::drivers::{keyboard, mouse};
 use crate::serial_write;
@@ -24,11 +25,11 @@ const SHADOW: u32 = 0x020304;
 const CURSOR_W: usize = 16;
 const CURSOR_H: usize = 22;
 const CURSOR_AREA: usize = CURSOR_W * CURSOR_H;
-const WALLPAPER_BMP: &[u8] = include_bytes!("../../wallpaper.bmp");
 const WALLPAPER_WIDTH: usize = 1600;
 const WALLPAPER_HEIGHT: usize = 900;
 const WALLPAPER_OFFSET: usize = 54;
 const WALLPAPER_STRIDE: usize = WALLPAPER_WIDTH * 3;
+const WALLPAPER_PATH: &str = "/assets/wallpaper.bmp";
 const ICON_SIZE: usize = 44;
 const TERMINAL_ICON: &[u8] = include_bytes!("../assets/terminal.rgba");
 const TEXT_ICON: &[u8] = include_bytes!("../assets/text.rgba");
@@ -50,6 +51,7 @@ static mut BLUR_CACHE: [u32; MAX_BLUR_PIXELS] = [0; MAX_BLUR_PIXELS];
 static mut BLUR_CACHE_WIDTH: usize = 0;
 static mut BLUR_CACHE_HEIGHT: usize = 0;
 static mut BLUR_CACHE_READY: bool = false;
+static mut WALLPAPER_READY: bool = false;
 
 #[derive(Clone, Copy)]
 struct UiState {
@@ -72,6 +74,10 @@ impl UiState {
     }
 }
 
+fn rects_intersect(a: Rect, b: Rect) -> bool {
+    a.x < b.right() && a.right() > b.x && a.y < b.bottom() && a.bottom() > b.y
+}
+
 #[derive(Clone, Copy)]
 enum UiAction {
     ToggleLauncher,
@@ -79,6 +85,71 @@ enum UiAction {
     ToggleNotifications,
     SetBrightness(u8),
     ToggleApp(AppType),
+}
+
+#[derive(Clone, Copy)]
+enum PointerOp {
+    Drag {
+        idx: usize,
+        offset_x: usize,
+        offset_y: usize,
+    },
+    Resize {
+        idx: usize,
+        offset_x: usize,
+        offset_y: usize,
+    },
+}
+
+fn validate_wallpaper_bmp(data: &[u8]) -> bool {
+    if data.len() < WALLPAPER_OFFSET + WALLPAPER_STRIDE * WALLPAPER_HEIGHT {
+        return false;
+    }
+
+    data[0] == b'B'
+        && data[1] == b'M'
+        && data.get(10).copied() == Some(WALLPAPER_OFFSET as u8)
+        && data.get(18).copied() == Some((WALLPAPER_WIDTH & 0xff) as u8)
+        && data.get(19).copied() == Some(((WALLPAPER_WIDTH >> 8) & 0xff) as u8)
+        && data.get(22).copied() == Some((WALLPAPER_HEIGHT & 0xff) as u8)
+        && data.get(23).copied() == Some(((WALLPAPER_HEIGHT >> 8) & 0xff) as u8)
+        && data.get(28).copied() == Some(24)
+}
+
+fn load_wallpaper() {
+    unsafe {
+        if WALLPAPER_READY {
+            return;
+        }
+    }
+
+    if let Some(data) = vfs::static_file(WALLPAPER_PATH) {
+        if validate_wallpaper_bmp(data) {
+            unsafe {
+                WALLPAPER_READY = true;
+            }
+            serial_write("[GUI] wallpaper loaded from VFS\r\n");
+            return;
+        }
+
+        serial_write("[GUI] wallpaper VFS asset has invalid BMP format\r\n");
+    } else {
+        serial_write("[GUI] wallpaper VFS asset missing\r\n");
+    }
+
+    unsafe {
+        WALLPAPER_READY = false;
+    }
+}
+
+fn wallpaper_bytes() -> Option<&'static [u8]> {
+    unsafe {
+        if WALLPAPER_READY {
+            vfs::static_file(WALLPAPER_PATH)
+        } else {
+            None
+        }
+    }
 }
 
 fn put_pixel(fb: Framebuffer, _width: usize, _height: usize, x: usize, y: usize, color: u32) {
@@ -426,18 +497,22 @@ fn dock_layout(width: usize, height: usize) -> (usize, usize, usize, usize, usiz
 }
 
 fn wallpaper_pixel(x: usize, y: usize, width: usize, height: usize) -> u32 {
+    let Some(wallpaper) = wallpaper_bytes() else {
+        return BG;
+    };
+
     let src_x = x.saturating_mul(WALLPAPER_WIDTH) / width.max(1);
     let src_y = y.saturating_mul(WALLPAPER_HEIGHT) / height.max(1);
     let bmp_y = WALLPAPER_HEIGHT.saturating_sub(1).saturating_sub(src_y.min(WALLPAPER_HEIGHT - 1));
     let offset = WALLPAPER_OFFSET + bmp_y * WALLPAPER_STRIDE + src_x.min(WALLPAPER_WIDTH - 1) * 3;
 
-    if offset + 2 >= WALLPAPER_BMP.len() {
+    if offset + 2 >= wallpaper.len() {
         return BG;
     }
 
-    let b = WALLPAPER_BMP[offset] as u32;
-    let g = WALLPAPER_BMP[offset + 1] as u32;
-    let r = WALLPAPER_BMP[offset + 2] as u32;
+    let b = wallpaper[offset] as u32;
+    let g = wallpaper[offset + 1] as u32;
+    let r = wallpaper[offset + 2] as u32;
     let shade = 46;
     ((r * shade / 100) << 16) | ((g * shade / 100) << 8) | (b * shade / 100)
 }
@@ -530,6 +605,8 @@ fn draw_window(fb: Framebuffer, width: usize, height: usize, window: &window_man
     draw_traffic_button(fb, width, height, window.x + 32, window.y + 11, YELLOW);
     draw_traffic_button(fb, width, height, window.x + 52, window.y + 11, GREEN);
     draw_text(fb, width, height, window.x + 82, window.y + 13, window.title, TEXT);
+    draw_rect(fb, width, height, window.x + window.width.saturating_sub(16), window.y + window.height.saturating_sub(5), 10, 1, 0x425047);
+    draw_rect(fb, width, height, window.x + window.width.saturating_sub(11), window.y + window.height.saturating_sub(10), 5, 1, 0x425047);
 
     let x = window.x + 18;
     let y = window.y + 50;
@@ -697,9 +774,35 @@ fn redraw_region(fb: Framebuffer, width: usize, height: usize, rect: Rect, state
         }
     }
 
-    draw_desktop_widgets(fb, width, height, state);
-    draw_windows(fb, width, height, state);
-    draw_dock(fb, width, height);
+    let top_panel = Rect::new(0, 0, width, 42);
+    let hero = Rect::new(48, 68, 520, 72);
+    let launcher = Rect::new(46, 162, 350, 272);
+    let quick = Rect::new(width.saturating_sub(330), 64, 302, 176);
+    let notifications = Rect::new(width.saturating_sub(330), 440, 302, 118);
+    if rects_intersect(rect, top_panel)
+        || rects_intersect(rect, hero)
+        || (state.launcher_open && rects_intersect(rect, launcher))
+        || (state.quick_open && rects_intersect(rect, quick))
+        || (state.notifications_open && rects_intersect(rect, notifications))
+    {
+        draw_desktop_widgets(fb, width, height, state);
+    }
+
+    if let Some(wm) = window_manager::get_wm() {
+        for window in wm.get_windows() {
+            if window.visible {
+                let window_rect = Rect::new(window.x, window.y, window.width + 12, window.height + 14);
+                if rects_intersect(rect, window_rect) {
+                    draw_window(fb, width, height, window, state);
+                }
+            }
+        }
+    }
+
+    let (dock_x, dock_y, dock_width, _, _) = dock_layout(width, height);
+    if rects_intersect(rect, Rect::new(dock_x, dock_y, dock_width + 10, 76)) {
+        draw_dock(fb, width, height);
+    }
     apply_brightness(fb, width, height, state, rect);
 }
 
@@ -939,6 +1042,7 @@ fn animate_genie(
     }
 
     let frames = 4;
+    let mut last_rect = dock_rect;
     for step in 0..=frames {
         let t = ease_step(step, frames);
         let t = if opening { t } else { 1000usize.saturating_sub(t) };
@@ -949,15 +1053,14 @@ fn animate_genie(
             lerp_usize(dock_rect.height, window_rect.height, t),
         );
 
-        redraw_full_screen(scene, width, height, state);
+        let damage = padded_rect(rect.union(last_rect), 18, width, height);
+        redraw_region(scene, width, height, damage, state);
         draw_genie_frame(scene, width, height, rect, GLASS);
         if let Some(buffer) = back_buffer {
-            buffer.present_full(front);
+            buffer.present_rect(front, damage);
         }
 
-        for _ in 0..2_000 {
-            unsafe { core::arch::asm!("pause"); }
-        }
+        last_rect = rect;
     }
 }
 
@@ -995,6 +1098,7 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
 
     let mut state = UiState::new();
 
+    load_wallpaper();
     rebuild_blur_cache(width, height);
     redraw_full_screen(scene, width, height, &state);
     if let Some(buffer) = back_buffer.as_ref() {
@@ -1003,7 +1107,7 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
 
     let (mut old_mouse_x, mut old_mouse_y) = mouse::get_position();
     let mut old_buttons = mouse::get_buttons();
-    let mut dragging: Option<(usize, usize, usize)> = None;
+    let mut pointer_op: Option<PointerOp> = None;
     let mut cursor_background = [0u32; CURSOR_AREA];
     let mut damage = DamageTracker::new();
     if back_buffer.is_none() {
@@ -1031,18 +1135,43 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                 .unwrap_or(None);
 
             if let Some((x, y, w, h, app_type)) = closed {
-                dragging = None;
+                pointer_op = None;
                 let window_rect = Rect::new(x, y, w, h);
                 if let Some(index) = dock_app_index(app_type) {
                     let dock_rect = dock_icon_rect(index, width, height);
                     animate_genie(scene, front, back_buffer.as_ref(), width, height, dock_rect, window_rect, false, &state);
                 }
                 full_redraw = true;
+            } else if let Some((x, y, w, h, app_type)) = window_manager::get_wm()
+                .map(|wm| wm.minimize_at(mx, my))
+                .unwrap_or(None)
+            {
+                pointer_op = None;
+                let window_rect = Rect::new(x, y, w, h);
+                if let Some(index) = dock_app_index(app_type) {
+                    let dock_rect = dock_icon_rect(index, width, height);
+                    animate_genie(scene, front, back_buffer.as_ref(), width, height, dock_rect, window_rect, false, &state);
+                }
+                full_redraw = true;
+            } else if let Some((x, y, w, h, app_type)) = window_manager::get_wm()
+                .map(|wm| wm.zoom_at(mx, my, width, height))
+                .unwrap_or(None)
+            {
+                pointer_op = None;
+                let old_rect = Rect::new(x, y, w, h);
+                let new_rect = window_manager::get_wm()
+                    .and_then(|wm| wm.app_bounds(app_type).map(rect_from_bounds))
+                    .unwrap_or(old_rect);
+                if back_buffer.is_some() {
+                    drag_damage = Some(padded_rect(old_rect.union(new_rect), 18, width, height));
+                } else {
+                    full_redraw = true;
+                }
             } else if let Some(action) = handle_widget_click(mx, my, width, height, &state) {
-                dragging = None;
+                pointer_op = None;
                 full_redraw = apply_ui_action(&mut state, action);
             } else if let Some(app_type) = handle_dock_click(mx, my, width, height) {
-                dragging = None;
+                pointer_op = None;
                 let dock_rect = dock_icon_rect(dock_app_index(app_type).unwrap_or(0), width, height);
                 let app_state = window_manager::get_wm()
                     .and_then(|wm| wm.app_bounds(app_type).map(|bounds| (wm.app_visible(app_type), bounds)));
@@ -1062,32 +1191,59 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                 }
                 full_redraw = true;
             } else {
-                dragging = window_manager::get_wm()
-                    .and_then(|wm| wm.begin_drag_at(mx, my));
+                pointer_op = window_manager::get_wm()
+                    .and_then(|wm| wm.begin_resize_at(mx, my))
+                    .map(|(idx, offset_x, offset_y)| PointerOp::Resize { idx, offset_x, offset_y })
+                    .or_else(|| {
+                        window_manager::get_wm()
+                            .and_then(|wm| wm.begin_drag_at(mx, my))
+                            .map(|(idx, offset_x, offset_y)| PointerOp::Drag { idx, offset_x, offset_y })
+                    });
             }
         }
 
         if pressed {
-            if let Some((idx, offset_x, offset_y)) = dragging {
+            if let Some(op) = pointer_op {
                 if let Some(wm) = window_manager::get_wm() {
                     let mx = mouse_x.max(0) as usize;
                     let my = mouse_y.max(0) as usize;
+                    let (idx, offset_x, offset_y) = match op {
+                        PointerOp::Drag { idx, offset_x, offset_y } => (idx, offset_x, offset_y),
+                        PointerOp::Resize { idx, offset_x, offset_y } => (idx, offset_x, offset_y),
+                    };
                     let old_bounds = wm.window_bounds(idx);
-                    wm.drag_window(
-                        idx,
-                        mx.saturating_sub(offset_x),
-                        my.saturating_sub(offset_y),
-                        width,
-                        height,
-                    );
+                    match op {
+                        PointerOp::Drag { .. } => {
+                            if let Some((x, y, _, _)) = old_bounds {
+                                let target_x = mx.saturating_sub(offset_x);
+                                let target_y = my.saturating_sub(offset_y);
+                                let smooth_x = (x.saturating_mul(2) + target_x) / 3;
+                                let smooth_y = (y.saturating_mul(2) + target_y) / 3;
+                                wm.drag_window(idx, smooth_x, smooth_y, width, height);
+                            }
+                        }
+                        PointerOp::Resize { .. } => {
+                            if let Some((x, y, _, _)) = old_bounds {
+                                let target_w = mx.saturating_sub(x).saturating_add(offset_x);
+                                let target_h = my.saturating_sub(y).saturating_add(offset_y);
+                                wm.resize_window(idx, target_w, target_h, width, height);
+                            }
+                        }
+                    }
                     let new_bounds = wm.window_bounds(idx);
                     if let (Some(old_bounds), Some(new_bounds)) = (old_bounds, new_bounds) {
+                        if old_bounds == new_bounds && !cursor_moved {
+                            old_mouse_x = mouse_x;
+                            old_mouse_y = mouse_y;
+                            old_buttons = buttons;
+                            continue;
+                        }
                         let window_damage = rect_from_bounds(old_bounds)
                             .union(rect_from_bounds(new_bounds))
                             .union(cursor_rect(old_mouse_x, old_mouse_y))
                             .union(cursor_rect(mouse_x, mouse_y));
                         if back_buffer.is_some() {
-                            drag_damage = Some(padded_rect(window_damage, 3, width, height));
+                            drag_damage = Some(padded_rect(window_damage, 10, width, height));
                         } else {
                             full_redraw = true;
                         }
@@ -1097,7 +1253,7 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                 }
             }
         } else {
-            dragging = None;
+            pointer_op = None;
         }
 
         if full_redraw {
@@ -1132,7 +1288,7 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
         old_mouse_y = mouse_y;
         old_buttons = buttons;
 
-        for _ in 0..3000 {
+        for _ in 0..100 {
             unsafe { core::arch::asm!("pause"); }
         }
     }

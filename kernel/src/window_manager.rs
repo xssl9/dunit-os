@@ -6,6 +6,11 @@ pub struct Window {
     pub y: usize,
     pub width: usize,
     pub height: usize,
+    pub restore_x: usize,
+    pub restore_y: usize,
+    pub restore_width: usize,
+    pub restore_height: usize,
+    pub maximized: bool,
     pub title: &'static str,
     pub visible: bool,
     pub app_type: AppType,
@@ -62,6 +67,11 @@ impl WindowManager {
             y,
             width,
             height,
+            restore_x: x,
+            restore_y: y,
+            restore_width: width,
+            restore_height: height,
+            maximized: false,
             title,
             visible: true,
             app_type,
@@ -106,6 +116,62 @@ impl WindowManager {
         None
     }
 
+    pub fn minimize_at(&mut self, x: usize, y: usize) -> Option<(usize, usize, usize, usize, AppType)> {
+        for i in (0..self.window_count).rev() {
+            if let Some(ref mut window) = self.windows[i] {
+                if !window.visible {
+                    continue;
+                }
+
+                let button_x = window.x + 32;
+                let button_y = window.y + 11;
+                if x >= button_x && x < button_x + 12 && y >= button_y && y < button_y + 12 {
+                    let bounds = (window.x, window.y, window.width, window.height, window.app_type);
+                    window.visible = false;
+                    return Some(bounds);
+                }
+            }
+        }
+
+        None
+    }
+
+    pub fn zoom_at(&mut self, x: usize, y: usize, screen_width: usize, screen_height: usize) -> Option<(usize, usize, usize, usize, AppType)> {
+        for i in (0..self.window_count).rev() {
+            if let Some(ref mut window) = self.windows[i] {
+                if !window.visible {
+                    continue;
+                }
+
+                let button_x = window.x + 52;
+                let button_y = window.y + 11;
+                if x >= button_x && x < button_x + 12 && y >= button_y && y < button_y + 12 {
+                    let old = (window.x, window.y, window.width, window.height, window.app_type);
+                    if window.maximized {
+                        window.x = window.restore_x;
+                        window.y = window.restore_y;
+                        window.width = window.restore_width;
+                        window.height = window.restore_height;
+                        window.maximized = false;
+                    } else {
+                        window.restore_x = window.x;
+                        window.restore_y = window.y;
+                        window.restore_width = window.width;
+                        window.restore_height = window.height;
+                        window.x = 24;
+                        window.y = 54;
+                        window.width = screen_width.saturating_sub(48).max(260);
+                        window.height = screen_height.saturating_sub(150).max(180);
+                        window.maximized = true;
+                    }
+                    return Some(old);
+                }
+            }
+        }
+
+        None
+    }
+
     pub fn begin_drag_at(&self, x: usize, y: usize) -> Option<(usize, usize, usize)> {
         for i in (0..self.window_count).rev() {
             if let Some(window) = self.windows[i] {
@@ -115,10 +181,9 @@ impl WindowManager {
 
                 let inside_x = x >= window.x && x < window.x + window.width;
                 let inside_title = y >= window.y && y < window.y + 32;
-                let close_x = window.x + 12;
-                let over_close = x >= close_x && x < close_x + 12 && y >= window.y + 11 && y < window.y + 23;
+                let over_buttons = x >= window.x + 12 && x < window.x + 64 && y >= window.y + 11 && y < window.y + 23;
 
-                if inside_x && inside_title && !over_close {
+                if inside_x && inside_title && !over_buttons {
                     return Some((i, x - window.x, y - window.y));
                 }
             }
@@ -137,6 +202,39 @@ impl WindowManager {
             let max_y = screen_height.saturating_sub(window.height);
             window.x = x.min(max_x);
             window.y = y.min(max_y).max(42);
+            window.maximized = false;
+        }
+    }
+
+    pub fn begin_resize_at(&self, x: usize, y: usize) -> Option<(usize, usize, usize)> {
+        for i in (0..self.window_count).rev() {
+            if let Some(window) = self.windows[i] {
+                if !window.visible {
+                    continue;
+                }
+
+                let grip_x = window.x + window.width.saturating_sub(18);
+                let grip_y = window.y + window.height.saturating_sub(18);
+                if x >= grip_x && x < window.x + window.width && y >= grip_y && y < window.y + window.height {
+                    return Some((i, window.x + window.width - x, window.y + window.height - y));
+                }
+            }
+        }
+
+        None
+    }
+
+    pub fn resize_window(&mut self, idx: usize, width: usize, height: usize, screen_width: usize, screen_height: usize) {
+        if idx >= self.window_count {
+            return;
+        }
+
+        if let Some(ref mut window) = self.windows[idx] {
+            let max_width = screen_width.saturating_sub(window.x).max(260);
+            let max_height = screen_height.saturating_sub(window.y).max(160);
+            window.width = width.clamp(260, max_width);
+            window.height = height.clamp(160, max_height);
+            window.maximized = false;
         }
     }
 

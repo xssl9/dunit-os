@@ -108,6 +108,8 @@ userspace:
 	cp $(USERSPACE_DIR)/system_apps/fault_pf/target/x86_64-unknown-none/release/fault_pf $(USERSPACE_BUILD_DIR)/fault_pf
 	cd $(USERSPACE_DIR)/system_apps/fault_ud && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
 	cp $(USERSPACE_DIR)/system_apps/fault_ud/target/x86_64-unknown-none/release/fault_ud $(USERSPACE_BUILD_DIR)/fault_ud
+	cd $(USERSPACE_DIR)/system_apps/dtop && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
+	cp $(USERSPACE_DIR)/system_apps/dtop/target/x86_64-unknown-none/release/dtop $(USERSPACE_BUILD_DIR)/dtop
 	@echo "Userspace programs built in $(USERSPACE_BUILD_DIR)/"
 
 iso: $(BUILD_DIR)/kernel.elf userspace

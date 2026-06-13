@@ -16,10 +16,12 @@ static BMP_VIEWER_BYTES: &[u8] = include_bytes!("../../../build/userspace/bmp_vi
 static SCHEDULER_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/scheduler_test");
 static SPAWN_READY_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/spawn_ready_test");
 static STDIN_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/stdin_test");
+static DTOP_BYTES: &[u8] = include_bytes!("../../../build/userspace/dtop");
 static FAULT_PF_BYTES: &[u8] = include_bytes!("../../../build/userspace/fault_pf");
 static FAULT_UD_BYTES: &[u8] = include_bytes!("../../../build/userspace/fault_ud");
 static DR15_BMP_BYTES: &[u8] = include_bytes!("../../../dr15.bmp");
 static LOGO_BMP_BYTES: &[u8] = include_bytes!("../../../logo.bmp");
+static WALLPAPER_BMP_BYTES: &[u8] = include_bytes!("../../../wallpaper.bmp");
 
 pub type FileDescriptor = u32;
 pub type FileHandle = usize;
@@ -569,6 +571,7 @@ pub fn init() -> Result<()> {
 
         ROOT_MEMFS.add_file("/assets/dr15.bmp", make_preview_bmp(DR15_BMP_BYTES));
         ROOT_MEMFS.add_file("/assets/logo.bmp", make_preview_bmp(LOGO_BMP_BYTES));
+        ROOT_MEMFS.add_static_file("/assets/wallpaper.bmp", WALLPAPER_BMP_BYTES);
 
         let mut scheduler_test = Vec::new();
         scheduler_test.extend_from_slice(SCHEDULER_TEST_BYTES);
@@ -581,6 +584,10 @@ pub fn init() -> Result<()> {
         let mut stdin_test = Vec::new();
         stdin_test.extend_from_slice(STDIN_TEST_BYTES);
         ROOT_MEMFS.add_file("/app/stdin_test", stdin_test);
+
+        let mut dtop = Vec::new();
+        dtop.extend_from_slice(DTOP_BYTES);
+        ROOT_MEMFS.add_file("/app/dtop", dtop);
 
         let mut fault_pf = Vec::new();
         fault_pf.extend_from_slice(FAULT_PF_BYTES);
@@ -602,4 +609,8 @@ pub fn init() -> Result<()> {
 
 pub fn get_vfs() -> Option<&'static mut VirtualFileSystem> {
     unsafe { VFS_INSTANCE.as_mut() }
+}
+
+pub fn static_file(path: &str) -> Option<&'static [u8]> {
+    unsafe { ROOT_MEMFS.static_file(path) }
 }

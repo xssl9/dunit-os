@@ -10,7 +10,55 @@ const BASE_DIRS: [&str; 7] = ["kernel", "proc", "app", "assets", "cfg", "usr", "
 struct MemNode {
     path: String,
     file_type: FileType,
-    data: Vec<u8>,
+    data: MemData,
+}
+
+enum MemData {
+    Owned(Vec<u8>),
+    Static(&'static [u8]),
+}
+
+impl MemData {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Owned(data) => data.as_slice(),
+            Self::Static(data) => data,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+
+    fn clear(&mut self) -> Result<()> {
+        match self {
+            Self::Owned(data) => {
+                data.clear();
+                Ok(())
+            }
+            Self::Static(_) => Err(VfsError::PermissionDenied),
+        }
+    }
+
+    fn resize(&mut self, len: usize) -> Result<()> {
+        match self {
+            Self::Owned(data) => {
+                data.resize(len, 0);
+                Ok(())
+            }
+            Self::Static(_) => Err(VfsError::PermissionDenied),
+        }
+    }
+
+    fn write_at(&mut self, offset: usize, buf: &[u8]) -> Result<()> {
+        match self {
+            Self::Owned(data) => {
+                data[offset..offset + buf.len()].copy_from_slice(buf);
+                Ok(())
+            }
+            Self::Static(_) => Err(VfsError::PermissionDenied),
+        }
+    }
 }
 
 struct OpenMemHandle {
@@ -45,7 +93,22 @@ impl MemFs {
     pub fn add_file(&mut self, name: &str, data: Vec<u8>) {
         let _ = self.create(name);
         if let Some(idx) = self.node_index(name) {
-            self.nodes[idx].data = data;
+            self.nodes[idx].data = MemData::Owned(data);
+        }
+    }
+
+    pub fn add_static_file(&mut self, name: &str, data: &'static [u8]) {
+        let _ = self.create(name);
+        if let Some(idx) = self.node_index(name) {
+            self.nodes[idx].data = MemData::Static(data);
+        }
+    }
+
+    pub fn static_file(&self, name: &str) -> Option<&'static [u8]> {
+        let idx = self.node_index(name)?;
+        match self.nodes[idx].data {
+            MemData::Static(data) => Some(data),
+            MemData::Owned(_) => None,
         }
     }
 
@@ -126,7 +189,7 @@ impl FileSystem for MemFs {
                     if !flags.can_write() {
                         return Err(VfsError::PermissionDenied);
                     }
-                    self.nodes[nidx].data.clear();
+                    self.nodes[nidx].data.clear()?;
                 }
 
                 let handle = self.next_handle.fetch_add(1, Ordering::SeqCst);
@@ -160,7 +223,7 @@ impl FileSystem for MemFs {
             return Err(VfsError::IsADirectory);
         }
 
-        let data = &self.nodes[nidx].data;
+        let data = self.nodes[nidx].data.as_slice();
         let bytes_read = if offset >= data.len() {
             0
         } else {
@@ -193,9 +256,9 @@ impl FileSystem for MemFs {
         };
         let end = offset + buf.len();
         if end > self.nodes[nidx].data.len() {
-            self.nodes[nidx].data.resize(end, 0);
+            self.nodes[nidx].data.resize(end)?;
         }
-        self.nodes[nidx].data[offset..end].copy_from_slice(buf);
+        self.nodes[nidx].data.write_at(offset, buf)?;
         self.open_handles[hidx].1.offset = end;
         Ok(buf.len())
     }
@@ -270,7 +333,7 @@ impl FileSystem for MemFs {
         self.nodes.push(MemNode {
             path: String::from(clean),
             file_type: FileType::File,
-            data: Vec::new(),
+            data: MemData::Owned(Vec::new()),
         });
         Ok(())
     }
@@ -290,7 +353,7 @@ impl FileSystem for MemFs {
         self.nodes.push(MemNode {
             path: String::from(clean),
             file_type: FileType::Directory,
-            data: Vec::new(),
+            data: MemData::Owned(Vec::new()),
         });
         Ok(())
     }
@@ -318,7 +381,7 @@ impl FileSystem for MemFs {
         if self.nodes[idx].file_type != FileType::File {
             return Err(VfsError::IsADirectory);
         }
-        self.nodes[idx].data.clear();
+        self.nodes[idx].data.clear()?;
         Ok(())
     }
 

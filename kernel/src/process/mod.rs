@@ -456,6 +456,23 @@ fn current_pid() -> Option<ProcessId> {
     }
 }
 
+pub fn get_process_snapshots() -> Vec<ProcessSnapshot> {
+    let mut snapshots = Vec::new();
+    let table = process_table_mut();
+    for record in table {
+        snapshots.push(ProcessSnapshot {
+            pid: record.pid,
+            parent: record.parent,
+            state: record.state,
+            status: record.status,
+            has_run: record.has_run,
+            waitable: record.waitable,
+            path: record.path.clone(),
+        });
+    }
+    snapshots
+}
+
 pub fn insert_process_record(
     pid: ProcessId,
     parent: Option<ProcessId>,

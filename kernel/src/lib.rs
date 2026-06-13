@@ -801,6 +801,38 @@ fn terminal_handle_fs_command(console: &mut terminal::FbConsole, cmd_str: &str) 
 #[no_mangle]
 static mut SCREEN_LOG_FB: Option<(*mut u32, usize)> = None;
 static mut SCREEN_LOG_Y: usize = 10;
+const BOOT_BACKGROUND_BMP: &[u8] = include_bytes!("../../boot_blur.bmp");
+const BOOT_BACKGROUND_WIDTH: usize = 1024;
+const BOOT_BACKGROUND_HEIGHT: usize = 768;
+const BOOT_BACKGROUND_OFFSET: usize = 54;
+const BOOT_BACKGROUND_STRIDE: usize = BOOT_BACKGROUND_WIDTH * 3;
+
+fn draw_boot_background(fb_addr: *mut u32, width: usize, height: usize) {
+    if BOOT_BACKGROUND_BMP.len() < BOOT_BACKGROUND_OFFSET + BOOT_BACKGROUND_STRIDE * BOOT_BACKGROUND_HEIGHT {
+        return;
+    }
+
+    for y in 0..height {
+        let src_y = y.saturating_mul(BOOT_BACKGROUND_HEIGHT) / height.max(1);
+        let bmp_y = BOOT_BACKGROUND_HEIGHT.saturating_sub(1).saturating_sub(src_y.min(BOOT_BACKGROUND_HEIGHT - 1));
+        for x in 0..width {
+            let src_x = x.saturating_mul(BOOT_BACKGROUND_WIDTH) / width.max(1);
+            let offset = BOOT_BACKGROUND_OFFSET + bmp_y * BOOT_BACKGROUND_STRIDE + src_x.min(BOOT_BACKGROUND_WIDTH - 1) * 3;
+            if offset + 2 >= BOOT_BACKGROUND_BMP.len() {
+                continue;
+            }
+
+            let b = BOOT_BACKGROUND_BMP[offset] as u32;
+            let g = BOOT_BACKGROUND_BMP[offset + 1] as u32;
+            let r = BOOT_BACKGROUND_BMP[offset + 2] as u32;
+            let shade = 58;
+            unsafe {
+                *fb_addr.add(y * width + x) =
+                    ((r * shade / 100) << 16) | ((g * shade / 100) << 8) | (b * shade / 100);
+            }
+        }
+    }
+}
 
 fn draw_text_direct(fb_addr: *mut u32, width: usize, x: usize, y: usize, text: &str, color: u32) {
     let glyph_map = |ch: u8| -> &'static [u8] {
@@ -954,6 +986,9 @@ pub extern "C" fn kernel_main(
     if let Some(fb) = fb {
         let fb_addr = fb.address as *mut u32;
         let width = fb.width as usize;
+        let height = fb.height as usize;
+
+        draw_boot_background(fb_addr, width, height);
 
         screen_log_early(fb_addr, width, early_log_y, "[KERNEL] START");
         early_log_y += 10;
