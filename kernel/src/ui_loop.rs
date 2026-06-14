@@ -72,6 +72,7 @@ static mut BLUR_CACHE_WIDTH: usize = 0;
 static mut BLUR_CACHE_HEIGHT: usize = 0;
 static mut BLUR_CACHE_READY: bool = false;
 static mut WALLPAPER_READY: bool = false;
+static mut GUI_TERMINAL_EXEC_OUTPUT: *mut GuiAppRuntime = core::ptr::null_mut();
 
 #[derive(Clone, Copy)]
 struct UiState {
@@ -767,6 +768,28 @@ fn gui_terminal_append_bytes(app: &mut GuiAppRuntime, bytes: &[u8]) {
     gui_terminal_append_line(app, text);
 }
 
+fn gui_terminal_append_exec_bytes(app: &mut GuiAppRuntime, bytes: &[u8]) {
+    let text = core::str::from_utf8(bytes).unwrap_or("<invalid utf8>");
+    for part in text.split_inclusive('\n') {
+        let line = part.strip_suffix('\n').unwrap_or(part);
+        if !line.is_empty() {
+            gui_terminal_append_line(app, line);
+        } else if part.ends_with('\n') {
+            gui_terminal_append_line(app, "");
+        }
+    }
+}
+
+pub fn gui_terminal_write_exec_output(bytes: &[u8]) {
+    unsafe {
+        if GUI_TERMINAL_EXEC_OUTPUT.is_null() {
+            serial_write("[GUI-TERM-EXEC] stdout fallback: no GUI terminal sink\r\n");
+            return;
+        }
+        gui_terminal_append_exec_bytes(&mut *GUI_TERMINAL_EXEC_OUTPUT, bytes);
+    }
+}
+
 fn gui_terminal_vfs_error(app: &mut GuiAppRuntime, command: &str, error: vfs::VfsError) {
     let mut line = [0u8; GUI_APP_TEXT_CAP];
     let mut len = 0usize;
@@ -820,8 +843,7 @@ fn execute_gui_terminal_command(state: &mut UiState, command: &str) {
 
     if trimmed == "help" {
         gui_terminal_append_line(&mut state.gui_app, "Available commands:");
-        gui_terminal_append_line(&mut state.gui_app, "help dufetch ls pwd cd ps clear exit");
-        gui_terminal_append_line(&mut state.gui_app, "exec runs later when GUI stdout bridge exists");
+        gui_terminal_append_line(&mut state.gui_app, "help dufetch ls pwd cd ps clear exit exec");
         gui_terminal_new_prompt(&mut state.gui_app);
         return;
     }
@@ -914,7 +936,81 @@ fn execute_gui_terminal_command(state: &mut UiState, command: &str) {
     }
 
     if trimmed == "exec" || trimmed.starts_with("exec ") {
-        gui_terminal_append_line(&mut state.gui_app, "exec: GUI stdout bridge not implemented yet");
+        let path = trimmed.strip_prefix("exec").unwrap_or("").trim();
+        serial_write("[GUI-TERM-EXEC] start command=");
+        serial_write(path);
+        serial_write("\r\n");
+        unsafe {
+            GUI_TERMINAL_EXEC_OUTPUT = core::ptr::addr_of_mut!(state.gui_app);
+        }
+        let result = {
+            let mut input = crate::command::NoExecInput;
+            crate::command::run_foreground_exec(
+                state.gui_app.cwd(),
+                path,
+                crate::process::ProcessOutputSink::GuiTerminal,
+                &mut input,
+            )
+        };
+        unsafe {
+            GUI_TERMINAL_EXEC_OUTPUT = core::ptr::null_mut();
+        }
+
+        match result {
+            Ok((normalized, exit)) => {
+                let mut line = [0u8; GUI_APP_TEXT_CAP];
+                let mut len = 0usize;
+                append_str(&mut line, &mut len, "exec: ");
+                append_str(&mut line, &mut len, &normalized);
+                match exit.status {
+                    crate::process::ProcessExitStatus::Exited(code) => {
+                        append_str(&mut line, &mut len, " returned code=");
+                        append_i32(&mut line, &mut len, code);
+                    }
+                    crate::process::ProcessExitStatus::Fault(fault) => {
+                        append_str(&mut line, &mut len, " killed by ");
+                        append_str(&mut line, &mut len, fault.reason());
+                    }
+                }
+                gui_terminal_append_bytes(&mut state.gui_app, &line[..len]);
+                let _ = crate::process::autoreap_process(exit.pid, "gui-terminal-exec");
+            }
+            Err(crate::command::ExecRunError::MissingPath) => {
+                gui_terminal_append_line(&mut state.gui_app, "exec: missing path");
+            }
+            Err(crate::command::ExecRunError::Vfs(path, error)) => {
+                let mut line = [0u8; GUI_APP_TEXT_CAP];
+                let mut len = 0usize;
+                append_str(&mut line, &mut len, "exec: ");
+                append_str(&mut line, &mut len, &path);
+                append_str(&mut line, &mut len, " ");
+                append_str(&mut line, &mut len, match error {
+                    vfs::VfsError::NotFound => "not found",
+                    vfs::VfsError::PermissionDenied => "permission denied",
+                    vfs::VfsError::InvalidDescriptor => "invalid descriptor",
+                    vfs::VfsError::AlreadyExists => "already exists",
+                    vfs::VfsError::NotADirectory => "not a directory",
+                    vfs::VfsError::IsADirectory => "is a directory",
+                    vfs::VfsError::InvalidPath => "invalid path",
+                    vfs::VfsError::Unsupported => "unsupported",
+                    vfs::VfsError::IoError => "I/O error",
+                });
+                gui_terminal_append_bytes(&mut state.gui_app, &line[..len]);
+            }
+            Err(crate::command::ExecRunError::ProcessCreate) => {
+                gui_terminal_append_line(&mut state.gui_app, "exec: process create failed");
+            }
+            Err(crate::command::ExecRunError::Interrupted) => {
+                gui_terminal_append_line(&mut state.gui_app, "exec: interrupted");
+            }
+            Err(crate::command::ExecRunError::StdinUnsupported) => {
+                gui_terminal_append_line(&mut state.gui_app, "exec: stdin unsupported in GUI terminal");
+            }
+            Err(crate::command::ExecRunError::ElfLaunch) => {
+                gui_terminal_append_line(&mut state.gui_app, "exec: ELF launch failed");
+            }
+        }
+        serial_write("[GUI-TERM-EXEC] done\r\n");
         gui_terminal_new_prompt(&mut state.gui_app);
         return;
     }

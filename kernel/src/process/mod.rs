@@ -26,6 +26,7 @@ static PROCESS_SCHEDULE_HINT: AtomicU64 = AtomicU64::new(0);
 static PROCESS_EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 static PROCESS_EXIT_KIND: AtomicI32 = AtomicI32::new(0);
 static TERMINAL_FOREGROUND_PID: AtomicU64 = AtomicU64::new(0);
+static FOREGROUND_OUTPUT_SINK: AtomicU64 = AtomicU64::new(ProcessOutputSink::SerialOnly as u64);
 static TERMINAL_STDIN_WAITING_PID: AtomicU64 = AtomicU64::new(0);
 static mut TERMINAL_STDIN_BUFFER: [u8; 256] = [0; 256];
 static mut TERMINAL_STDIN_LEN: usize = 0;
@@ -403,6 +404,24 @@ pub enum FdTarget {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u64)]
+pub enum ProcessOutputSink {
+    SerialOnly = 0,
+    Terminal = 1,
+    GuiTerminal = 2,
+}
+
+impl ProcessOutputSink {
+    fn from_u64(value: u64) -> Self {
+        match value {
+            1 => Self::Terminal,
+            2 => Self::GuiTerminal,
+            _ => Self::SerialOnly,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FdEntry {
     pub target: FdTarget,
 }
@@ -474,7 +493,19 @@ fn current_pid() -> Option<ProcessId> {
 }
 
 pub fn set_terminal_foreground_process(pid: Option<ProcessId>) {
+    set_foreground_process(pid, ProcessOutputSink::Terminal);
+}
+
+pub fn set_foreground_process(pid: Option<ProcessId>, sink: ProcessOutputSink) {
     TERMINAL_FOREGROUND_PID.store(pid.map(|pid| pid.0).unwrap_or(0), Ordering::SeqCst);
+    FOREGROUND_OUTPUT_SINK.store(
+        if pid.is_some() {
+            sink as u64
+        } else {
+            ProcessOutputSink::SerialOnly as u64
+        },
+        Ordering::SeqCst,
+    );
     if pid.is_none() {
         TERMINAL_STDIN_WAITING_PID.store(0, Ordering::SeqCst);
         unsafe {
@@ -484,25 +515,31 @@ pub fn set_terminal_foreground_process(pid: Option<ProcessId>) {
     }
 }
 
-pub fn current_process_is_terminal_foreground() -> bool {
+pub fn current_process_output_sink() -> Option<ProcessOutputSink> {
     let foreground = TERMINAL_FOREGROUND_PID.load(Ordering::SeqCst);
     if foreground == 0 {
-        return false;
+        return None;
     }
 
     let mut pid = CURRENT_PID.load(Ordering::SeqCst);
     while pid != 0 {
         if pid == foreground {
-            return true;
+            return Some(ProcessOutputSink::from_u64(
+                FOREGROUND_OUTPUT_SINK.load(Ordering::SeqCst),
+            ));
         }
         let table = process_table_mut();
         let Some(index) = process_record_index(table, ProcessId(pid)) else {
-            return false;
+            return None;
         };
         pid = table[index].parent.map(|parent| parent.0).unwrap_or(0);
     }
 
-    false
+    None
+}
+
+pub fn current_process_is_terminal_foreground() -> bool {
+    current_process_output_sink() == Some(ProcessOutputSink::Terminal)
 }
 
 pub fn request_terminal_stdin_for_current() -> Result<(), ProcessError> {

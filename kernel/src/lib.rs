@@ -8,6 +8,7 @@ extern crate std;
 
 pub mod allocator;
 pub mod apps;
+pub mod command;
 pub mod cpu;
 pub mod dpkg;
 pub mod drivers;
@@ -206,156 +207,70 @@ fn terminal_write_file(
     }
 }
 
-fn read_vfs_file(cwd: &str, path: &str) -> Result<alloc::vec::Vec<u8>, fs::vfs::VfsError> {
-    let vfs = fs::vfs::get_vfs().ok_or(fs::vfs::VfsError::IoError)?;
-    let fd = vfs.open_at(cwd, path, fs::vfs::OpenFlags::READ)?;
-    let mut data = alloc::vec::Vec::new();
-    let mut buf = [0u8; 512];
+fn terminal_exec(console: &mut terminal::FbConsole, cwd: &str, command_line: &str) {
+    struct TerminalInput<'a> {
+        console: &'a mut terminal::FbConsole,
+    }
 
-    loop {
-        match vfs.read(fd, &mut buf) {
-            Ok(0) => break,
-            Ok(n) => data.extend_from_slice(&buf[..n]),
-            Err(error) => {
-                let _ = vfs.close(fd);
-                return Err(error);
+    impl command::ExecInput for TerminalInput<'_> {
+        fn collect_stdin(&mut self, pid: process::ProcessId) -> command::ExecInputResult {
+            if terminal_collect_foreground_input(self.console, pid) {
+                command::ExecInputResult::Provided
+            } else {
+                command::ExecInputResult::Interrupted
             }
         }
     }
 
-    vfs.close(fd)?;
-    Ok(data)
-}
-
-fn terminal_resolve_exec_path(cwd: &str, path: &str) -> Result<alloc::string::String, fs::vfs::VfsError> {
-    if path.contains('/') {
-        return fs::vfs::normalize_path(path, cwd);
-    }
-
-    let mut candidate = alloc::string::String::from("/app/");
-    candidate.push_str(path);
-    if let Some(vfs) = fs::vfs::get_vfs() {
-        let stat = vfs.stat_at("/", &candidate)?;
-        if stat.file_type == fs::vfs::FileType::Directory {
-            return Err(fs::vfs::VfsError::IsADirectory);
-        }
-        Ok(candidate)
-    } else {
-        Err(fs::vfs::VfsError::IoError)
-    }
-}
-
-fn terminal_exec(console: &mut terminal::FbConsole, cwd: &str, command_line: &str) {
-    if command_line.is_empty() {
-        console.write_str("exec: missing path\n");
-        return;
-    }
-
-    let mut argv = alloc::vec::Vec::new();
-    for part in command_line.split_whitespace() {
-        argv.push(alloc::string::String::from(part));
-    }
-
-    if argv.is_empty() {
-        console.write_str("exec: missing path\n");
-        return;
-    }
-
-    let path = argv[0].clone();
-    let normalized = match terminal_resolve_exec_path(cwd, &path) {
-        Ok(path) => path,
-        Err(error) => {
-            write_vfs_error(console, "exec", error);
-            return;
-        }
+    let result = {
+        let mut input = TerminalInput { console };
+        command::run_foreground_exec(
+            cwd,
+            command_line,
+            process::ProcessOutputSink::Terminal,
+            &mut input,
+        )
     };
 
-    let argv0 = normalized.rsplit('/').find(|part| !part.is_empty()).unwrap_or(path.as_str());
-    argv[0] = alloc::string::String::from(argv0);
-
-    serial_write("[EXEC] loading ");
-    serial_write(&normalized);
-    serial_write("\r\n");
-
-    match read_vfs_file(cwd, &normalized) {
-        Ok(data) => {
-            let pid = match process::create_user_process_record(normalized.clone(), true) {
-                Ok(pid) => pid,
-                Err(_) => {
-                    console.write_str("exec: process create failed\n");
-                    return;
+    match result {
+        Ok((normalized, exit)) => {
+            console.write_str("exec: ");
+            console.write_str(&normalized);
+            match exit.status {
+                process::ProcessExitStatus::Exited(code) => {
+                    console.write_str(" returned code=");
+                    terminal_write_i32(console, code);
                 }
-            };
-
-            if elf::prepare_process_elf(pid, &data, &argv).is_err() {
-                let _ = process::autoreap_process(pid, "terminal-exec-prepare-failed");
-                console.write_str("exec: ELF launch failed\n");
-                return;
-            }
-
-            serial_write("[ELF-TEST] userspace app started\r\n");
-            process::set_terminal_foreground_process(Some(pid));
-            let run_result = loop {
-                match process::enter_user_process(pid) {
-                    Ok(exit) => break Ok(exit),
-                    Err(process::ProcessError::SchedulerUnavailable) if process::is_pid_runnable(pid) => {
-                        if process::terminal_stdin_waiting_pid() == Some(pid) {
-                            if !terminal_collect_foreground_input(console, pid) {
-                                process::set_terminal_foreground_process(None);
-                                let _ = process::autoreap_process(pid, "terminal-ctrl-c");
-                                console.write_str("exec: interrupted\n");
-                                return;
-                            }
-                        }
-                    }
-                    Err(error) => break Err(error),
-                }
-            };
-            process::set_terminal_foreground_process(None);
-
-            match run_result {
-                Ok(exit) => {
-                serial_write("[EXEC] ");
-                serial_write(&normalized);
-                match exit.status {
-                    process::ProcessExitStatus::Exited(code) => {
-                        serial_write(" returned code=");
-                        serial_write_i32(code);
-                    }
-                    process::ProcessExitStatus::Fault(fault) => {
-                        serial_write(" killed by ");
-                        serial_write(fault.reason());
-                    }
-                }
-                serial_write("\r\n");
-                if let Some(vfs) = fs::vfs::get_vfs() {
-                    if vfs.open_file_count() == 0 {
-                        serial_write("[PROCESS-RUN] VFS handles clean\r\n");
-                    } else {
-                        serial_write("[PROCESS-RUN] VFS handles leaked\r\n");
-                    }
-                }
-                console.write_str("exec: ");
-                console.write_str(&normalized);
-                match exit.status {
-                    process::ProcessExitStatus::Exited(code) => {
-                        console.write_str(" returned code=");
-                        terminal_write_i32(console, code);
-                    }
-                    process::ProcessExitStatus::Fault(fault) => {
-                console.write_str(" killed by ");
-                        console.write_str(fault.reason());
-                    }
-                }
-                console.write_str("\n");
-                let _ = process::autoreap_process(exit.pid, "terminal-exec");
-                }
-                Err(_) => {
-                    console.write_str("exec: ELF launch failed\n");
+                process::ProcessExitStatus::Fault(fault) => {
+                    console.write_str(" killed by ");
+                    console.write_str(fault.reason());
                 }
             }
+            console.write_str("\n");
+            let _ = process::autoreap_process(exit.pid, "terminal-exec");
         }
-        Err(error) => write_vfs_error(console, "exec", error),
+        Err(command::ExecRunError::MissingPath) => console.write_str("exec: missing path\n"),
+        Err(command::ExecRunError::Vfs(path, error)) => {
+            console.write_str("exec: ");
+            console.write_str(&path);
+            console.write_str(" ");
+            console.write_str(match error {
+                fs::vfs::VfsError::NotFound => "not found",
+                fs::vfs::VfsError::PermissionDenied => "permission denied",
+                fs::vfs::VfsError::InvalidDescriptor => "invalid descriptor",
+                fs::vfs::VfsError::AlreadyExists => "already exists",
+                fs::vfs::VfsError::NotADirectory => "not a directory",
+                fs::vfs::VfsError::IsADirectory => "is a directory",
+                fs::vfs::VfsError::InvalidPath => "invalid path",
+                fs::vfs::VfsError::Unsupported => "unsupported",
+                fs::vfs::VfsError::IoError => "I/O error",
+            });
+            console.write_str("\n");
+        }
+        Err(command::ExecRunError::ProcessCreate) => console.write_str("exec: process create failed\n"),
+        Err(command::ExecRunError::Interrupted) => console.write_str("exec: interrupted\n"),
+        Err(command::ExecRunError::StdinUnsupported) => console.write_str("exec: stdin unsupported\n"),
+        Err(command::ExecRunError::ElfLaunch) => console.write_str("exec: ELF launch failed\n"),
     }
 }
 
@@ -426,37 +341,6 @@ fn terminal_collect_foreground_input(console: &mut terminal::FbConsole, pid: pro
         unsafe {
             core::arch::asm!("pause");
         }
-    }
-}
-
-fn serial_write_i32(value: i32) {
-    if value < 0 {
-        serial_write("-");
-        serial_write_u32(value.wrapping_neg() as u32);
-    } else {
-        serial_write_u32(value as u32);
-    }
-}
-
-fn serial_write_u32(mut value: u32) {
-    let mut buf = [0u8; 10];
-    let mut index = buf.len();
-
-    if value == 0 {
-        serial_write("0");
-        return;
-    }
-
-    while value > 0 {
-        index -= 1;
-        buf[index] = b'0' + (value % 10) as u8;
-        value /= 10;
-    }
-
-    for byte in &buf[index..] {
-        let ch = [*byte];
-        let s = unsafe { core::str::from_utf8_unchecked(&ch) };
-        serial_write(s);
     }
 }
 

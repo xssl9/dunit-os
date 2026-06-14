@@ -553,19 +553,24 @@ fn write_stdio(label: &str, data: &[u8]) {
 }
 
 fn write_terminal_foreground(data: &[u8]) {
-    if !crate::process::current_process_is_terminal_foreground() {
-        return;
-    }
-    let Some(console) = crate::terminal::get_console() else {
-        return;
-    };
-    match core::str::from_utf8(data) {
-        Ok(text) => console.write_display_str(text),
-        Err(_) => {
-            for byte in data {
-                console.write_display_str(core::str::from_utf8(&[*byte]).unwrap_or("?"));
+    match crate::process::current_process_output_sink() {
+        Some(crate::process::ProcessOutputSink::Terminal) => {
+            let Some(console) = crate::terminal::get_console() else {
+                return;
+            };
+            match core::str::from_utf8(data) {
+                Ok(text) => console.write_display_str(text),
+                Err(_) => {
+                    for byte in data {
+                        console.write_display_str(core::str::from_utf8(&[*byte]).unwrap_or("?"));
+                    }
+                }
             }
         }
+        Some(crate::process::ProcessOutputSink::GuiTerminal) => {
+            crate::ui_loop::gui_terminal_write_exec_output(data);
+        }
+        _ => {}
     }
 }
 
