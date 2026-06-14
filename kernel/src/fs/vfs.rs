@@ -28,6 +28,7 @@ static ENV_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/env_test
 static CALC_BYTES: &[u8] = include_bytes!("../../../build/userspace/calc");
 static GUI_PING_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_ping");
 static GUI_TERMINAL_STUB_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_terminal_stub");
+static GUI_CALCULATOR_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_calculator");
 static STDIN_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/stdin_test");
 static DTOP_BYTES: &[u8] = include_bytes!("../../../build/userspace/dtop");
 static FAULT_PF_BYTES: &[u8] = include_bytes!("../../../build/userspace/fault_pf");
@@ -645,6 +646,10 @@ pub fn init() -> Result<()> {
         let mut gui_terminal_stub = Vec::new();
         gui_terminal_stub.extend_from_slice(GUI_TERMINAL_STUB_BYTES);
         ROOT_MEMFS.add_file("/app/gui_terminal_stub", gui_terminal_stub);
+
+        let mut gui_calculator = Vec::new();
+        gui_calculator.extend_from_slice(GUI_CALCULATOR_BYTES);
+        ROOT_MEMFS.add_file("/app/gui_calculator", gui_calculator);
 
         let mut stdin_test = Vec::new();
         stdin_test.extend_from_slice(STDIN_TEST_BYTES);

@@ -95,8 +95,12 @@ pub const GUI_MSG_DRAW_TEXT: u16 = 2;
 pub const GUI_MSG_SET_STATUS: u16 = 3;
 pub const GUI_MSG_EXIT: u16 = 4;
 pub const GUI_MSG_COMMAND: u16 = 5;
+pub const GUI_MSG_CLEAR: u16 = 6;
+pub const GUI_MSG_SET_TITLE: u16 = 7;
+pub const GUI_MSG_DRAW_RECT: u16 = 8;
 pub const GUI_MSG_KEY_EVENT: u16 = 101;
 pub const GUI_MSG_CLOSE_EVENT: u16 = 102;
+pub const GUI_MSG_POINTER_EVENT: u16 = 103;
 pub const GUI_MSG_DATA_CAP: usize = 160;
 
 pub const OPEN_READ: usize = 1 << 0;
@@ -682,9 +686,42 @@ pub fn gui_draw_text(window_id: u32, x: i32, y: i32, text: &str) -> isize {
     gui_send(&message)
 }
 
+pub fn gui_draw_rect(window_id: u32, x: i32, y: i32, width: u32, height: u32, color: u32) -> isize {
+    let mut message = GuiMessage::new(GUI_MSG_DRAW_RECT);
+    message.window_id = window_id;
+    message.a = x;
+    message.b = y;
+    message.c = color;
+    message.len = 8;
+    let width_bytes = width.to_le_bytes();
+    let height_bytes = height.to_le_bytes();
+    message.data[0] = width_bytes[0];
+    message.data[1] = width_bytes[1];
+    message.data[2] = width_bytes[2];
+    message.data[3] = width_bytes[3];
+    message.data[4] = height_bytes[0];
+    message.data[5] = height_bytes[1];
+    message.data[6] = height_bytes[2];
+    message.data[7] = height_bytes[3];
+    gui_send(&message)
+}
+
 pub fn gui_set_status(text: &str) -> isize {
     let mut message = GuiMessage::new(GUI_MSG_SET_STATUS);
     message.set_data(text.as_bytes());
+    gui_send(&message)
+}
+
+pub fn gui_clear(window_id: u32) -> isize {
+    let mut message = GuiMessage::new(GUI_MSG_CLEAR);
+    message.window_id = window_id;
+    gui_send(&message)
+}
+
+pub fn gui_set_title(window_id: u32, title: &str) -> isize {
+    let mut message = GuiMessage::new(GUI_MSG_SET_TITLE);
+    message.window_id = window_id;
+    message.set_data(title.as_bytes());
     gui_send(&message)
 }
 

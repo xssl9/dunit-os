@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use crate::process::ProcessId;
 
 pub const MAX_MESSAGE_SIZE: usize = 256;
-pub const MAX_QUEUE_MESSAGES: usize = 16;
+pub const MAX_QUEUE_MESSAGES: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SharedMemoryId(pub u64);
