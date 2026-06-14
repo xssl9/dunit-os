@@ -196,4 +196,4 @@ limine_test_gui.conf         Automated GUI test boot config
 
 MIT License.
 
-## maide with rust
+## made with rust
