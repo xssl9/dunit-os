@@ -16,7 +16,7 @@ scheduler groundwork.
 
 What works today:
 
-- Limine boot with Terminal Mode first and GUI Mode still available.
+- Limine boot with Terminal Mode first and GUI Mode still available.ч
 - HAL in C/NASM: GDT, IDT, interrupt entry, syscall entry, context switch stubs,
   port I/O, and low-level boot handoff.
 - Rust `no_std` kernel with PMM, VMM, heap, address-space setup, and basic fault
@@ -195,3 +195,5 @@ limine_test_gui.conf         Automated GUI test boot config
 ## License
 
 MIT License.
+
+## maide with rust
