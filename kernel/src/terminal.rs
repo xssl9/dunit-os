@@ -358,6 +358,12 @@ impl FbConsole {
             self.draw_char(c);
         }
     }
+
+    pub fn write_display_str(&mut self, s: &str) {
+        for c in s.chars() {
+            self.draw_char(c);
+        }
+    }
     
     pub fn draw_cursor(&mut self, visible: bool) {
         let px_x = self.cursor_x * self.char_width;

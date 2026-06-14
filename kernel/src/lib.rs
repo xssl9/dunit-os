@@ -85,7 +85,7 @@ static mut HISTORY_INDEX: usize = 0;
 static mut HISTORY_POSITION: isize = -1;
 static mut TERMINAL_CWD: [u8; 256] = [0; 256];
 static mut TERMINAL_CWD_LEN: usize = 0;
-static mut TERMINAL_DIR_ENTRIES: [fs::vfs::DirEntry; 16] = [fs::vfs::DirEntry::empty(); 16];
+static mut TERMINAL_DIR_ENTRIES: [fs::vfs::DirEntry; 32] = [fs::vfs::DirEntry::empty(); 32];
 
 pub(crate) fn serial_write(s: &str) {
     for byte in s.bytes() {
@@ -279,7 +279,41 @@ fn terminal_exec(console: &mut terminal::FbConsole, cwd: &str, command_line: &st
 
     match read_vfs_file(cwd, &normalized) {
         Ok(data) => {
-            match elf::run_process_elf(&data, &argv) {
+            let pid = match process::create_user_process_record(normalized.clone(), true) {
+                Ok(pid) => pid,
+                Err(_) => {
+                    console.write_str("exec: process create failed\n");
+                    return;
+                }
+            };
+
+            if elf::prepare_process_elf(pid, &data, &argv).is_err() {
+                let _ = process::autoreap_process(pid, "terminal-exec-prepare-failed");
+                console.write_str("exec: ELF launch failed\n");
+                return;
+            }
+
+            serial_write("[ELF-TEST] userspace app started\r\n");
+            process::set_terminal_foreground_process(Some(pid));
+            let run_result = loop {
+                match process::enter_user_process(pid) {
+                    Ok(exit) => break Ok(exit),
+                    Err(process::ProcessError::SchedulerUnavailable) if process::is_pid_runnable(pid) => {
+                        if process::terminal_stdin_waiting_pid() == Some(pid) {
+                            if !terminal_collect_foreground_input(console, pid) {
+                                process::set_terminal_foreground_process(None);
+                                let _ = process::autoreap_process(pid, "terminal-ctrl-c");
+                                console.write_str("exec: interrupted\n");
+                                return;
+                            }
+                        }
+                    }
+                    Err(error) => break Err(error),
+                }
+            };
+            process::set_terminal_foreground_process(None);
+
+            match run_result {
                 Ok(exit) => {
                 serial_write("[EXEC] ");
                 serial_write(&normalized);
@@ -322,6 +356,76 @@ fn terminal_exec(console: &mut terminal::FbConsole, cwd: &str, command_line: &st
             }
         }
         Err(error) => write_vfs_error(console, "exec", error),
+    }
+}
+
+fn terminal_collect_foreground_input(console: &mut terminal::FbConsole, pid: process::ProcessId) -> bool {
+    let mut input = [0u8; 256];
+    let mut len = 0usize;
+    let mut ctrl_down = false;
+
+    loop {
+        let wheel_delta = drivers::mouse::take_scroll_delta();
+        if wheel_delta != 0 {
+            console.scroll_view(-wheel_delta * 3);
+        }
+
+        if let Some(scancode) = drivers::keyboard::read_scancode() {
+            match scancode {
+                0x1D => {
+                    ctrl_down = true;
+                    continue;
+                }
+                0x9D => {
+                    ctrl_down = false;
+                    continue;
+                }
+                _ => {}
+            }
+
+            if (scancode & 0x80) != 0 {
+                continue;
+            }
+
+            if ctrl_down && scancode == 0x2E {
+                console.write_str("^C\n");
+                return false;
+            }
+
+            if scancode == 0x0E {
+                if len > 0 {
+                    len -= 1;
+                    console.draw_char('\x08');
+                }
+                continue;
+            }
+
+            if let Some(ch) = drivers::keyboard::scancode_to_char(scancode) {
+                if ch == '\n' {
+                    console.write_str("\n");
+                    if len < input.len() {
+                        input[len] = b'\n';
+                        len += 1;
+                    }
+                    let _ = process::provide_terminal_stdin(pid, &input[..len]);
+                    return true;
+                }
+
+                if ch == '\t' {
+                    continue;
+                }
+
+                if len < input.len().saturating_sub(1) {
+                    input[len] = ch as u8;
+                    len += 1;
+                    console.draw_char(ch);
+                }
+            }
+        }
+
+        unsafe {
+            core::arch::asm!("pause");
+        }
     }
 }
 
@@ -583,7 +687,7 @@ fn terminal_tree_path(
         return;
     }
 
-    let mut entries = [fs::vfs::DirEntry::empty(); 16];
+    let mut entries = [fs::vfs::DirEntry::empty(); 32];
     match vfs.readdir_into_at("/", path, &mut entries) {
         Ok(count) => {
             for entry in entries.iter().take(count) {

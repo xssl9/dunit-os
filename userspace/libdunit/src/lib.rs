@@ -1,5 +1,13 @@
 #![no_std]
 
+extern crate alloc;
+
+use core::alloc::{GlobalAlloc, Layout};
+use core::ptr::null_mut;
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+use alloc::string::String;
+
 pub const SYSCALL_EXIT: usize = 0;
 pub const SYSCALL_READ: usize = 3;
 pub const SYSCALL_WRITE: usize = 4;
@@ -24,7 +32,60 @@ pub const SYSCALL_YIELD: usize = 24;
 pub const SYSCALL_GET_TERMINAL_CURSOR: usize = 25;
 
 pub const EAGAIN: isize = -11;
+pub const EINTR: isize = -4;
+pub const EIO: isize = -5;
+pub const EBADF: isize = -9;
+pub const ECHILD: isize = -10;
+pub const EACCES: isize = -13;
+pub const EFAULT: isize = -14;
+pub const EEXIST: isize = -17;
+pub const ENOTDIR: isize = -20;
+pub const EISDIR: isize = -21;
+pub const EINVAL: isize = -22;
+pub const ENFILE: isize = -23;
+pub const ENAMETOOLONG: isize = -36;
+pub const ENOSYS: isize = -38;
+pub const EMSGSIZE: isize = -90;
 pub const EOPNOTSUPP: isize = -95;
+pub const ENOBUFS: isize = -105;
+
+struct BumpAllocator;
+
+static HEAP_OFFSET: AtomicUsize = AtomicUsize::new(0);
+static mut HEAP: [u8; 64 * 1024] = [0; 64 * 1024];
+
+unsafe impl GlobalAlloc for BumpAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let base = core::ptr::addr_of_mut!(HEAP) as *mut u8 as usize;
+        let size = HEAP.len();
+        let mut current = HEAP_OFFSET.load(Ordering::Relaxed);
+
+        loop {
+            let aligned = align_up(base + current, layout.align()) - base;
+            let end = aligned.saturating_add(layout.size());
+            if end > size {
+                return null_mut();
+            }
+            match HEAP_OFFSET.compare_exchange(current, end, Ordering::SeqCst, Ordering::Relaxed) {
+                Ok(_) => return (base + aligned) as *mut u8,
+                Err(next) => current = next,
+            }
+        }
+    }
+
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
+}
+
+#[global_allocator]
+static ALLOCATOR: BumpAllocator = BumpAllocator;
+
+fn align_up(value: usize, align: usize) -> usize {
+    (value + align - 1) & !(align - 1)
+}
+
+static mut RUNTIME_ARGC: usize = 0;
+static mut RUNTIME_ARGV: RawArgv = core::ptr::null();
+static mut RUNTIME_ENVP: RawEnvp = core::ptr::null();
 
 pub const GUI_SHELL_PID: u32 = 1;
 pub const GUI_MSG_MAGIC: u32 = 0x3149_5547; // GUI1
@@ -46,6 +107,14 @@ pub const OPEN_READ_WRITE: usize = OPEN_READ | OPEN_WRITE;
 
 pub type RawArgv = *const *const u8;
 pub type RawEnvp = *const *const u8;
+
+pub fn init_runtime(argc: usize, argv: RawArgv, envp: RawEnvp) {
+    unsafe {
+        RUNTIME_ARGC = argc;
+        RUNTIME_ARGV = argv;
+        RUNTIME_ENVP = envp;
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -291,6 +360,153 @@ pub fn print(s: &str) {
 pub fn println(s: &str) {
     write_stdout(s);
     write_stdout("\n");
+}
+
+pub fn error_name(code: isize) -> &'static str {
+    match code {
+        EAGAIN => "EAGAIN",
+        EINTR => "EINTR",
+        EIO => "EIO",
+        EBADF => "EBADF",
+        ECHILD => "ECHILD",
+        EACCES => "EACCES",
+        EFAULT => "EFAULT",
+        EEXIST => "EEXIST",
+        ENOTDIR => "ENOTDIR",
+        EISDIR => "EISDIR",
+        EINVAL => "EINVAL",
+        ENFILE => "ENFILE",
+        ENAMETOOLONG => "ENAMETOOLONG",
+        ENOSYS => "ENOSYS",
+        EMSGSIZE => "EMSGSIZE",
+        EOPNOTSUPP => "EOPNOTSUPP",
+        ENOBUFS => "ENOBUFS",
+        _ => "ERR",
+    }
+}
+
+pub fn read_line() -> Result<String, isize> {
+    let mut out = String::new();
+    let mut buf = [0u8; 64];
+    loop {
+        let read = read(0, &mut buf);
+        if read == EAGAIN {
+            let yielded = yield_now();
+            if yielded < 0 && yielded != EAGAIN {
+                return Err(yielded);
+            }
+            continue;
+        }
+        if read < 0 {
+            return Err(read);
+        }
+        if read == 0 {
+            return Ok(out);
+        }
+        for byte in &buf[..read as usize] {
+            if *byte == b'\n' {
+                return Ok(out);
+            }
+            out.push(*byte as char);
+        }
+    }
+}
+
+pub fn read_to_string(path: &str) -> Result<String, isize> {
+    let fd = open(path, OPEN_READ);
+    if fd < 0 {
+        return Err(fd);
+    }
+
+    let mut out = String::new();
+    let mut buf = [0u8; 128];
+    loop {
+        let read = read(fd as usize, &mut buf);
+        if read < 0 {
+            close(fd as usize);
+            return Err(read);
+        }
+        if read == 0 {
+            break;
+        }
+        for byte in &buf[..read as usize] {
+            out.push(*byte as char);
+        }
+    }
+
+    let closed = close(fd as usize);
+    if closed < 0 {
+        return Err(closed);
+    }
+    Ok(out)
+}
+
+fn write_string_with_flags(path: &str, data: &str, flags: usize) -> Result<(), isize> {
+    let fd = open(path, flags);
+    if fd < 0 {
+        return Err(fd);
+    }
+    let written = write(fd as usize, data.as_bytes());
+    if written != data.len() as isize {
+        close(fd as usize);
+        return Err(if written < 0 { written } else { EIO });
+    }
+    let closed = close(fd as usize);
+    if closed < 0 {
+        return Err(closed);
+    }
+    Ok(())
+}
+
+pub fn write_string(path: &str, data: &str) -> Result<(), isize> {
+    write_string_with_flags(path, data, OPEN_CREATE | OPEN_WRITE | OPEN_TRUNC)
+}
+
+pub fn append_string(path: &str, data: &str) -> Result<(), isize> {
+    write_string_with_flags(path, data, OPEN_CREATE | OPEN_WRITE | OPEN_APPEND)
+}
+
+pub fn file_exists(path: &str) -> bool {
+    let fd = open(path, OPEN_READ);
+    if fd < 0 {
+        false
+    } else {
+        close(fd as usize);
+        true
+    }
+}
+
+pub fn argc() -> usize {
+    unsafe { RUNTIME_ARGC }
+}
+
+pub fn arg(index: usize) -> Option<&'static str> {
+    unsafe { argv_get(RUNTIME_ARGC, RUNTIME_ARGV, index) }
+}
+
+pub fn getenv(name: &str) -> Option<&'static str> {
+    let envp = unsafe { RUNTIME_ENVP };
+    let mut index = 0usize;
+    loop {
+        let entry = unsafe { env_get(envp, index) }?;
+        if let Some(eq_index) = find_byte(entry.as_bytes(), b'=') {
+            if &entry.as_bytes()[..eq_index] == name.as_bytes() {
+                return core::str::from_utf8(&entry.as_bytes()[eq_index + 1..]).ok();
+            }
+        }
+        index += 1;
+    }
+}
+
+fn find_byte(bytes: &[u8], needle: u8) -> Option<usize> {
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == needle {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
 }
 
 #[repr(C)]

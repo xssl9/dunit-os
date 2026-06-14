@@ -270,7 +270,7 @@ impl FileSystem for MemFs {
     }
 
     fn readdir(&mut self, path: &str) -> Result<Vec<DirEntry>> {
-        let mut buffer = [DirEntry::empty(); 16];
+        let mut buffer = [DirEntry::empty(); 32];
         let count = self.readdir_into(path, &mut buffer)?;
         let mut entries = Vec::new();
         for entry in buffer.iter().take(count) {

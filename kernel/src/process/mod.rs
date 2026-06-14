@@ -25,6 +25,11 @@ static PROCESS_YIELD_REQUESTED: AtomicBool = AtomicBool::new(false);
 static PROCESS_SCHEDULE_HINT: AtomicU64 = AtomicU64::new(0);
 static PROCESS_EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 static PROCESS_EXIT_KIND: AtomicI32 = AtomicI32::new(0);
+static TERMINAL_FOREGROUND_PID: AtomicU64 = AtomicU64::new(0);
+static TERMINAL_STDIN_WAITING_PID: AtomicU64 = AtomicU64::new(0);
+static mut TERMINAL_STDIN_BUFFER: [u8; 256] = [0; 256];
+static mut TERMINAL_STDIN_LEN: usize = 0;
+static mut TERMINAL_STDIN_READY: bool = false;
 
 pub const WAIT_KIND_EMPTY: i32 = -1;
 pub const WAIT_KIND_SPAWN_PREPARED: i32 = -2;
@@ -465,6 +470,87 @@ fn current_pid() -> Option<ProcessId> {
         None
     } else {
         Some(ProcessId(pid))
+    }
+}
+
+pub fn set_terminal_foreground_process(pid: Option<ProcessId>) {
+    TERMINAL_FOREGROUND_PID.store(pid.map(|pid| pid.0).unwrap_or(0), Ordering::SeqCst);
+    if pid.is_none() {
+        TERMINAL_STDIN_WAITING_PID.store(0, Ordering::SeqCst);
+        unsafe {
+            TERMINAL_STDIN_LEN = 0;
+            TERMINAL_STDIN_READY = false;
+        }
+    }
+}
+
+pub fn current_process_is_terminal_foreground() -> bool {
+    let foreground = TERMINAL_FOREGROUND_PID.load(Ordering::SeqCst);
+    if foreground == 0 {
+        return false;
+    }
+
+    let mut pid = CURRENT_PID.load(Ordering::SeqCst);
+    while pid != 0 {
+        if pid == foreground {
+            return true;
+        }
+        let table = process_table_mut();
+        let Some(index) = process_record_index(table, ProcessId(pid)) else {
+            return false;
+        };
+        pid = table[index].parent.map(|parent| parent.0).unwrap_or(0);
+    }
+
+    false
+}
+
+pub fn request_terminal_stdin_for_current() -> Result<(), ProcessError> {
+    let pid = current_pid().ok_or(ProcessError::NoCurrentProcess)?;
+    if !current_process_is_terminal_foreground() {
+        return Err(ProcessError::NoCurrentProcess);
+    }
+    TERMINAL_STDIN_WAITING_PID.store(pid.0, Ordering::SeqCst);
+    Ok(())
+}
+
+pub fn terminal_stdin_waiting_pid() -> Option<ProcessId> {
+    let pid = TERMINAL_STDIN_WAITING_PID.load(Ordering::SeqCst);
+    if pid == 0 {
+        None
+    } else {
+        Some(ProcessId(pid))
+    }
+}
+
+pub fn provide_terminal_stdin(pid: ProcessId, data: &[u8]) -> Result<(), ProcessError> {
+    if TERMINAL_STDIN_WAITING_PID.load(Ordering::SeqCst) != pid.0 {
+        return Err(ProcessError::NoSuchProcess);
+    }
+    unsafe {
+        let len = data.len().min(TERMINAL_STDIN_BUFFER.len());
+        TERMINAL_STDIN_BUFFER[..len].copy_from_slice(&data[..len]);
+        TERMINAL_STDIN_LEN = len;
+        TERMINAL_STDIN_READY = true;
+    }
+    Ok(())
+}
+
+pub fn take_terminal_stdin_for_current(out: &mut [u8]) -> Result<Option<usize>, ProcessError> {
+    let pid = current_pid().ok_or(ProcessError::NoCurrentProcess)?;
+    if TERMINAL_STDIN_WAITING_PID.load(Ordering::SeqCst) != pid.0 {
+        return Ok(None);
+    }
+    unsafe {
+        if !TERMINAL_STDIN_READY {
+            return Ok(None);
+        }
+        let len = TERMINAL_STDIN_LEN.min(out.len());
+        out[..len].copy_from_slice(&TERMINAL_STDIN_BUFFER[..len]);
+        TERMINAL_STDIN_LEN = 0;
+        TERMINAL_STDIN_READY = false;
+        TERMINAL_STDIN_WAITING_PID.store(0, Ordering::SeqCst);
+        Ok(Some(len))
     }
 }
 

@@ -21,6 +21,11 @@ static RESUMABLE_CHILD_BYTES: &[u8] = include_bytes!("../../../build/userspace/r
 static RESUMABLE_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/resumable_test");
 static IPC_CHILD_BYTES: &[u8] = include_bytes!("../../../build/userspace/ipc_child");
 static IPC_PARENT_BYTES: &[u8] = include_bytes!("../../../build/userspace/ipc_parent");
+static RUNTIME_STRESS_BYTES: &[u8] = include_bytes!("../../../build/userspace/runtime_stress");
+static INPUT_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/input_test");
+static FILE_API_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/file_api_test");
+static ENV_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/env_test");
+static CALC_BYTES: &[u8] = include_bytes!("../../../build/userspace/calc");
 static GUI_PING_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_ping");
 static GUI_TERMINAL_STUB_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_terminal_stub");
 static STDIN_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/stdin_test");
@@ -612,6 +617,26 @@ pub fn init() -> Result<()> {
         let mut ipc_parent = Vec::new();
         ipc_parent.extend_from_slice(IPC_PARENT_BYTES);
         ROOT_MEMFS.add_file("/app/ipc_parent", ipc_parent);
+
+        let mut runtime_stress = Vec::new();
+        runtime_stress.extend_from_slice(RUNTIME_STRESS_BYTES);
+        ROOT_MEMFS.add_file("/app/runtime_stress", runtime_stress);
+
+        let mut input_test = Vec::new();
+        input_test.extend_from_slice(INPUT_TEST_BYTES);
+        ROOT_MEMFS.add_file("/app/input_test", input_test);
+
+        let mut file_api_test = Vec::new();
+        file_api_test.extend_from_slice(FILE_API_TEST_BYTES);
+        ROOT_MEMFS.add_file("/app/file_api_test", file_api_test);
+
+        let mut env_test = Vec::new();
+        env_test.extend_from_slice(ENV_TEST_BYTES);
+        ROOT_MEMFS.add_file("/app/env_test", env_test);
+
+        let mut calc = Vec::new();
+        calc.extend_from_slice(CALC_BYTES);
+        ROOT_MEMFS.add_file("/app/calc", calc);
 
         let mut gui_ping = Vec::new();
         gui_ping.extend_from_slice(GUI_PING_BYTES);

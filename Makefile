@@ -114,6 +114,16 @@ userspace:
 	cp $(USERSPACE_DIR)/system_apps/ipc_child/target/x86_64-unknown-none/release/ipc_child $(USERSPACE_BUILD_DIR)/ipc_child
 	cd $(USERSPACE_DIR)/system_apps/ipc_parent && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
 	cp $(USERSPACE_DIR)/system_apps/ipc_parent/target/x86_64-unknown-none/release/ipc_parent $(USERSPACE_BUILD_DIR)/ipc_parent
+	cd $(USERSPACE_DIR)/system_apps/runtime_stress && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
+	cp $(USERSPACE_DIR)/system_apps/runtime_stress/target/x86_64-unknown-none/release/runtime_stress $(USERSPACE_BUILD_DIR)/runtime_stress
+	cd $(USERSPACE_DIR)/system_apps/input_test && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
+	cp $(USERSPACE_DIR)/system_apps/input_test/target/x86_64-unknown-none/release/input_test $(USERSPACE_BUILD_DIR)/input_test
+	cd $(USERSPACE_DIR)/system_apps/file_api_test && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
+	cp $(USERSPACE_DIR)/system_apps/file_api_test/target/x86_64-unknown-none/release/file_api_test $(USERSPACE_BUILD_DIR)/file_api_test
+	cd $(USERSPACE_DIR)/system_apps/env_test && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
+	cp $(USERSPACE_DIR)/system_apps/env_test/target/x86_64-unknown-none/release/env_test $(USERSPACE_BUILD_DIR)/env_test
+	cd $(USERSPACE_DIR)/system_apps/calc && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
+	cp $(USERSPACE_DIR)/system_apps/calc/target/x86_64-unknown-none/release/calc $(USERSPACE_BUILD_DIR)/calc
 	cd $(USERSPACE_DIR)/system_apps/gui_ping && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
 	cp $(USERSPACE_DIR)/system_apps/gui_ping/target/x86_64-unknown-none/release/gui_ping $(USERSPACE_BUILD_DIR)/gui_ping
 	cd $(USERSPACE_DIR)/system_apps/gui_terminal_stub && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec

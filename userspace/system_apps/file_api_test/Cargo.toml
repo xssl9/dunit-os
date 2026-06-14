@@ -1,0 +1,11 @@
+[package]
+name = "file_api_test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libdunit = { path = "../../libdunit" }
+
+[[bin]]
+name = "file_api_test"
+path = "src/main.rs"

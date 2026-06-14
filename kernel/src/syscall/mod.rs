@@ -83,6 +83,7 @@ pub const ENFILE: i64 = -23;
 pub const EOPNOTSUPP: i64 = -95;
 pub const ECHILD: i64 = -10;
 pub const EAGAIN: i64 = -11;
+pub const EINTR: i64 = -4;
 pub const EMSGSIZE: i64 = -90;
 pub const ENOBUFS: i64 = -105;
 
@@ -384,7 +385,25 @@ fn sys_read(fd: u32, buf: *mut u8, count: usize) -> i64 {
     }
 
     match crate::process::get_fd(fd).map(|entry| entry.target) {
-        Some(crate::process::FdTarget::Stdin) => return 0,
+        Some(crate::process::FdTarget::Stdin) => {
+            let mut input = Vec::new();
+            input.resize(count, 0);
+            match crate::process::take_terminal_stdin_for_current(&mut input) {
+                Ok(Some(read)) => {
+                    if let Err(error) = copy_buffer_to_user(buf, &input[..read]) {
+                        return error;
+                    }
+                    return read as i64;
+                }
+                Ok(None) => {
+                    if crate::process::request_terminal_stdin_for_current().is_ok() {
+                        return EAGAIN;
+                    }
+                    return 0;
+                }
+                Err(error) => return process_error_to_errno(error),
+            }
+        }
         Some(crate::process::FdTarget::Stdout | crate::process::FdTarget::Stderr) => return EBADF,
         Some(crate::process::FdTarget::Vfs(_)) => {}
         None => return EBADF,
@@ -430,10 +449,12 @@ fn sys_write(fd: u32, buf: *const u8, count: usize) -> i64 {
     match crate::process::get_fd(fd).map(|entry| entry.target) {
         Some(crate::process::FdTarget::Stdout) => {
             write_stdio("STDOUT", &data);
+            write_terminal_foreground(&data);
             return data.len() as i64;
         }
         Some(crate::process::FdTarget::Stderr) => {
             write_stdio("STDERR", &data);
+            write_terminal_foreground(&data);
             return data.len() as i64;
         }
         Some(crate::process::FdTarget::Stdin) => return EBADF,
@@ -528,6 +549,23 @@ fn write_stdio(label: &str, data: &[u8]) {
     }
     if data.last().copied() != Some(b'\n') {
         syscall_log!("\r\n");
+    }
+}
+
+fn write_terminal_foreground(data: &[u8]) {
+    if !crate::process::current_process_is_terminal_foreground() {
+        return;
+    }
+    let Some(console) = crate::terminal::get_console() else {
+        return;
+    };
+    match core::str::from_utf8(data) {
+        Ok(text) => console.write_display_str(text),
+        Err(_) => {
+            for byte in data {
+                console.write_display_str(core::str::from_utf8(&[*byte]).unwrap_or("?"));
+            }
+        }
     }
 }
 
