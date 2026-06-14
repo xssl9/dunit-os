@@ -94,6 +94,7 @@ pub const GUI_MSG_CREATE_WINDOW: u16 = 1;
 pub const GUI_MSG_DRAW_TEXT: u16 = 2;
 pub const GUI_MSG_SET_STATUS: u16 = 3;
 pub const GUI_MSG_EXIT: u16 = 4;
+pub const GUI_MSG_COMMAND: u16 = 5;
 pub const GUI_MSG_KEY_EVENT: u16 = 101;
 pub const GUI_MSG_CLOSE_EVENT: u16 = 102;
 pub const GUI_MSG_DATA_CAP: usize = 160;

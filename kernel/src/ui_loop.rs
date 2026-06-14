@@ -42,11 +42,14 @@ const GUI_MSG_CREATE_WINDOW: u16 = 1;
 const GUI_MSG_DRAW_TEXT: u16 = 2;
 const GUI_MSG_SET_STATUS: u16 = 3;
 const GUI_MSG_EXIT: u16 = 4;
+const GUI_MSG_COMMAND: u16 = 5;
 const GUI_MSG_KEY_EVENT: u16 = 101;
+const GUI_MSG_CLOSE_EVENT: u16 = 102;
 const GUI_MSG_DATA_CAP: usize = 160;
 const GUI_APP_LINES: usize = 8;
 const GUI_APP_TEXT_CAP: usize = 96;
 const GUI_APP_TITLE_CAP: usize = 32;
+const GUI_APP_CWD_CAP: usize = 128;
 const ICON_SIZE: usize = 44;
 const TERMINAL_ICON: &[u8] = include_bytes!("../assets/terminal.rgba");
 const TEXT_ICON: &[u8] = include_bytes!("../assets/text.rgba");
@@ -77,6 +80,7 @@ struct UiState {
     notifications_open: bool,
     brightness: u8,
     keyboard_extended: bool,
+    gui_app_needs_run: bool,
     terminal_bridge: GuiRuntimeBridge,
     gui_app: GuiAppRuntime,
 }
@@ -158,11 +162,12 @@ impl GuiTextLine {
 struct GuiAppRuntime {
     launched: bool,
     running: bool,
-    key_sent: bool,
     exited: bool,
     pid: u64,
     window_id: u32,
     owner_pid: u64,
+    x: usize,
+    y: usize,
     width: usize,
     height: usize,
     title_len: usize,
@@ -171,6 +176,8 @@ struct GuiAppRuntime {
     status: [u8; GUI_APP_TEXT_CAP],
     lines: [GuiTextLine; GUI_APP_LINES],
     line_count: usize,
+    cwd: [u8; GUI_APP_CWD_CAP],
+    cwd_len: usize,
 }
 
 impl GuiAppRuntime {
@@ -178,11 +185,12 @@ impl GuiAppRuntime {
         Self {
             launched: false,
             running: false,
-            key_sent: false,
             exited: false,
             pid: 0,
             window_id: 0,
             owner_pid: 0,
+            x: 0,
+            y: 0,
             width: 420,
             height: 260,
             title_len: 0,
@@ -191,6 +199,8 @@ impl GuiAppRuntime {
             status: [0; GUI_APP_TEXT_CAP],
             lines: [GuiTextLine::empty(); GUI_APP_LINES],
             line_count: 0,
+            cwd: [0; GUI_APP_CWD_CAP],
+            cwd_len: 0,
         }
     }
 
@@ -213,6 +223,14 @@ impl GuiAppRuntime {
     }
 
     fn push_line(&mut self, x: i32, y: i32, data: &[u8]) {
+        let mut index = 0usize;
+        while index < self.line_count {
+            if self.lines[index].x == x && self.lines[index].y == y {
+                self.lines[index].set(x, y, data);
+                return;
+            }
+            index += 1;
+        }
         if self.line_count < self.lines.len() {
             self.lines[self.line_count].set(x, y, data);
             self.line_count += 1;
@@ -224,6 +242,36 @@ impl GuiAppRuntime {
             index += 1;
         }
         self.lines[self.lines.len() - 1].set(x, y, data);
+    }
+
+    fn cwd(&self) -> &str {
+        if self.cwd_len == 0 {
+            "/"
+        } else {
+            core::str::from_utf8(&self.cwd[..self.cwd_len]).unwrap_or("/")
+        }
+    }
+
+    fn set_cwd(&mut self, cwd: &str) {
+        self.cwd_len = cwd.len().min(self.cwd.len());
+        self.cwd[..self.cwd_len].copy_from_slice(&cwd.as_bytes()[..self.cwd_len]);
+    }
+
+    fn reset_window(&mut self) {
+        self.launched = false;
+        self.running = false;
+        self.exited = false;
+        self.pid = 0;
+        self.window_id = 0;
+        self.owner_pid = 0;
+        self.x = 0;
+        self.y = 0;
+        self.width = 420;
+        self.height = 260;
+        self.title_len = 0;
+        self.status_len = 0;
+        self.line_count = 0;
+        self.cwd_len = 0;
     }
 }
 
@@ -249,6 +297,7 @@ impl UiState {
             notifications_open: true,
             brightness: 80,
             keyboard_extended: false,
+            gui_app_needs_run: false,
             terminal_bridge: GuiRuntimeBridge::new(),
             gui_app: GuiAppRuntime::new(),
         }
@@ -270,6 +319,10 @@ enum UiAction {
 
 #[derive(Clone, Copy)]
 enum PointerOp {
+    GuiAppDrag {
+        offset_x: usize,
+        offset_y: usize,
+    },
     Drag {
         idx: usize,
         offset_x: usize,
@@ -542,15 +595,15 @@ fn gui_message_text(message: &GuiMessage) -> &str {
     core::str::from_utf8(gui_message_data(message)).unwrap_or("<invalid utf8>")
 }
 
-fn send_gui_key_event(app: &mut GuiAppRuntime, key: u8) {
-    if app.pid == 0 || app.window_id == 0 || app.key_sent {
-        return;
+fn send_gui_event(app: &GuiAppRuntime, kind: u16, key: u8) -> bool {
+    if app.pid == 0 || app.window_id == 0 || !app.running {
+        return false;
     }
 
     let mut message = GuiMessage {
         magic: GUI_MSG_MAGIC,
         version: GUI_MSG_VERSION,
-        kind: GUI_MSG_KEY_EVENT,
+        kind,
         window_id: app.window_id,
         a: key as i32,
         b: 0,
@@ -567,15 +620,311 @@ fn send_gui_key_event(app: &mut GuiAppRuntime, key: u8) {
 
     match crate::ipc::send_bytes(crate::process::ProcessId(1), crate::process::ProcessId(app.pid), bytes) {
         Ok(()) => {
-            app.key_sent = true;
-            serial_write("[GUI-PROTO] send KEY_EVENT pid=");
+            if kind == GUI_MSG_KEY_EVENT {
+                serial_write("[GUI-PROTO] send KEY_EVENT pid=");
+            } else {
+                serial_write("[GUI-PROTO] send CLOSE_EVENT pid=");
+            }
             serial_write_u64(app.pid);
             serial_write(" window_id=");
             serial_write_u64(app.window_id as u64);
-            serial_write(" key=x\r\n");
+            if kind == GUI_MSG_KEY_EVENT {
+                serial_write(" key=");
+                if key == b'\n' {
+                    serial_write("Enter");
+                } else if key == 8 {
+                    serial_write("Backspace");
+                } else {
+                    let text = [key];
+                    serial_write(core::str::from_utf8(&text).unwrap_or("?"));
+                }
+            }
+            serial_write("\r\n");
+            true
         }
-        Err(_) => serial_write("[GUI-PROTO] failed to send KEY_EVENT\r\n"),
+        Err(_) => {
+            if kind == GUI_MSG_KEY_EVENT {
+                serial_write("[GUI-PROTO] failed to send KEY_EVENT\r\n");
+            } else {
+                serial_write("[GUI-PROTO] failed to send CLOSE_EVENT\r\n");
+            }
+            false
+        }
     }
+}
+
+fn send_gui_key_event(app: &GuiAppRuntime, key: u8) -> bool {
+    send_gui_event(app, GUI_MSG_KEY_EVENT, key)
+}
+
+fn send_gui_close_event(app: &GuiAppRuntime) -> bool {
+    send_gui_event(app, GUI_MSG_CLOSE_EVENT, 0)
+}
+
+fn gui_app_window_rect(width: usize, height: usize, app: &GuiAppRuntime) -> Option<Rect> {
+    if app.window_id == 0 || app.owner_pid == 0 {
+        return None;
+    }
+    let window_width = app.width.max(300);
+    let window_height = app.height.max(180);
+    let max_x = width.saturating_sub(window_width);
+    let max_y = height.saturating_sub(window_height);
+    Some(Rect::new(app.x.min(max_x), app.y.min(max_y), window_width, window_height))
+}
+
+fn close_gui_app_window(state: &mut UiState) -> bool {
+    if state.gui_app.pid == 0 || state.gui_app.window_id == 0 {
+        state.gui_app.reset_window();
+        return true;
+    }
+    if state.gui_app.running {
+        serial_write("[GUI-PROTO] close requested window_id=");
+        serial_write_u64(state.gui_app.window_id as u64);
+        serial_write(" owner_pid=");
+        serial_write_u64(state.gui_app.owner_pid);
+        serial_write("\r\n");
+        send_gui_close_event(&state.gui_app)
+    } else {
+        state.gui_app.reset_window();
+        true
+    }
+}
+
+fn begin_gui_app_drag(state: &UiState, mx: usize, my: usize, width: usize, height: usize) -> Option<PointerOp> {
+    let rect = gui_app_window_rect(width, height, &state.gui_app)?;
+    if inside(mx, my, rect.x + 12, rect.y + 11, 12, 12) {
+        return None;
+    }
+    if inside(mx, my, rect.x, rect.y, rect.width, 34) {
+        return Some(PointerOp::GuiAppDrag {
+            offset_x: mx.saturating_sub(rect.x),
+            offset_y: my.saturating_sub(rect.y),
+        });
+    }
+    None
+}
+
+fn drag_gui_app_window(state: &mut UiState, mx: usize, my: usize, width: usize, height: usize, offset_x: usize, offset_y: usize) -> Option<(Rect, Rect)> {
+    let old_rect = gui_app_window_rect(width, height, &state.gui_app)?;
+    let max_x = width.saturating_sub(old_rect.width);
+    let max_y = height.saturating_sub(old_rect.height);
+    state.gui_app.x = mx.saturating_sub(offset_x).min(max_x);
+    state.gui_app.y = my.saturating_sub(offset_y).min(max_y);
+    let new_rect = gui_app_window_rect(width, height, &state.gui_app)?;
+    Some((old_rect, new_rect))
+}
+
+fn gui_terminal_clear(app: &mut GuiAppRuntime) {
+    app.line_count = 0;
+    let mut index = 0usize;
+    while index < app.lines.len() {
+        app.lines[index] = GuiTextLine::empty();
+        index += 1;
+    }
+}
+
+fn gui_terminal_append_line(app: &mut GuiAppRuntime, text: &str) {
+    let y_values = [0, 14, 28, 42, 56, 70, 84, 98];
+    if app.line_count < app.lines.len() {
+        let index = app.line_count;
+        app.lines[index].set(0, y_values[index], text.as_bytes());
+        app.line_count += 1;
+        return;
+    }
+    let mut index = 1usize;
+    while index < app.lines.len() {
+        app.lines[index - 1] = app.lines[index];
+        app.lines[index - 1].y = y_values[index - 1];
+        index += 1;
+    }
+    let last = app.lines.len() - 1;
+    app.lines[last].set(0, y_values[last], text.as_bytes());
+}
+
+fn gui_terminal_commit_command(app: &mut GuiAppRuntime, command: &str) {
+    let mut line = [0u8; GUI_APP_TEXT_CAP];
+    let mut len = 0usize;
+    append_str(&mut line, &mut len, "root@dunit:# ");
+    append_str(&mut line, &mut len, command);
+    gui_terminal_append_bytes(app, &line[..len]);
+}
+
+fn gui_terminal_new_prompt(app: &mut GuiAppRuntime) {
+    gui_terminal_append_line(app, "root@dunit:# ");
+}
+
+fn gui_terminal_update_prompt(app: &mut GuiAppRuntime, text: &str) {
+    if app.line_count == 0 {
+        gui_terminal_append_line(app, text);
+        return;
+    }
+    let y = app.lines[app.line_count - 1].y;
+    app.lines[app.line_count - 1].set(0, y, text.as_bytes());
+}
+
+fn gui_terminal_append_bytes(app: &mut GuiAppRuntime, bytes: &[u8]) {
+    let text = core::str::from_utf8(bytes).unwrap_or("<invalid utf8>");
+    gui_terminal_append_line(app, text);
+}
+
+fn gui_terminal_vfs_error(app: &mut GuiAppRuntime, command: &str, error: vfs::VfsError) {
+    let mut line = [0u8; GUI_APP_TEXT_CAP];
+    let mut len = 0usize;
+    append_str(&mut line, &mut len, command);
+    append_str(&mut line, &mut len, ": ");
+    append_str(&mut line, &mut len, match error {
+        vfs::VfsError::NotFound => "not found",
+        vfs::VfsError::PermissionDenied => "permission denied",
+        vfs::VfsError::InvalidDescriptor => "invalid descriptor",
+        vfs::VfsError::AlreadyExists => "already exists",
+        vfs::VfsError::NotADirectory => "not a directory",
+        vfs::VfsError::IsADirectory => "is a directory",
+        vfs::VfsError::InvalidPath => "invalid path",
+        vfs::VfsError::Unsupported => "unsupported",
+        vfs::VfsError::IoError => "io error",
+    });
+    gui_terminal_append_bytes(app, &line[..len]);
+}
+
+fn gui_terminal_append_process_state(out: &mut [u8], len: &mut usize, state: crate::process::ProcessState) {
+    append_str(out, len, match state {
+        crate::process::ProcessState::Prepared => "Prepared",
+        crate::process::ProcessState::Ready => "Ready",
+        crate::process::ProcessState::Running => "Running",
+        crate::process::ProcessState::Blocked => "Blocked",
+        crate::process::ProcessState::Dead => "Dead",
+        crate::process::ProcessState::Reaped => "Reaped",
+    });
+}
+
+fn execute_gui_terminal_command(state: &mut UiState, command: &str) {
+    let trimmed = command.trim();
+    serial_write("[GUI-TERM] command: ");
+    serial_write(trimmed);
+    serial_write("\r\n");
+    if state.gui_app.line_count > 0 {
+        state.gui_app.line_count -= 1;
+    }
+    gui_terminal_commit_command(&mut state.gui_app, trimmed);
+
+    if trimmed.is_empty() {
+        gui_terminal_new_prompt(&mut state.gui_app);
+        return;
+    }
+
+    if trimmed == "clear" {
+        gui_terminal_clear(&mut state.gui_app);
+        gui_terminal_new_prompt(&mut state.gui_app);
+        return;
+    }
+
+    if trimmed == "help" {
+        gui_terminal_append_line(&mut state.gui_app, "Available commands:");
+        gui_terminal_append_line(&mut state.gui_app, "help dufetch ls pwd cd ps clear exit");
+        gui_terminal_append_line(&mut state.gui_app, "exec runs later when GUI stdout bridge exists");
+        gui_terminal_new_prompt(&mut state.gui_app);
+        return;
+    }
+
+    if trimmed == "dufetch" {
+        gui_terminal_append_line(&mut state.gui_app, "Dunit OS 1.0.0 Green Tea");
+        gui_terminal_append_line(&mut state.gui_app, "Mode: GUI userspace terminal MVP");
+        gui_terminal_append_line(&mut state.gui_app, "Shell: kernel-backed GUI command bridge");
+        gui_terminal_new_prompt(&mut state.gui_app);
+        return;
+    }
+
+    if trimmed == "pwd" {
+        let cwd = String::from(state.gui_app.cwd());
+        gui_terminal_append_line(&mut state.gui_app, &cwd);
+        gui_terminal_new_prompt(&mut state.gui_app);
+        return;
+    }
+
+    if trimmed == "ps" || trimmed == "ps aux" {
+        let mut records = Vec::new();
+        crate::process::snapshot_processes(&mut records);
+        gui_terminal_append_line(&mut state.gui_app, "PID  PPID  STATE  PATH");
+        for record in records.iter().take(6) {
+            let mut line = [0u8; GUI_APP_TEXT_CAP];
+            let mut len = 0usize;
+            append_u64(&mut line, &mut len, record.pid.0);
+            append_str(&mut line, &mut len, "  ");
+            match record.parent {
+                Some(parent) => append_u64(&mut line, &mut len, parent.0),
+                None => append_str(&mut line, &mut len, "-"),
+            }
+            append_str(&mut line, &mut len, "  ");
+            gui_terminal_append_process_state(&mut line, &mut len, record.state);
+            append_str(&mut line, &mut len, "  ");
+            append_str(&mut line, &mut len, &record.path);
+            gui_terminal_append_bytes(&mut state.gui_app, &line[..len]);
+        }
+        gui_terminal_new_prompt(&mut state.gui_app);
+        return;
+    }
+
+    if trimmed == "ls" || trimmed.starts_with("ls ") {
+        let arg = trimmed.strip_prefix("ls").unwrap_or("").trim();
+        let path = if arg.is_empty() { "." } else { arg };
+        let cwd_string = String::from(state.gui_app.cwd());
+        if let Some(vfs) = vfs::get_vfs() {
+            let mut entries = [vfs::DirEntry::empty(); 32];
+            match vfs.readdir_into_at(&cwd_string, path, &mut entries) {
+                Ok(count) => {
+                    let mut line = [0u8; GUI_APP_TEXT_CAP];
+                    let mut len = 0usize;
+                    for (idx, entry) in entries.iter().take(count).enumerate() {
+                        if idx > 0 {
+                            append_str(&mut line, &mut len, "  ");
+                        }
+                        append_str(&mut line, &mut len, entry.name());
+                    }
+                    gui_terminal_append_bytes(&mut state.gui_app, &line[..len]);
+                }
+                Err(error) => gui_terminal_vfs_error(&mut state.gui_app, "ls", error),
+            }
+        } else {
+            gui_terminal_append_line(&mut state.gui_app, "ls: VFS not initialized");
+        }
+        gui_terminal_new_prompt(&mut state.gui_app);
+        return;
+    }
+
+    if trimmed == "cd" || trimmed.starts_with("cd ") {
+        let arg = trimmed.strip_prefix("cd").unwrap_or("").trim();
+        let path = if arg.is_empty() { "/" } else { arg };
+        let cwd_string = String::from(state.gui_app.cwd());
+        if let Some(vfs) = vfs::get_vfs() {
+            match vfs.stat_at(&cwd_string, path) {
+                Ok(stat) if stat.file_type == vfs::FileType::Directory => {
+                    match vfs.normalize_at(&cwd_string, path) {
+                        Ok(new_cwd) => state.gui_app.set_cwd(&new_cwd),
+                        Err(error) => gui_terminal_vfs_error(&mut state.gui_app, "cd", error),
+                    }
+                }
+                Ok(_) => gui_terminal_append_line(&mut state.gui_app, "cd: not a directory"),
+                Err(error) => gui_terminal_vfs_error(&mut state.gui_app, "cd", error),
+            }
+        } else {
+            gui_terminal_append_line(&mut state.gui_app, "cd: VFS not initialized");
+        }
+        gui_terminal_new_prompt(&mut state.gui_app);
+        return;
+    }
+
+    if trimmed == "exec" || trimmed.starts_with("exec ") {
+        gui_terminal_append_line(&mut state.gui_app, "exec: GUI stdout bridge not implemented yet");
+        gui_terminal_new_prompt(&mut state.gui_app);
+        return;
+    }
+
+    if trimmed == "exit" {
+        return;
+    }
+
+    gui_terminal_append_line(&mut state.gui_app, "Command not found. Type 'help'.");
+    gui_terminal_new_prompt(&mut state.gui_app);
 }
 
 fn process_gui_messages(state: &mut UiState) {
@@ -592,10 +941,18 @@ fn process_gui_messages(state: &mut UiState) {
         let pid = state.gui_app.pid;
         match message.kind {
             GUI_MSG_CREATE_WINDOW => {
+                if pid == 0 || message.window_id == 0 {
+                    serial_write("[GUI-PROTO] ignored CREATE_WINDOW without live app\r\n");
+                    continue;
+                }
                 state.gui_app.window_id = message.window_id;
                 state.gui_app.owner_pid = pid;
                 state.gui_app.width = (message.a.max(220) as usize).min(720);
                 state.gui_app.height = (message.b.max(140) as usize).min(420);
+                if state.gui_app.x == 0 && state.gui_app.y == 0 {
+                    state.gui_app.x = 96;
+                    state.gui_app.y = 72;
+                }
                 state.gui_app.set_title(gui_message_data(&message));
                 serial_write("[GUI-PROTO] recv CREATE_WINDOW pid=");
                 serial_write_u64(pid);
@@ -611,13 +968,22 @@ fn process_gui_messages(state: &mut UiState) {
                 serial_write("\r\n");
             }
             GUI_MSG_DRAW_TEXT => {
-                state.gui_app.push_line(message.a, message.b, gui_message_data(&message));
+                if message.window_id != state.gui_app.window_id || pid == 0 {
+                    serial_write("[GUI-PROTO] ignored DRAW_TEXT for stale window\r\n");
+                    continue;
+                }
+                let text = gui_message_text(&message);
+                if text.starts_with("root@dunit:#") {
+                    gui_terminal_update_prompt(&mut state.gui_app, text);
+                } else {
+                    state.gui_app.push_line(message.a, message.b, gui_message_data(&message));
+                }
                 serial_write("[GUI-PROTO] recv DRAW_TEXT pid=");
                 serial_write_u64(pid);
                 serial_write(" window_id=");
                 serial_write_u64(message.window_id as u64);
                 serial_write(" text=");
-                serial_write(gui_message_text(&message));
+                serial_write(text);
                 serial_write("\r\n");
                 serial_write("[GUI-PROTO] render text window_id=");
                 serial_write_u64(message.window_id as u64);
@@ -631,12 +997,26 @@ fn process_gui_messages(state: &mut UiState) {
                 serial_write(gui_message_text(&message));
                 serial_write("\r\n");
             }
+            GUI_MSG_COMMAND => {
+                if pid == 0 || message.window_id != state.gui_app.window_id {
+                    serial_write("[GUI-PROTO] ignored COMMAND for stale window\r\n");
+                    continue;
+                }
+                serial_write("[GUI-PROTO] recv COMMAND pid=");
+                serial_write_u64(pid);
+                serial_write(" text=");
+                serial_write(gui_message_text(&message));
+                serial_write("\r\n");
+                execute_gui_terminal_command(state, gui_message_text(&message));
+            }
             GUI_MSG_EXIT => {
                 state.gui_app.running = false;
                 state.gui_app.exited = true;
                 serial_write("[GUI-PROTO] recv EXIT pid=");
                 serial_write_u64(pid);
                 serial_write("\r\n");
+                state.gui_app.reset_window();
+                serial_write("[GUI-PROTO] window closed after app EXIT\r\n");
             }
             _ => serial_write("[GUI-PROTO] ignored unknown message\r\n"),
         }
@@ -648,10 +1028,12 @@ fn run_gui_app_once(state: &mut UiState) {
         return;
     }
     let pid = crate::process::ProcessId(state.gui_app.pid);
+    let mut exited = false;
     match crate::process::enter_user_process(pid) {
         Ok(exit) => {
             state.gui_app.running = false;
             state.gui_app.exited = true;
+            exited = true;
             serial_write("[GUI-PROTO] app exited pid=");
             serial_write_u64(pid.0);
             serial_write(" code=");
@@ -660,12 +1042,11 @@ fn run_gui_app_once(state: &mut UiState) {
             let _ = crate::process::autoreap_process(pid, "gui-proto-exit");
         }
         Err(crate::process::ProcessError::SchedulerUnavailable) if crate::process::is_pid_runnable(pid) => {
-            serial_write("[GUI-PROTO] app yielded pid=");
-            serial_write_u64(pid.0);
-            serial_write("\r\n");
         }
         Err(_) => {
             state.gui_app.running = false;
+            state.gui_app.exited = true;
+            exited = true;
             serial_write("[GUI-PROTO] app run failed pid=");
             serial_write_u64(pid.0);
             serial_write("\r\n");
@@ -673,6 +1054,10 @@ fn run_gui_app_once(state: &mut UiState) {
         }
     }
     process_gui_messages(state);
+    if exited && state.gui_app.pid == pid.0 {
+        serial_write("[GUI-PROTO] window closed after app exit\r\n");
+        state.gui_app.reset_window();
+    }
 }
 
 fn launch_gui_terminal_app(state: &mut UiState) {
@@ -711,8 +1096,7 @@ fn launch_gui_terminal_app(state: &mut UiState) {
     }
 
     run_gui_app_once(state);
-    send_gui_key_event(&mut state.gui_app, b'x');
-    run_gui_app_once(state);
+    state.gui_app_needs_run = false;
     process_gui_messages(state);
 }
 
@@ -1031,6 +1415,11 @@ fn glyph(ch: u8) -> [u8; 5] {
         b'=' => [0x14, 0x14, 0x14, 0x14, 0x14],
         b'/' => [0x20, 0x10, 0x08, 0x04, 0x02],
         b'%' => [0x62, 0x64, 0x08, 0x13, 0x23],
+        b'@' => [0x3E, 0x41, 0x5D, 0x55, 0x5E],
+        b'#' => [0x14, 0x7F, 0x14, 0x7F, 0x14],
+        b'$' => [0x24, 0x2A, 0x7F, 0x2A, 0x12],
+        b'~' => [0x08, 0x04, 0x08, 0x10, 0x08],
+        b'|' => [0x00, 0x00, 0x7F, 0x00, 0x00],
         _ => [0x00, 0x00, 0x00, 0x00, 0x00],
     }
 }
@@ -1261,14 +1650,14 @@ fn draw_window(fb: Framebuffer, width: usize, height: usize, window: &window_man
 }
 
 fn draw_gui_app_window(fb: Framebuffer, width: usize, height: usize, app: &GuiAppRuntime) {
-    if app.window_id == 0 || app.owner_pid == 0 {
+    let Some(rect) = gui_app_window_rect(width, height, app) else {
         return;
-    }
+    };
 
-    let window_width = app.width.max(300);
-    let window_height = app.height.max(180);
-    let x = width.saturating_sub(window_width) / 2;
-    let y = height.saturating_sub(window_height) / 2;
+    let window_width = rect.width;
+    let window_height = rect.height;
+    let x = rect.x;
+    let y = rect.y;
     draw_round_rect(fb, width, height, x + 10, y + 12, window_width, window_height, 14, SHADOW);
     draw_round_rect(fb, width, height, x, y, window_width, window_height, 14, WINDOW_BG);
     draw_rect(fb, width, height, x, y, window_width, 34, WINDOW_TITLE);
@@ -1282,31 +1671,13 @@ fn draw_gui_app_window(fb: Framebuffer, width: usize, height: usize, app: &GuiAp
     draw_round_rect(fb, width, height, x + 8, y + 42, window_width.saturating_sub(16), window_height.saturating_sub(50), 8, TERMINAL_BG);
     let content_x = x + 18;
     let content_y = y + 50;
-    let mut owner_line = [0u8; 64];
-    let mut owner_len = 0usize;
-    append_str(&mut owner_line, &mut owner_len, "owner_pid=");
-    append_u64(&mut owner_line, &mut owner_len, app.owner_pid);
-    append_str(&mut owner_line, &mut owner_len, " window_id=");
-    append_u64(&mut owner_line, &mut owner_len, app.window_id as u64);
-    draw_text(fb, width, height, content_x, content_y, line_str(&owner_line, owner_len), MUTED);
 
     for index in 0..app.line_count {
         let line = &app.lines[index];
         let draw_x = content_x.saturating_add(line.x.max(0) as usize);
         let draw_y = content_y.saturating_add(line.y.max(0) as usize);
-        draw_text(fb, width, height, draw_x, draw_y, line.text(), if index == 0 { GREEN } else { TEXT });
-    }
-
-    if app.status_len > 0 {
-        draw_text(
-            fb,
-            width,
-            height,
-            content_x,
-            y + window_height.saturating_sub(24),
-            app.status(),
-            MUTED,
-        );
+        let color = if line.text().starts_with("Dunit GUI Terminal") { GREEN } else { TEXT };
+        draw_text(fb, width, height, draw_x, draw_y, line.text(), color);
     }
 }
 
@@ -1458,6 +1829,12 @@ fn redraw_region(fb: Framebuffer, width: usize, height: usize, rect: Rect, state
                     draw_window(fb, width, height, window, state);
                 }
             }
+        }
+    }
+
+    if let Some(gui_rect) = gui_app_window_rect(width, height, &state.gui_app) {
+        if rects_intersect(rect, Rect::new(gui_rect.x, gui_rect.y, gui_rect.width + 12, gui_rect.height + 14)) {
+            draw_gui_app_window(fb, width, height, &state.gui_app);
         }
     }
 
@@ -1656,6 +2033,9 @@ fn handle_keyboard_shortcuts(state: &mut UiState) -> bool {
             state.keyboard_extended = true;
             continue;
         }
+        if (scancode & 0x80) != 0 {
+            continue;
+        }
 
         if state.keyboard_extended {
             state.keyboard_extended = false;
@@ -1665,6 +2045,21 @@ fn handle_keyboard_shortcuts(state: &mut UiState) -> bool {
                     redraw = true;
                 }
                 _ => {}
+            }
+            continue;
+        }
+
+        if state.gui_app.running && state.gui_app.window_id != 0 {
+            let key = match scancode {
+                0x0E => Some(8),
+                0x1C => Some(b'\n'),
+                _ => keyboard::scancode_to_char(scancode).map(|ch| ch as u8),
+            };
+            if let Some(key) = key {
+                if send_gui_key_event(&state.gui_app, key) {
+                    state.gui_app_needs_run = true;
+                    redraw = true;
+                }
             }
         }
     }
@@ -1763,7 +2158,6 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
     let mut state = UiState::new();
 
     load_wallpaper();
-    launch_gui_terminal_app(&mut state);
     rebuild_blur_cache(width, height);
     redraw_full_screen(scene, width, height, &state);
     if let Some(buffer) = back_buffer.as_ref() {
@@ -1794,10 +2188,26 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
         if pressed && !was_pressed {
             let mx = mouse_x as usize;
             let my = mouse_y as usize;
+            let mut handled_click = false;
 
-            let closed = window_manager::get_wm()
+            if let Some(rect) = gui_app_window_rect(width, height, &state.gui_app) {
+                if inside(mx, my, rect.x + 12, rect.y + 11, 12, 12) {
+                    pointer_op = None;
+                    if close_gui_app_window(&mut state) {
+                        state.gui_app_needs_run = true;
+                    }
+                    full_redraw = true;
+                    handled_click = true;
+                }
+            }
+
+            let closed = if handled_click {
+                None
+            } else {
+                window_manager::get_wm()
                 .map(|wm| wm.close_at(mx, my))
-                .unwrap_or(None);
+                .unwrap_or(None)
+            };
 
             if let Some((x, y, w, h, app_type)) = closed {
                 pointer_op = None;
@@ -1807,6 +2217,7 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                     animate_genie(scene, front, back_buffer.as_ref(), width, height, dock_rect, window_rect, false, &state);
                 }
                 full_redraw = true;
+            } else if handled_click {
             } else if let Some((x, y, w, h, app_type)) = window_manager::get_wm()
                 .map(|wm| wm.minimize_at(mx, my))
                 .unwrap_or(None)
@@ -1860,25 +2271,42 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                 }
                 full_redraw = true;
             } else {
-                pointer_op = window_manager::get_wm()
+                pointer_op = begin_gui_app_drag(&state, mx, my, width, height)
+                    .or_else(|| window_manager::get_wm()
                     .and_then(|wm| wm.begin_resize_at(mx, my))
                     .map(|(idx, offset_x, offset_y)| PointerOp::Resize { idx, offset_x, offset_y })
                     .or_else(|| {
                         window_manager::get_wm()
                             .and_then(|wm| wm.begin_drag_at(mx, my))
                             .map(|(idx, offset_x, offset_y)| PointerOp::Drag { idx, offset_x, offset_y })
-                    });
+                    }));
             }
         }
 
         if pressed {
             if let Some(op) = pointer_op {
-                if let Some(wm) = window_manager::get_wm() {
-                    let mx = mouse_x.max(0) as usize;
-                    let my = mouse_y.max(0) as usize;
+                let mx = mouse_x.max(0) as usize;
+                let my = mouse_y.max(0) as usize;
+                match op {
+                    PointerOp::GuiAppDrag { offset_x, offset_y } => {
+                        if let Some((old_rect, new_rect)) = drag_gui_app_window(&mut state, mx, my, width, height, offset_x, offset_y) {
+                            let window_damage = old_rect
+                                .union(new_rect)
+                                .union(cursor_rect(old_mouse_x, old_mouse_y))
+                                .union(cursor_rect(mouse_x, mouse_y));
+                            if back_buffer.is_some() {
+                                drag_damage = Some(padded_rect(window_damage, 10, width, height));
+                            } else {
+                                full_redraw = true;
+                            }
+                        }
+                    }
+                    PointerOp::Drag { .. } | PointerOp::Resize { .. } => {
+                        if let Some(wm) = window_manager::get_wm() {
                     let (idx, offset_x, offset_y) = match op {
                         PointerOp::Drag { idx, offset_x, offset_y } => (idx, offset_x, offset_y),
                         PointerOp::Resize { idx, offset_x, offset_y } => (idx, offset_x, offset_y),
+                        PointerOp::GuiAppDrag { .. } => unreachable!(),
                     };
                     let old_bounds = wm.window_bounds(idx);
                     match op {
@@ -1898,6 +2326,7 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                                 wm.resize_window(idx, target_w, target_h, width, height);
                             }
                         }
+                        PointerOp::GuiAppDrag { .. } => {}
                     }
                     let new_bounds = wm.window_bounds(idx);
                     if let (Some(old_bounds), Some(new_bounds)) = (old_bounds, new_bounds) {
@@ -1919,10 +2348,26 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                     } else {
                         full_redraw = true;
                     }
+                        }
+                    }
                 }
             }
         } else {
             pointer_op = None;
+        }
+
+        if state.gui_app_needs_run && state.gui_app.running && state.gui_app.pid != 0 {
+            let before_lines = state.gui_app.line_count;
+            let before_window = state.gui_app.window_id;
+            let before_pid = state.gui_app.pid;
+            state.gui_app_needs_run = false;
+            run_gui_app_once(&mut state);
+            if state.gui_app.line_count != before_lines
+                || state.gui_app.window_id != before_window
+                || state.gui_app.pid != before_pid
+            {
+                full_redraw = true;
+            }
         }
 
         if full_redraw {
