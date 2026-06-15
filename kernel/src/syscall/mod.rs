@@ -33,6 +33,8 @@ pub enum Syscall {
     Yield = 24,
     GetTerminalCursor = 25,
     GetSystemStats = 26,
+    Readdir = 27,
+    Stat = 28,
 }
 
 impl Syscall {
@@ -65,6 +67,8 @@ impl Syscall {
             24 => Some(Syscall::Yield),
             25 => Some(Syscall::GetTerminalCursor),
             26 => Some(Syscall::GetSystemStats),
+            27 => Some(Syscall::Readdir),
+            28 => Some(Syscall::Stat),
             _ => None,
         }
     }
@@ -139,11 +143,27 @@ pub struct SystemStats {
     pub uptime_available: u64,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct UserDirEntry {
+    pub name: [u8; 64],
+    pub name_len: usize,
+    pub file_type: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct UserFileStat {
+    pub file_type: u32,
+    pub size: usize,
+}
+
 const USER_SPACE_START: u64 = 0x0000_0000_0000_0000;
 const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
 const MAX_FD: u32 = 1024;
 const MAX_USER_COPY: usize = 64 * 1024;
 const MAX_USER_PATH: usize = 256;
+const MAX_USER_DIRENTS: usize = 64;
 const SMOKE_RETURN_MAGIC: i64 = 0x0051_5953_4341_4C4C;
 const PAGE_PRESENT: u64 = 1 << 0;
 const PAGE_WRITABLE: u64 = 1 << 1;
@@ -380,6 +400,8 @@ pub extern "C" fn syscall_handler(
         Syscall::Yield => sys_yield(),
         Syscall::GetTerminalCursor => sys_get_terminal_cursor(arg0 as *mut TerminalCursorInfo),
         Syscall::GetSystemStats => sys_get_system_stats(arg0 as *mut SystemStats),
+        Syscall::Readdir => sys_readdir(arg0 as *const u8, arg1 as usize, arg2 as *mut UserDirEntry, arg3 as usize),
+        Syscall::Stat => sys_stat(arg0 as *const u8, arg1 as usize, arg2 as *mut UserFileStat),
     }
 }
 
@@ -570,6 +592,108 @@ fn sys_close(fd: u32) -> i64 {
                 Err(error) => process_error_to_errno(error),
             }
         }
+    }
+}
+
+fn user_file_type(file_type: crate::fs::vfs::FileType) -> u32 {
+    match file_type {
+        crate::fs::vfs::FileType::File => 1,
+        crate::fs::vfs::FileType::Directory => 2,
+        crate::fs::vfs::FileType::Device => 3,
+    }
+}
+
+fn sys_readdir(
+    path: *const u8,
+    path_len: usize,
+    entries: *mut UserDirEntry,
+    capacity: usize,
+) -> i64 {
+    let path = match copy_string_from_user_len(path, path_len, MAX_USER_PATH) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+    if capacity > MAX_USER_DIRENTS {
+        return EINVAL;
+    }
+    if capacity > 0 {
+        let bytes = capacity.saturating_mul(core::mem::size_of::<UserDirEntry>());
+        if let Err(error) = validate_user_range(entries as u64, bytes) {
+            return error;
+        }
+    }
+
+    let cwd = match crate::process::current_process() {
+        Some(process) => process.cwd.clone(),
+        None => return EINVAL,
+    };
+
+    let mut kernel_entries = [crate::fs::vfs::DirEntry::empty(); MAX_USER_DIRENTS];
+    let count = match crate::fs::vfs::get_vfs()
+        .ok_or(EIO)
+        .and_then(|vfs| vfs.readdir_into_at(&cwd, &path, &mut kernel_entries[..capacity]).map_err(vfs_error_to_errno))
+    {
+        Ok(count) => count,
+        Err(error) => return error,
+    };
+
+    for (index, entry) in kernel_entries.iter().take(count).enumerate() {
+        let name = entry.name().as_bytes();
+        let name_len = name.len().min(64);
+        let mut user_entry = UserDirEntry {
+            name: [0; 64],
+            name_len,
+            file_type: user_file_type(entry.file_type),
+        };
+        user_entry.name[..name_len].copy_from_slice(&name[..name_len]);
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                &user_entry as *const UserDirEntry as *const u8,
+                core::mem::size_of::<UserDirEntry>(),
+            )
+        };
+        if let Err(error) = copy_buffer_to_user(unsafe { entries.add(index) } as *mut u8, bytes) {
+            return error;
+        }
+    }
+
+    count as i64
+}
+
+fn sys_stat(path: *const u8, path_len: usize, stat: *mut UserFileStat) -> i64 {
+    let path = match copy_string_from_user_len(path, path_len, MAX_USER_PATH) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+    if let Err(error) = validate_user_range(stat as u64, core::mem::size_of::<UserFileStat>()) {
+        return error;
+    }
+
+    let cwd = match crate::process::current_process() {
+        Some(process) => process.cwd.clone(),
+        None => return EINVAL,
+    };
+
+    let file_stat = match crate::fs::vfs::get_vfs()
+        .ok_or(EIO)
+        .and_then(|vfs| vfs.stat_at(&cwd, &path).map_err(vfs_error_to_errno))
+    {
+        Ok(stat) => stat,
+        Err(error) => return error,
+    };
+    let user_stat = UserFileStat {
+        file_type: user_file_type(file_stat.file_type),
+        size: file_stat.size,
+    };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            &user_stat as *const UserFileStat as *const u8,
+            core::mem::size_of::<UserFileStat>(),
+        )
+    };
+    match copy_buffer_to_user(stat as *mut u8, bytes) {
+        Ok(()) => 0,
+        Err(error) => error,
     }
 }
 

@@ -1,0 +1,11 @@
+[package]
+name = "gui_file_manager"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libdunit = { path = "../../libdunit" }
+
+[[bin]]
+name = "gui_file_manager"
+path = "src/main.rs"

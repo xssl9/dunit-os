@@ -31,6 +31,8 @@ pub const SYSCALL_CHDIR: usize = 23;
 pub const SYSCALL_YIELD: usize = 24;
 pub const SYSCALL_GET_TERMINAL_CURSOR: usize = 25;
 pub const SYSCALL_GET_SYSTEM_STATS: usize = 26;
+pub const SYSCALL_READDIR: usize = 27;
+pub const SYSCALL_STAT: usize = 28;
 
 pub const EAGAIN: isize = -11;
 pub const EINTR: isize = -4;
@@ -111,6 +113,10 @@ pub const OPEN_TRUNC: usize = 1 << 3;
 pub const OPEN_APPEND: usize = 1 << 4;
 pub const OPEN_READ_WRITE: usize = OPEN_READ | OPEN_WRITE;
 
+pub const FILE_TYPE_FILE: u32 = 1;
+pub const FILE_TYPE_DIRECTORY: u32 = 2;
+pub const FILE_TYPE_DEVICE: u32 = 3;
+
 pub type RawArgv = *const *const u8;
 pub type RawEnvp = *const *const u8;
 
@@ -163,6 +169,35 @@ pub struct SystemStats {
     pub fs_open_handles: u64,
     pub uptime_ticks: u64,
     pub uptime_available: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DirEntry {
+    pub name: [u8; 64],
+    pub name_len: usize,
+    pub file_type: u32,
+}
+
+impl DirEntry {
+    pub const fn empty() -> Self {
+        Self {
+            name: [0; 64],
+            name_len: 0,
+            file_type: FILE_TYPE_FILE,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        core::str::from_utf8(&self.name[..self.name_len.min(self.name.len())]).unwrap_or("<invalid>")
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct FileStat {
+    pub file_type: u32,
+    pub size: usize,
 }
 
 impl GuiMessage {
@@ -386,6 +421,26 @@ pub fn read(fd: usize, buf: &mut [u8]) -> isize {
 
 pub fn close(fd: usize) -> isize {
     syscall1(SYSCALL_CLOSE, fd)
+}
+
+pub fn readdir(path: &str, entries: &mut [DirEntry]) -> isize {
+    syscall5(
+        SYSCALL_READDIR,
+        path.as_ptr() as usize,
+        path.len(),
+        entries.as_mut_ptr() as usize,
+        entries.len(),
+        0,
+    )
+}
+
+pub fn stat(path: &str, stat: &mut FileStat) -> isize {
+    syscall3(
+        SYSCALL_STAT,
+        path.as_ptr() as usize,
+        path.len(),
+        stat as *mut FileStat as usize,
+    )
 }
 
 pub fn print(s: &str) {

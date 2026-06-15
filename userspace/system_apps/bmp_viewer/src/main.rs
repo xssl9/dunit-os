@@ -3,8 +3,8 @@
 
 use core::panic::PanicInfo;
 
-const DEFAULT_PATH: &str = "/assets/logo.bmp";
-const MAX_BMP_SIZE: usize = 6 * 1024 * 1024;
+const DEFAULT_PATH: &str = "/assets/images/logo.bmp";
+const MAX_BMP_SIZE: usize = 8 * 1024 * 1024;
 const READ_CHUNK_SIZE: usize = 4096;
 const PAD_X: u32 = 16;
 const PAD_Y: u32 = 4;

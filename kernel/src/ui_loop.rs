@@ -31,13 +31,14 @@ const WALLPAPER_WIDTH: usize = 1600;
 const WALLPAPER_HEIGHT: usize = 900;
 const WALLPAPER_OFFSET: usize = 54;
 const WALLPAPER_STRIDE: usize = WALLPAPER_WIDTH * 3;
-const WALLPAPER_PATH: &str = "/assets/wallpaper.bmp";
+const WALLPAPER_PATH: &str = "/assets/wallpapers/wallpaper.bmp";
 const GUI_PING_PATH: &str = "/app/gui_ping";
 const GUI_PING_MESSAGE: &[u8] = b"gui_ping: hello from userspace";
 const GUI_BRIDGE_MESSAGE_CAP: usize = 96;
 const GUI_TERMINAL_STUB_PATH: &str = "/app/gui_terminal_stub";
 const GUI_CALCULATOR_PATH: &str = "/app/gui_calculator";
 const GUI_STATS_PATH: &str = "/app/gui_stats";
+const GUI_FILE_MANAGER_PATH: &str = "/app/gui_file_manager";
 const GUI_MSG_MAGIC: u32 = 0x3149_5547;
 const GUI_MSG_VERSION: u16 = 1;
 const GUI_MSG_CREATE_WINDOW: u16 = 1;
@@ -64,8 +65,9 @@ const TERMINAL_ICON: &[u8] = include_bytes!("../../assets/icons/terminal.rgba");
 const CALCULATOR_ICON: &[u8] = include_bytes!("../../assets/icons/calculator.rgba");
 const TEXT_ICON: &[u8] = include_bytes!("../../assets/icons/text.rgba");
 const MONITOR_ICON: &[u8] = include_bytes!("../../assets/icons/monitor.rgba");
-const DOCK_APPS: [(AppType, u32, &'static str); 3] = [
+const DOCK_APPS: [(AppType, u32, &'static str); 4] = [
     (AppType::Terminal, GREEN, "Term"),
+    (AppType::Files, ACCENT, "Files"),
     (AppType::Calculator, BLUE, "Calc"),
     (AppType::Monitor, ORANGE, "Stats"),
 ];
@@ -101,6 +103,7 @@ struct UiState {
 enum GuiAppKind {
     None,
     Terminal,
+    FileManager,
     Calculator,
     Stats,
 }
@@ -1537,6 +1540,15 @@ fn launch_gui_stats_app(state: &mut UiState) {
     );
 }
 
+fn launch_gui_file_manager_app(state: &mut UiState) {
+    launch_gui_userspace_app(
+        state,
+        GUI_FILE_MANAGER_PATH,
+        "gui_file_manager",
+        GuiAppKind::FileManager,
+    );
+}
+
 fn put_pixel(fb: Framebuffer, _width: usize, _height: usize, x: usize, y: usize, color: u32) {
     fb.put_pixel(x, y, color);
 }
@@ -2008,6 +2020,7 @@ fn draw_traffic_button(fb: Framebuffer, width: usize, height: usize, x: usize, y
 fn gui_app_active(state: &UiState, app_type: AppType) -> bool {
     let kind = match app_type {
         AppType::Terminal => Some(GuiAppKind::Terminal),
+        AppType::Files => Some(GuiAppKind::FileManager),
         AppType::Calculator => Some(GuiAppKind::Calculator),
         AppType::Monitor => Some(GuiAppKind::Stats),
         _ => None,
@@ -2235,7 +2248,7 @@ fn draw_desktop_widgets(fb: Framebuffer, width: usize, height: usize, state: &Ui
             ("Terminal", GREEN, AppType::Terminal),
             ("Calculator", BLUE, AppType::Calculator),
             ("Stats", ORANGE, AppType::Monitor),
-            ("Files Legacy", GLASS_SOFT, AppType::Files),
+            ("Files", ACCENT, AppType::Files),
             ("Edit Legacy", PURPLE, AppType::Editor),
         ];
         for i in 0..app_cards.len() {
@@ -2538,6 +2551,8 @@ fn apply_ui_action(state: &mut UiState, action: UiAction) -> bool {
         UiAction::ToggleApp(app_type) => {
             if app_type == AppType::Terminal {
                 launch_gui_terminal_app(state);
+            } else if app_type == AppType::Files {
+                launch_gui_file_manager_app(state);
             } else if app_type == AppType::Calculator {
                 launch_gui_calculator_app(state);
             } else if app_type == AppType::Monitor {
@@ -2795,6 +2810,8 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                 pointer_op = None;
                 if app_type == AppType::Terminal {
                     launch_gui_terminal_app(&mut state);
+                } else if app_type == AppType::Files {
+                    launch_gui_file_manager_app(&mut state);
                 } else if app_type == AppType::Calculator {
                     launch_gui_calculator_app(&mut state);
                 } else if app_type == AppType::Monitor {

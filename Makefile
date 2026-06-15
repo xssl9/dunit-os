@@ -132,6 +132,8 @@ userspace:
 	cp $(USERSPACE_DIR)/system_apps/gui_calculator/target/x86_64-unknown-none/release/gui_calculator $(USERSPACE_BUILD_DIR)/gui_calculator
 	cd $(USERSPACE_DIR)/system_apps/gui_stats && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
 	cp $(USERSPACE_DIR)/system_apps/gui_stats/target/x86_64-unknown-none/release/gui_stats $(USERSPACE_BUILD_DIR)/gui_stats
+	cd $(USERSPACE_DIR)/system_apps/gui_file_manager && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
+	cp $(USERSPACE_DIR)/system_apps/gui_file_manager/target/x86_64-unknown-none/release/gui_file_manager $(USERSPACE_BUILD_DIR)/gui_file_manager
 	cd $(USERSPACE_DIR)/system_apps/stdin_test && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
 	cp $(USERSPACE_DIR)/system_apps/stdin_test/target/x86_64-unknown-none/release/stdin_test $(USERSPACE_BUILD_DIR)/stdin_test
 	cd $(USERSPACE_DIR)/system_apps/fault_pf && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec

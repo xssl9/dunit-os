@@ -25,7 +25,8 @@ What works today:
   and honest system commands.
 - VFS with MemFS as the root filesystem.
 - `/app` userspace ELF binaries embedded into MemFS.
-- `/assets` image assets, including `dr15.bmp` and `logo.bmp`.
+- `/assets` mirrors the repository asset tree, including images, icons, GUI files,
+  wallpapers, fonts, and boot art.
 - Userspace syscall ABI for read/write/open/close, framebuffer drawing,
   spawn/wait foundation, pid, cwd/chdir, sleep, debug log, and cooperative yield.
 - Userspace exec ABI with `argc`, `argv`, and `envp`.
@@ -53,7 +54,8 @@ Current system apps in `/app`:
 - `scheduler_test` - scheduler/yield foundation test.
 - `spawn_ready_test` - runnable spawn foundation test.
 - `image_demo` - framebuffer drawing demo.
-- `bmp_viewer` - BMP renderer; defaults to `/assets/logo.bmp`.
+- `bmp_viewer` - BMP renderer; defaults to `/assets/images/logo.bmp`.
+- `gui_file_manager` - GUI File Manager MVP with real `readdir`/`stat`.
 - `fault_pf` - recoverable page fault test.
 - `fault_ud` - recoverable invalid opcode test.
 
@@ -66,7 +68,7 @@ ls /app
 ls /assets
 exec args_test one two
 exec bmp_viewer
-exec bmp_viewer /assets/dr15.bmp
+exec bmp_viewer /assets/images/dr15.bmp
 exec fault_pf
 ps
 pwd
@@ -138,8 +140,8 @@ Current foundation behavior:
 - `wait` on Ready/Running children returns `EAGAIN` instead of faking success.
 - `yield` reports a candidate process but returns "switch not implemented".
 - `stdin` is EOF-only.
-- `/assets/logo.bmp` and `/assets/dr15.bmp` are embedded as small generated BMP
-  previews to keep kernel heap pressure reasonable.
+- `/assets` is embedded from the repository `assets/` directory with the same
+  hierarchy exposed in MemFS.
 
 ## Roadmap
 
