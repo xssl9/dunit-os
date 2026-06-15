@@ -129,8 +129,8 @@ dunit-os/
 │
 ├── Makefile                     # Build system
 ├── limine.conf                  # Bootloader configuration
-├── background.png               # Boot background
-├── dr15.bmp                     # Theme image
+├── assets/gui/background.png    # Optional boot background
+├── assets/images/dr15.bmp       # Theme image
 ├── BUILD.md                     # Build instructions
 ├── GIT_GUIDE.md                 # Git workflow
 ├── READY_TO_TEST.md             # Testing guide

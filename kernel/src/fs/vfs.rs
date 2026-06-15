@@ -34,9 +34,9 @@ static STDIN_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/stdin_
 static DTOP_BYTES: &[u8] = include_bytes!("../../../build/userspace/dtop");
 static FAULT_PF_BYTES: &[u8] = include_bytes!("../../../build/userspace/fault_pf");
 static FAULT_UD_BYTES: &[u8] = include_bytes!("../../../build/userspace/fault_ud");
-static DR15_BMP_BYTES: &[u8] = include_bytes!("../../../dr15.bmp");
-static LOGO_BMP_BYTES: &[u8] = include_bytes!("../../../logo.bmp");
-static WALLPAPER_BMP_BYTES: &[u8] = include_bytes!("../../../wallpaper.bmp");
+static DR15_BMP_BYTES: &[u8] = include_bytes!("../../../assets/images/dr15.bmp");
+static LOGO_BMP_BYTES: &[u8] = include_bytes!("../../../assets/images/logo.bmp");
+static WALLPAPER_BMP_BYTES: &[u8] = include_bytes!("../../../assets/wallpapers/wallpaper.bmp");
 
 pub type FileDescriptor = u32;
 pub type FileHandle = usize;

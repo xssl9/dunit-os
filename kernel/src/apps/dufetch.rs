@@ -3,7 +3,7 @@ use core::fmt::Write;
 use crate::{memory, process, terminal};
 
 const LOGO_WIDTH: usize = 80;
-const LOGO: &str = include_str!("../../assets/dufetch_logo.txt");
+const LOGO: &str = include_str!("../../../assets/gui/dufetch_logo.txt");
 const COLOR_DARK_GREEN: u32 = 0x2f7a4e;
 const COLOR_SAGE: u32 = 0x9bb59c;
 const COLOR_SOFT_WHITE: u32 = 0xfffdf1;

@@ -60,9 +60,10 @@ const GUI_APP_CWD_CAP: usize = 128;
 const MAX_GUI_APPS: usize = 4;
 const NO_GUI_FOCUS: usize = usize::MAX;
 const ICON_SIZE: usize = 44;
-const TERMINAL_ICON: &[u8] = include_bytes!("../assets/terminal.rgba");
-const TEXT_ICON: &[u8] = include_bytes!("../assets/text.rgba");
-const MONITOR_ICON: &[u8] = include_bytes!("../assets/monitor.rgba");
+const TERMINAL_ICON: &[u8] = include_bytes!("../../assets/icons/terminal.rgba");
+const CALCULATOR_ICON: &[u8] = include_bytes!("../../assets/icons/calculator.rgba");
+const TEXT_ICON: &[u8] = include_bytes!("../../assets/icons/text.rgba");
+const MONITOR_ICON: &[u8] = include_bytes!("../../assets/icons/monitor.rgba");
 const DOCK_APPS: [(AppType, u32, &'static str); 3] = [
     (AppType::Terminal, GREEN, "Term"),
     (AppType::Calculator, BLUE, "Calc"),
@@ -2045,7 +2046,7 @@ fn draw_dock(fb: Framebuffer, width: usize, height: usize, state: &UiState) {
         draw_round_rect_border(fb, width, height, icon_x, icon_y, icon_size, icon_size, 12, 0x2d353b);
         match DOCK_APPS[i].0 {
             AppType::Terminal => draw_rgba_icon(fb, width, height, icon_x + 2, icon_y + 2, TERMINAL_ICON),
-            AppType::Calculator => draw_icon_symbol(fb, width, height, icon_x, icon_y, DOCK_APPS[i].0),
+            AppType::Calculator => draw_rgba_icon(fb, width, height, icon_x + 2, icon_y + 2, CALCULATOR_ICON),
             AppType::Monitor => draw_rgba_icon(fb, width, height, icon_x + 2, icon_y + 2, MONITOR_ICON),
             AppType::Editor => draw_rgba_icon(fb, width, height, icon_x + 2, icon_y + 2, TEXT_ICON),
             _ => draw_icon_symbol(fb, width, height, icon_x, icon_y, DOCK_APPS[i].0),

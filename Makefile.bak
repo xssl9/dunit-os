@@ -144,8 +144,8 @@ iso: $(BUILD_DIR)/kernel.elf userspace
 	mkdir -p $(ISO_DIR)/boot/userspace
 	cp $(BUILD_DIR)/kernel.elf $(ISO_DIR)/boot/
 	cp $(LIMINE_CONFIG) $(ISO_DIR)/boot/limine/limine.conf
-	test -f background.png && cp background.png $(ISO_DIR)/boot/background.png || true
-	test -f limine.png && cp limine.png $(ISO_DIR)/boot/limine.png || true
+	test -f assets/gui/background.png && cp assets/gui/background.png $(ISO_DIR)/boot/background.png || true
+	test -f assets/boot/limine.png && cp assets/boot/limine.png $(ISO_DIR)/boot/limine.png || true
 	cp $(USERSPACE_BUILD_DIR)/* $(ISO_DIR)/boot/userspace/ 2>/dev/null || true
 	cp limine/limine-bios.sys $(ISO_DIR)/boot/limine/
 	cp limine/limine-bios-cd.bin $(ISO_DIR)/boot/limine/

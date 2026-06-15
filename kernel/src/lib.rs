@@ -789,7 +789,7 @@ fn terminal_handle_fs_command(console: &mut terminal::FbConsole, cmd_str: &str) 
 #[no_mangle]
 static mut SCREEN_LOG_FB: Option<(*mut u32, usize)> = None;
 static mut SCREEN_LOG_Y: usize = 10;
-const BOOT_BACKGROUND_BMP: &[u8] = include_bytes!("../../boot_blur.bmp");
+const BOOT_BACKGROUND_BMP: &[u8] = include_bytes!("../../assets/gui/boot_blur.bmp");
 const BOOT_BACKGROUND_WIDTH: usize = 1024;
 const BOOT_BACKGROUND_HEIGHT: usize = 768;
 const BOOT_BACKGROUND_OFFSET: usize = 54;
