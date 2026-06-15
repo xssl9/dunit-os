@@ -73,6 +73,15 @@ pub struct MemFs {
     open_handles: Vec<(FileHandle, OpenMemHandle)>,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MemFsStats {
+    pub files: u64,
+    pub directories: u64,
+    pub bytes: u64,
+    pub open_handles: u64,
+}
+
 impl MemFs {
     pub const fn empty() -> Self {
         Self {
@@ -110,6 +119,25 @@ impl MemFs {
             MemData::Static(data) => Some(data),
             MemData::Owned(_) => None,
         }
+    }
+
+    pub fn stats(&self) -> MemFsStats {
+        let mut stats = MemFsStats {
+            directories: BASE_DIRS.len() as u64,
+            ..MemFsStats::default()
+        };
+        for node in self.nodes.iter() {
+            match node.file_type {
+                FileType::File => {
+                    stats.files += 1;
+                    stats.bytes += node.data.len() as u64;
+                }
+                FileType::Directory => stats.directories += 1,
+                FileType::Device => {}
+            }
+        }
+        stats.open_handles = self.open_handles.len() as u64;
+        stats
     }
 
     fn clean(path: &str) -> &str {

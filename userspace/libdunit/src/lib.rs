@@ -30,6 +30,7 @@ pub const SYSCALL_GETCWD: usize = 22;
 pub const SYSCALL_CHDIR: usize = 23;
 pub const SYSCALL_YIELD: usize = 24;
 pub const SYSCALL_GET_TERMINAL_CURSOR: usize = 25;
+pub const SYSCALL_GET_SYSTEM_STATS: usize = 26;
 
 pub const EAGAIN: isize = -11;
 pub const EINTR: isize = -4;
@@ -95,8 +96,12 @@ pub const GUI_MSG_DRAW_TEXT: u16 = 2;
 pub const GUI_MSG_SET_STATUS: u16 = 3;
 pub const GUI_MSG_EXIT: u16 = 4;
 pub const GUI_MSG_COMMAND: u16 = 5;
+pub const GUI_MSG_CLEAR: u16 = 6;
+pub const GUI_MSG_SET_TITLE: u16 = 7;
+pub const GUI_MSG_DRAW_RECT: u16 = 8;
 pub const GUI_MSG_KEY_EVENT: u16 = 101;
 pub const GUI_MSG_CLOSE_EVENT: u16 = 102;
+pub const GUI_MSG_POINTER_EVENT: u16 = 103;
 pub const GUI_MSG_DATA_CAP: usize = 160;
 
 pub const OPEN_READ: usize = 1 << 0;
@@ -129,6 +134,35 @@ pub struct GuiMessage {
     pub c: u32,
     pub len: u32,
     pub data: [u8; GUI_MSG_DATA_CAP],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct SystemStats {
+    pub process_total: u64,
+    pub process_prepared: u64,
+    pub process_ready: u64,
+    pub process_running: u64,
+    pub process_blocked: u64,
+    pub process_dead: u64,
+    pub process_reaped: u64,
+    pub pmm_total_bytes: u64,
+    pub pmm_free_bytes: u64,
+    pub pmm_used_bytes: u64,
+    pub heap_total_bytes: u64,
+    pub heap_free_bytes: u64,
+    pub heap_used_bytes: u64,
+    pub heap_free_blocks: u64,
+    pub ipc_queue_count: u64,
+    pub ipc_queued_messages: u64,
+    pub ipc_shared_regions: u64,
+    pub ipc_max_queue_messages: u64,
+    pub fs_files: u64,
+    pub fs_directories: u64,
+    pub fs_bytes: u64,
+    pub fs_open_handles: u64,
+    pub uptime_ticks: u64,
+    pub uptime_available: u64,
 }
 
 impl GuiMessage {
@@ -682,9 +716,42 @@ pub fn gui_draw_text(window_id: u32, x: i32, y: i32, text: &str) -> isize {
     gui_send(&message)
 }
 
+pub fn gui_draw_rect(window_id: u32, x: i32, y: i32, width: u32, height: u32, color: u32) -> isize {
+    let mut message = GuiMessage::new(GUI_MSG_DRAW_RECT);
+    message.window_id = window_id;
+    message.a = x;
+    message.b = y;
+    message.c = color;
+    message.len = 8;
+    let width_bytes = width.to_le_bytes();
+    let height_bytes = height.to_le_bytes();
+    message.data[0] = width_bytes[0];
+    message.data[1] = width_bytes[1];
+    message.data[2] = width_bytes[2];
+    message.data[3] = width_bytes[3];
+    message.data[4] = height_bytes[0];
+    message.data[5] = height_bytes[1];
+    message.data[6] = height_bytes[2];
+    message.data[7] = height_bytes[3];
+    gui_send(&message)
+}
+
 pub fn gui_set_status(text: &str) -> isize {
     let mut message = GuiMessage::new(GUI_MSG_SET_STATUS);
     message.set_data(text.as_bytes());
+    gui_send(&message)
+}
+
+pub fn gui_clear(window_id: u32) -> isize {
+    let mut message = GuiMessage::new(GUI_MSG_CLEAR);
+    message.window_id = window_id;
+    gui_send(&message)
+}
+
+pub fn gui_set_title(window_id: u32, title: &str) -> isize {
+    let mut message = GuiMessage::new(GUI_MSG_SET_TITLE);
+    message.window_id = window_id;
+    message.set_data(title.as_bytes());
     gui_send(&message)
 }
 
@@ -711,6 +778,10 @@ pub fn yield_now() -> isize {
 
 pub fn getcwd(buf: &mut [u8]) -> isize {
     syscall2(SYSCALL_GETCWD, buf.as_mut_ptr() as usize, buf.len())
+}
+
+pub fn get_system_stats(stats: &mut SystemStats) -> isize {
+    syscall1(SYSCALL_GET_SYSTEM_STATS, stats as *mut SystemStats as usize)
 }
 
 pub fn chdir(path: &str) -> isize {

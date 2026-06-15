@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use crate::process::ProcessId;
 
 pub const MAX_MESSAGE_SIZE: usize = 256;
-pub const MAX_QUEUE_MESSAGES: usize = 16;
+pub const MAX_QUEUE_MESSAGES: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SharedMemoryId(pub u64);
@@ -85,6 +85,15 @@ pub struct IpcManager {
     shared_regions: BTreeMap<SharedMemoryId, SharedMemoryRegion>,
     message_queues: BTreeMap<ProcessId, Vec<Message>>,
     next_shared_id: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IpcStats {
+    pub queue_count: u64,
+    pub queued_messages: u64,
+    pub shared_regions: u64,
+    pub max_queue_messages: u64,
 }
 
 impl IpcManager {
@@ -176,6 +185,19 @@ impl IpcManager {
     pub fn clear_messages(&mut self, pid: ProcessId) {
         self.message_queues.remove(&pid);
     }
+
+    pub fn stats(&self) -> IpcStats {
+        let mut queued_messages = 0u64;
+        for queue in self.message_queues.values() {
+            queued_messages += queue.len() as u64;
+        }
+        IpcStats {
+            queue_count: self.message_queues.len() as u64,
+            queued_messages,
+            shared_regions: self.shared_regions.len() as u64,
+            max_queue_messages: MAX_QUEUE_MESSAGES as u64,
+        }
+    }
 }
 
 static mut IPC_MANAGER_INSTANCE: Option<IpcManager> = None;
@@ -217,4 +239,10 @@ pub fn recv_bytes(pid: ProcessId, out: &mut [u8]) -> Result<usize, IpcError> {
     let message = queue.remove(0);
     out[..len].copy_from_slice(&message.data[..len]);
     Ok(len)
+}
+
+pub fn ipc_stats() -> IpcStats {
+    get_ipc_manager()
+        .map(|manager| manager.stats())
+        .unwrap_or_default()
 }

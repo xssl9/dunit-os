@@ -79,6 +79,18 @@ pub struct ProcessSnapshot {
     pub path: String,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProcessStats {
+    pub total: u64,
+    pub prepared: u64,
+    pub ready: u64,
+    pub running: u64,
+    pub blocked: u64,
+    pub dead: u64,
+    pub reaped: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WaitRecord {
     pub pid: ProcessId,
@@ -606,6 +618,23 @@ pub fn get_process_snapshots() -> Vec<ProcessSnapshot> {
         });
     }
     snapshots
+}
+
+pub fn process_stats() -> ProcessStats {
+    let table = process_table_mut();
+    let mut stats = ProcessStats::default();
+    for record in table.iter() {
+        stats.total += 1;
+        match record.state {
+            ProcessState::Prepared => stats.prepared += 1,
+            ProcessState::Ready => stats.ready += 1,
+            ProcessState::Running => stats.running += 1,
+            ProcessState::Blocked => stats.blocked += 1,
+            ProcessState::Dead => stats.dead += 1,
+            ProcessState::Reaped => stats.reaped += 1,
+        }
+    }
+    stats
 }
 
 pub fn insert_process_record(

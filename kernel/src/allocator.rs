@@ -13,6 +13,15 @@ pub struct KernelAllocator {
     free_list: AtomicUsize,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct KernelHeapStats {
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    pub used_bytes: u64,
+    pub free_blocks: u64,
+}
+
 impl KernelAllocator {
     pub const fn new() -> Self {
         Self {
@@ -37,6 +46,26 @@ impl KernelAllocator {
     
     fn align_up(addr: usize, align: usize) -> usize {
         (addr + align - 1) & !(align - 1)
+    }
+
+    pub fn stats(&self) -> KernelHeapStats {
+        let total = self.heap_size.load(Ordering::SeqCst);
+        let mut free = 0usize;
+        let mut blocks = 0usize;
+        let mut current_ptr = self.free_list.load(Ordering::SeqCst) as *const FreeBlock;
+        unsafe {
+            while !current_ptr.is_null() {
+                free = free.saturating_add((*current_ptr).size);
+                blocks += 1;
+                current_ptr = (*current_ptr).next as *const FreeBlock;
+            }
+        }
+        KernelHeapStats {
+            total_bytes: total as u64,
+            free_bytes: free as u64,
+            used_bytes: total.saturating_sub(free) as u64,
+            free_blocks: blocks as u64,
+        }
     }
 }
 
@@ -158,4 +187,14 @@ pub fn init() {
     }
 
     crate::memory::serial_write("[HEAP] OK\r\n");
+}
+
+#[cfg(not(test))]
+pub fn heap_stats() -> KernelHeapStats {
+    ALLOCATOR.stats()
+}
+
+#[cfg(test)]
+pub fn heap_stats() -> KernelHeapStats {
+    KernelHeapStats::default()
 }

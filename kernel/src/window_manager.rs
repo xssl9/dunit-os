@@ -19,6 +19,7 @@ pub struct Window {
 #[derive(Clone, Copy, PartialEq)]
 pub enum AppType {
     Terminal,
+    Calculator,
     Files,
     Settings,
     Monitor,
@@ -56,6 +57,7 @@ impl WindowManager {
     fn default_window(app_type: AppType) -> Window {
         let (x, y, width, height, title) = match app_type {
             AppType::Terminal => (50, 80, 420, 310, "Terminal"),
+            AppType::Calculator => (120, 115, 320, 220, "Calculator"),
             AppType::Files => (500, 88, 390, 310, "Files"),
             AppType::Settings => (285, 155, 390, 300, "System Settings"),
             AppType::Monitor => (70, 410, 820, 210, "Activity Monitor"),

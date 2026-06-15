@@ -36,6 +36,8 @@ const GUI_PING_PATH: &str = "/app/gui_ping";
 const GUI_PING_MESSAGE: &[u8] = b"gui_ping: hello from userspace";
 const GUI_BRIDGE_MESSAGE_CAP: usize = 96;
 const GUI_TERMINAL_STUB_PATH: &str = "/app/gui_terminal_stub";
+const GUI_CALCULATOR_PATH: &str = "/app/gui_calculator";
+const GUI_STATS_PATH: &str = "/app/gui_stats";
 const GUI_MSG_MAGIC: u32 = 0x3149_5547;
 const GUI_MSG_VERSION: u16 = 1;
 const GUI_MSG_CREATE_WINDOW: u16 = 1;
@@ -43,10 +45,15 @@ const GUI_MSG_DRAW_TEXT: u16 = 2;
 const GUI_MSG_SET_STATUS: u16 = 3;
 const GUI_MSG_EXIT: u16 = 4;
 const GUI_MSG_COMMAND: u16 = 5;
+const GUI_MSG_CLEAR: u16 = 6;
+const GUI_MSG_SET_TITLE: u16 = 7;
+const GUI_MSG_DRAW_RECT: u16 = 8;
 const GUI_MSG_KEY_EVENT: u16 = 101;
 const GUI_MSG_CLOSE_EVENT: u16 = 102;
+const GUI_MSG_POINTER_EVENT: u16 = 103;
 const GUI_MSG_DATA_CAP: usize = 160;
-const GUI_APP_LINES: usize = 8;
+const GUI_APP_LINES: usize = 40;
+const GUI_APP_RECTS: usize = 128;
 const GUI_APP_TEXT_CAP: usize = 96;
 const GUI_APP_TITLE_CAP: usize = 32;
 const GUI_APP_CWD_CAP: usize = 128;
@@ -56,8 +63,8 @@ const TEXT_ICON: &[u8] = include_bytes!("../assets/text.rgba");
 const MONITOR_ICON: &[u8] = include_bytes!("../assets/monitor.rgba");
 const DOCK_APPS: [(AppType, u32, &'static str); 3] = [
     (AppType::Terminal, GREEN, "Term"),
+    (AppType::Calculator, BLUE, "Calc"),
     (AppType::Monitor, ORANGE, "Stats"),
-    (AppType::Editor, PURPLE, "Edit"),
 ];
 const MAX_BLUR_WIDTH: usize = 1920;
 const MAX_BLUR_HEIGHT: usize = 1080;
@@ -84,6 +91,14 @@ struct UiState {
     gui_app_needs_run: bool,
     terminal_bridge: GuiRuntimeBridge,
     gui_app: GuiAppRuntime,
+}
+
+#[derive(Clone, Copy)]
+enum GuiAppKind {
+    None,
+    Terminal,
+    Calculator,
+    Stats,
 }
 
 #[derive(Clone, Copy)]
@@ -160,7 +175,29 @@ impl GuiTextLine {
 }
 
 #[derive(Clone, Copy)]
+struct GuiRectShape {
+    x: i32,
+    y: i32,
+    width: usize,
+    height: usize,
+    color: u32,
+}
+
+impl GuiRectShape {
+    const fn empty() -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            color: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 struct GuiAppRuntime {
+    kind: GuiAppKind,
     launched: bool,
     running: bool,
     exited: bool,
@@ -175,6 +212,8 @@ struct GuiAppRuntime {
     title: [u8; GUI_APP_TITLE_CAP],
     status_len: usize,
     status: [u8; GUI_APP_TEXT_CAP],
+    rects: [GuiRectShape; GUI_APP_RECTS],
+    rect_count: usize,
     lines: [GuiTextLine; GUI_APP_LINES],
     line_count: usize,
     cwd: [u8; GUI_APP_CWD_CAP],
@@ -184,6 +223,7 @@ struct GuiAppRuntime {
 impl GuiAppRuntime {
     const fn new() -> Self {
         Self {
+            kind: GuiAppKind::None,
             launched: false,
             running: false,
             exited: false,
@@ -198,6 +238,8 @@ impl GuiAppRuntime {
             title: [0; GUI_APP_TITLE_CAP],
             status_len: 0,
             status: [0; GUI_APP_TEXT_CAP],
+            rects: [GuiRectShape::empty(); GUI_APP_RECTS],
+            rect_count: 0,
             lines: [GuiTextLine::empty(); GUI_APP_LINES],
             line_count: 0,
             cwd: [0; GUI_APP_CWD_CAP],
@@ -245,6 +287,16 @@ impl GuiAppRuntime {
         self.lines[self.lines.len() - 1].set(x, y, data);
     }
 
+    fn push_rect(&mut self, x: i32, y: i32, width: usize, height: usize, color: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        if self.rect_count < self.rects.len() {
+            self.rects[self.rect_count] = GuiRectShape { x, y, width, height, color };
+            self.rect_count += 1;
+        }
+    }
+
     fn cwd(&self) -> &str {
         if self.cwd_len == 0 {
             "/"
@@ -259,6 +311,7 @@ impl GuiAppRuntime {
     }
 
     fn reset_window(&mut self) {
+        self.kind = GuiAppKind::None;
         self.launched = false;
         self.running = false;
         self.exited = false;
@@ -271,6 +324,7 @@ impl GuiAppRuntime {
         self.height = 260;
         self.title_len = 0;
         self.status_len = 0;
+        self.rect_count = 0;
         self.line_count = 0;
         self.cwd_len = 0;
     }
@@ -596,6 +650,18 @@ fn gui_message_text(message: &GuiMessage) -> &str {
     core::str::from_utf8(gui_message_data(message)).unwrap_or("<invalid utf8>")
 }
 
+fn gui_message_rect_size(message: &GuiMessage) -> Option<(usize, usize)> {
+    if message.len < 8 {
+        return None;
+    }
+    let width = u32::from_le_bytes([message.data[0], message.data[1], message.data[2], message.data[3]]) as usize;
+    let height = u32::from_le_bytes([message.data[4], message.data[5], message.data[6], message.data[7]]) as usize;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some((width.min(2048), height.min(2048)))
+}
+
 fn send_gui_event(app: &GuiAppRuntime, kind: u16, key: u8) -> bool {
     if app.pid == 0 || app.window_id == 0 || !app.running {
         return false;
@@ -662,6 +728,64 @@ fn send_gui_close_event(app: &GuiAppRuntime) -> bool {
     send_gui_event(app, GUI_MSG_CLOSE_EVENT, 0)
 }
 
+fn send_gui_pointer_event(app: &GuiAppRuntime, x: i32, y: i32) -> bool {
+    if app.pid == 0 || app.window_id == 0 || !app.running {
+        return false;
+    }
+
+    let message = GuiMessage {
+        magic: GUI_MSG_MAGIC,
+        version: GUI_MSG_VERSION,
+        kind: GUI_MSG_POINTER_EVENT,
+        window_id: app.window_id,
+        a: x,
+        b: y,
+        c: 0,
+        len: 0,
+        data: [0; GUI_MSG_DATA_CAP],
+    };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            &message as *const GuiMessage as *const u8,
+            core::mem::size_of::<GuiMessage>(),
+        )
+    };
+
+    match crate::ipc::send_bytes(crate::process::ProcessId(1), crate::process::ProcessId(app.pid), bytes) {
+        Ok(()) => {
+            serial_write("[GUI-PROTO] send POINTER_EVENT pid=");
+            serial_write_u64(app.pid);
+            serial_write(" window_id=");
+            serial_write_u64(app.window_id as u64);
+            serial_write(" x=");
+            serial_write_i32(x);
+            serial_write(" y=");
+            serial_write_i32(y);
+            serial_write("\r\n");
+            true
+        }
+        Err(_) => {
+            serial_write("[GUI-PROTO] failed to send POINTER_EVENT\r\n");
+            false
+        }
+    }
+}
+
+fn gui_app_content_hit(state: &UiState, mx: usize, my: usize, width: usize, height: usize) -> Option<(i32, i32)> {
+    let rect = gui_app_window_rect(width, height, &state.gui_app)?;
+    let content_x = rect.x + 18;
+    let content_y = rect.y + 50;
+    let content_w = rect.width.saturating_sub(36);
+    let content_h = rect.height.saturating_sub(64);
+    if inside(mx, my, content_x, content_y, content_w, content_h) {
+        return Some((
+            mx.saturating_sub(content_x) as i32,
+            my.saturating_sub(content_y) as i32,
+        ));
+    }
+    None
+}
+
 fn gui_app_window_rect(width: usize, height: usize, app: &GuiAppRuntime) -> Option<Rect> {
     if app.window_id == 0 || app.owner_pid == 0 {
         return None;
@@ -716,7 +840,13 @@ fn drag_gui_app_window(state: &mut UiState, mx: usize, my: usize, width: usize, 
 }
 
 fn gui_terminal_clear(app: &mut GuiAppRuntime) {
+    app.rect_count = 0;
     app.line_count = 0;
+    let mut rect_index = 0usize;
+    while rect_index < app.rects.len() {
+        app.rects[rect_index] = GuiRectShape::empty();
+        rect_index += 1;
+    }
     let mut index = 0usize;
     while index < app.lines.len() {
         app.lines[index] = GuiTextLine::empty();
@@ -725,21 +855,20 @@ fn gui_terminal_clear(app: &mut GuiAppRuntime) {
 }
 
 fn gui_terminal_append_line(app: &mut GuiAppRuntime, text: &str) {
-    let y_values = [0, 14, 28, 42, 56, 70, 84, 98];
     if app.line_count < app.lines.len() {
         let index = app.line_count;
-        app.lines[index].set(0, y_values[index], text.as_bytes());
+        app.lines[index].set(0, (index as i32) * 14, text.as_bytes());
         app.line_count += 1;
         return;
     }
     let mut index = 1usize;
     while index < app.lines.len() {
         app.lines[index - 1] = app.lines[index];
-        app.lines[index - 1].y = y_values[index - 1];
+        app.lines[index - 1].y = ((index - 1) as i32) * 14;
         index += 1;
     }
     let last = app.lines.len() - 1;
-    app.lines[last].set(0, y_values[last], text.as_bytes());
+    app.lines[last].set(0, (last as i32) * 14, text.as_bytes());
 }
 
 fn gui_terminal_commit_command(app: &mut GuiAppRuntime, command: &str) {
@@ -1085,11 +1214,61 @@ fn process_gui_messages(state: &mut UiState) {
                 serial_write_u64(message.window_id as u64);
                 serial_write("\r\n");
             }
+            GUI_MSG_DRAW_RECT => {
+                if message.window_id != state.gui_app.window_id || pid == 0 {
+                    serial_write("[GUI-PROTO] ignored DRAW_RECT for stale window\r\n");
+                    continue;
+                }
+                let Some((rect_width, rect_height)) = gui_message_rect_size(&message) else {
+                    serial_write("[GUI-PROTO] ignored DRAW_RECT with invalid size\r\n");
+                    continue;
+                };
+                state.gui_app.push_rect(message.a, message.b, rect_width, rect_height, message.c);
+                serial_write("[GUI-PROTO] recv DRAW_RECT pid=");
+                serial_write_u64(pid);
+                serial_write(" window_id=");
+                serial_write_u64(message.window_id as u64);
+                serial_write(" x=");
+                serial_write_i32(message.a);
+                serial_write(" y=");
+                serial_write_i32(message.b);
+                serial_write(" w=");
+                serial_write_u64(rect_width as u64);
+                serial_write(" h=");
+                serial_write_u64(rect_height as u64);
+                serial_write("\r\n");
+            }
             GUI_MSG_SET_STATUS => {
                 state.gui_app.set_status(gui_message_data(&message));
                 serial_write("[GUI-PROTO] recv SET_STATUS pid=");
                 serial_write_u64(pid);
                 serial_write(" text=");
+                serial_write(gui_message_text(&message));
+                serial_write("\r\n");
+            }
+            GUI_MSG_CLEAR => {
+                if message.window_id != state.gui_app.window_id || pid == 0 {
+                    serial_write("[GUI-PROTO] ignored CLEAR for stale window\r\n");
+                    continue;
+                }
+                gui_terminal_clear(&mut state.gui_app);
+                serial_write("[GUI-PROTO] recv CLEAR pid=");
+                serial_write_u64(pid);
+                serial_write(" window_id=");
+                serial_write_u64(message.window_id as u64);
+                serial_write("\r\n");
+            }
+            GUI_MSG_SET_TITLE => {
+                if message.window_id != state.gui_app.window_id || pid == 0 {
+                    serial_write("[GUI-PROTO] ignored SET_TITLE for stale window\r\n");
+                    continue;
+                }
+                state.gui_app.set_title(gui_message_data(&message));
+                serial_write("[GUI-PROTO] recv SET_TITLE pid=");
+                serial_write_u64(pid);
+                serial_write(" window_id=");
+                serial_write_u64(message.window_id as u64);
+                serial_write(" title=");
                 serial_write(gui_message_text(&message));
                 serial_write("\r\n");
             }
@@ -1156,25 +1335,35 @@ fn run_gui_app_once(state: &mut UiState) {
     }
 }
 
-fn launch_gui_terminal_app(state: &mut UiState) {
+fn launch_gui_userspace_app(state: &mut UiState, path: &str, argv0: &str, kind: GuiAppKind) {
     if state.gui_app.launched {
+        serial_write("[GUI-PROTO] userspace app already launched pid=");
+        serial_write_u64(state.gui_app.pid);
+        serial_write("\r\n");
         return;
     }
+    state.gui_app.kind = kind;
     state.gui_app.launched = true;
     state.gui_app.running = true;
-    serial_write("[GUI-PROTO] launching /app/gui_terminal_stub\r\n");
+    serial_write("[GUI-PROTO] launching ");
+    serial_write(path);
+    serial_write("\r\n");
 
-    let Some(data) = read_vfs_file(GUI_TERMINAL_STUB_PATH) else {
-        serial_write("[GUI-PROTO] failed: /app/gui_terminal_stub missing\r\n");
+    let Some(data) = read_vfs_file(path) else {
+        serial_write("[GUI-PROTO] failed: userspace GUI app missing path=");
+        serial_write(path);
+        serial_write("\r\n");
         state.gui_app.running = false;
+        state.gui_app.reset_window();
         return;
     };
 
-    let pid = match crate::process::create_user_process_record(String::from(GUI_TERMINAL_STUB_PATH), true) {
+    let pid = match crate::process::create_user_process_record(String::from(path), true) {
         Ok(pid) => pid,
         Err(_) => {
             serial_write("[GUI-PROTO] failed: process create\r\n");
             state.gui_app.running = false;
+            state.gui_app.reset_window();
             return;
         }
     };
@@ -1183,17 +1372,45 @@ fn launch_gui_terminal_app(state: &mut UiState) {
     serial_write_u64(pid.0);
     serial_write("\r\n");
 
-    let argv = [String::from("gui_terminal_stub")];
+    let argv = [String::from(argv0)];
     if crate::elf::prepare_process_elf(pid, &data, &argv).is_err() {
         serial_write("[GUI-PROTO] failed: ELF prepare\r\n");
         let _ = crate::process::autoreap_process(pid, "gui-proto-prepare-failed");
         state.gui_app.running = false;
+        state.gui_app.reset_window();
         return;
     }
 
     run_gui_app_once(state);
     state.gui_app_needs_run = false;
     process_gui_messages(state);
+}
+
+fn launch_gui_terminal_app(state: &mut UiState) {
+    launch_gui_userspace_app(
+        state,
+        GUI_TERMINAL_STUB_PATH,
+        "gui_terminal_stub",
+        GuiAppKind::Terminal,
+    );
+}
+
+fn launch_gui_calculator_app(state: &mut UiState) {
+    launch_gui_userspace_app(
+        state,
+        GUI_CALCULATOR_PATH,
+        "gui_calculator",
+        GuiAppKind::Calculator,
+    );
+}
+
+fn launch_gui_stats_app(state: &mut UiState) {
+    launch_gui_userspace_app(
+        state,
+        GUI_STATS_PATH,
+        "gui_stats",
+        GuiAppKind::Stats,
+    );
 }
 
 fn put_pixel(fb: Framebuffer, _width: usize, _height: usize, x: usize, y: usize, color: u32) {
@@ -1509,7 +1726,10 @@ fn glyph(ch: u8) -> [u8; 5] {
         b'-' => [0x08, 0x08, 0x08, 0x08, 0x08],
         b'_' => [0x40, 0x40, 0x40, 0x40, 0x40],
         b'=' => [0x14, 0x14, 0x14, 0x14, 0x14],
+        b'+' => [0x08, 0x08, 0x3E, 0x08, 0x08],
         b'/' => [0x20, 0x10, 0x08, 0x04, 0x02],
+        b'[' => [0x00, 0x7F, 0x41, 0x41, 0x00],
+        b']' => [0x00, 0x41, 0x41, 0x7F, 0x00],
         b'%' => [0x62, 0x64, 0x08, 0x13, 0x23],
         b'@' => [0x3E, 0x41, 0x5D, 0x55, 0x5E],
         b'#' => [0x14, 0x7F, 0x14, 0x7F, 0x14],
@@ -1630,6 +1850,11 @@ fn draw_icon_symbol(fb: Framebuffer, width: usize, height: usize, x: usize, y: u
         AppType::Terminal => {
             draw_text(fb, width, height, cx - 13, cy - 4, ">_", 0xffffff);
         }
+        AppType::Calculator => {
+            draw_rect_border(fb, width, height, cx - 12, cy - 14, 24, 28, 0xffffff);
+            draw_text(fb, width, height, cx - 6, cy - 6, "+", 0xffffff);
+            draw_text(fb, width, height, cx - 6, cy + 6, "=", 0xffffff);
+        }
         AppType::Files => {
             draw_rect(fb, width, height, cx - 13, cy - 8, 26, 17, 0xffffff);
             draw_rect(fb, width, height, cx - 13, cy - 12, 13, 5, 0xffffff);
@@ -1656,7 +1881,30 @@ fn draw_traffic_button(fb: Framebuffer, width: usize, height: usize, x: usize, y
     draw_round_rect_border(fb, width, height, x, y, 12, 12, 6, 0x9aa3ad);
 }
 
-fn draw_dock(fb: Framebuffer, width: usize, height: usize) {
+fn gui_app_active(state: &UiState, app_type: AppType) -> bool {
+    match app_type {
+        AppType::Terminal => {
+            matches!(state.gui_app.kind, GuiAppKind::Terminal)
+                && state.gui_app.running
+                && state.gui_app.window_id != 0
+        }
+        AppType::Calculator => {
+            matches!(state.gui_app.kind, GuiAppKind::Calculator)
+                && state.gui_app.running
+                && state.gui_app.window_id != 0
+        }
+        AppType::Monitor => {
+            matches!(state.gui_app.kind, GuiAppKind::Stats)
+                && state.gui_app.running
+                && state.gui_app.window_id != 0
+        }
+        _ => window_manager::get_wm()
+            .map(|wm| wm.app_visible(app_type))
+            .unwrap_or(false),
+    }
+}
+
+fn draw_dock(fb: Framebuffer, width: usize, height: usize, state: &UiState) {
     let (dock_x, dock_y, dock_width, icon_size, icon_spacing) = dock_layout(width, height);
     draw_round_rect(fb, width, height, dock_x + 8, dock_y + 8, dock_width, 68, 20, SHADOW);
     draw_blur_round_rect(fb, width, height, dock_x, dock_y, dock_width, 68, 20, GLASS, 182);
@@ -1672,13 +1920,12 @@ fn draw_dock(fb: Framebuffer, width: usize, height: usize) {
         draw_round_rect_border(fb, width, height, icon_x, icon_y, icon_size, icon_size, 12, 0x2d353b);
         match DOCK_APPS[i].0 {
             AppType::Terminal => draw_rgba_icon(fb, width, height, icon_x + 2, icon_y + 2, TERMINAL_ICON),
+            AppType::Calculator => draw_icon_symbol(fb, width, height, icon_x, icon_y, DOCK_APPS[i].0),
             AppType::Monitor => draw_rgba_icon(fb, width, height, icon_x + 2, icon_y + 2, MONITOR_ICON),
             AppType::Editor => draw_rgba_icon(fb, width, height, icon_x + 2, icon_y + 2, TEXT_ICON),
             _ => draw_icon_symbol(fb, width, height, icon_x, icon_y, DOCK_APPS[i].0),
         }
-        let active = window_manager::get_wm()
-            .map(|wm| wm.app_visible(DOCK_APPS[i].0))
-            .unwrap_or(false);
+        let active = gui_app_active(state, DOCK_APPS[i].0);
         draw_round_rect(fb, width, height, icon_x + 18, icon_y + icon_size + 7, 12, 3, 2, if active { GREEN } else { 0x56616a });
         draw_text(fb, width, height, icon_x + 8, icon_y + icon_size + 12, DOCK_APPS[i].2, MUTED);
     }
@@ -1713,6 +1960,10 @@ fn draw_window(fb: Framebuffer, width: usize, height: usize, window: &window_man
             draw_round_rect(fb, width, height, window.x + 8, window.y + 42, window.width.saturating_sub(16), window.height.saturating_sub(50), 8, TERMINAL_BG);
             draw_terminal_bridge(fb, width, height, x, y, &state.terminal_bridge);
         }
+        AppType::Calculator => {
+            draw_text(fb, width, height, x, y, "Calculator is provided by /app/gui_calculator", MUTED);
+            draw_text(fb, width, height, x, y + 24, "Launch it from dock or launcher.", GREEN);
+        }
         AppType::Files => {
             draw_round_rect(fb, width, height, window.x + 8, window.y + 42, 92, window.height.saturating_sub(50), 8, 0x111820);
             draw_text(fb, width, height, x, y, "Favorites", MUTED);
@@ -1728,14 +1979,8 @@ fn draw_window(fb: Framebuffer, width: usize, height: usize, window: &window_man
             draw_text(fb, width, height, x, y + 48, "Runtime    Single task", MUTED);
         }
         AppType::Monitor => {
-            draw_text(fb, width, height, x, y, "CPU", TEXT);
-            draw_round_rect(fb, width, height, x + 42, y, 180, 10, 5, 0x263039);
-            draw_round_rect(fb, width, height, x + 42, y, 34, 10, 5, GREEN);
-            draw_text(fb, width, height, x + 235, y, "18%", BLUE);
-            draw_text(fb, width, height, x, y + 28, "RAM", TEXT);
-            draw_round_rect(fb, width, height, x + 42, y + 28, 180, 10, 5, 0x263039);
-            draw_round_rect(fb, width, height, x + 42, y + 28, 52, 10, 5, BLUE);
-            draw_text(fb, width, height, x + 235, y + 28, "512MB", YELLOW);
+            draw_text(fb, width, height, x, y, "Stats is provided by /app/gui_stats", MUTED);
+            draw_text(fb, width, height, x, y + 24, "Launch it from dock or launcher.", GREEN);
         }
         AppType::Editor => {
             draw_text(fb, width, height, x, y, "notes.txt", ACCENT);
@@ -1767,11 +2012,45 @@ fn draw_gui_app_window(fb: Framebuffer, width: usize, height: usize, app: &GuiAp
     draw_round_rect(fb, width, height, x + 8, y + 42, window_width.saturating_sub(16), window_height.saturating_sub(50), 8, TERMINAL_BG);
     let content_x = x + 18;
     let content_y = y + 50;
+    let content_w = window_width.saturating_sub(36);
+    let content_h = window_height.saturating_sub(64);
+
+    for index in 0..app.rect_count {
+        let shape = app.rects[index];
+        if shape.x < 0 || shape.y < 0 {
+            continue;
+        }
+        let local_x = shape.x as usize;
+        let local_y = shape.y as usize;
+        if local_x >= content_w || local_y >= content_h {
+            continue;
+        }
+        let draw_w = shape.width.min(content_w.saturating_sub(local_x));
+        let draw_h = shape.height.min(content_h.saturating_sub(local_y));
+        draw_rect(
+            fb,
+            width,
+            height,
+            content_x + local_x,
+            content_y + local_y,
+            draw_w,
+            draw_h,
+            shape.color,
+        );
+    }
 
     for index in 0..app.line_count {
         let line = &app.lines[index];
-        let draw_x = content_x.saturating_add(line.x.max(0) as usize);
-        let draw_y = content_y.saturating_add(line.y.max(0) as usize);
+        if line.x < 0 || line.y < 0 {
+            continue;
+        }
+        let local_x = line.x as usize;
+        let local_y = line.y as usize;
+        if local_x >= content_w || local_y + 8 > content_h {
+            continue;
+        }
+        let draw_x = content_x + local_x;
+        let draw_y = content_y + local_y;
         let color = if line.text().starts_with("Dunit GUI Terminal") { GREEN } else { TEXT };
         draw_text(fb, width, height, draw_x, draw_y, line.text(), color);
     }
@@ -1819,19 +2098,17 @@ fn draw_desktop_widgets(fb: Framebuffer, width: usize, height: usize, state: &Ui
         draw_text(fb, width, height, launcher_x + 36, launcher_y + 57, "Search apps, files, settings", MUTED);
         let app_cards = [
             ("Terminal", GREEN, AppType::Terminal),
-            ("Files", BLUE, AppType::Files),
-            ("Settings", GLASS_SOFT, AppType::Settings),
-            ("Monitor", ORANGE, AppType::Monitor),
-            ("Editor", PURPLE, AppType::Editor),
+            ("Calculator", BLUE, AppType::Calculator),
+            ("Stats", ORANGE, AppType::Monitor),
+            ("Files Legacy", GLASS_SOFT, AppType::Files),
+            ("Edit Legacy", PURPLE, AppType::Editor),
         ];
         for i in 0..app_cards.len() {
             let col = i % 2;
             let row = i / 2;
             let x = launcher_x + 20 + col * 148;
             let y = launcher_y + 92 + row * 44;
-            let active = window_manager::get_wm()
-                .map(|wm| wm.app_visible(app_cards[i].2))
-                .unwrap_or(false);
+            let active = gui_app_active(state, app_cards[i].2);
             draw_round_rect(fb, width, height, x, y, 132, 34, 10, if active { 0x173622 } else { 0x141b20 });
             draw_round_rect_border(fb, width, height, x, y, 132, 34, 10, if active { GREEN } else { 0x25313a });
             draw_round_rect(fb, width, height, x + 10, y + 9, 16, 16, 5, app_cards[i].1);
@@ -1876,7 +2153,7 @@ fn redraw_full_screen(fb: Framebuffer, width: usize, height: usize, state: &UiSt
 
     draw_desktop_widgets(fb, width, height, state);
     draw_windows(fb, width, height, state);
-    draw_dock(fb, width, height);
+    draw_dock(fb, width, height, state);
     apply_brightness(fb, width, height, state, Rect::new(0, 0, width, height));
 }
 
@@ -1936,7 +2213,7 @@ fn redraw_region(fb: Framebuffer, width: usize, height: usize, rect: Rect, state
 
     let (dock_x, dock_y, dock_width, _, _) = dock_layout(width, height);
     if rects_intersect(rect, Rect::new(dock_x, dock_y, dock_width + 10, 76)) {
-        draw_dock(fb, width, height);
+        draw_dock(fb, width, height, state);
     }
     apply_brightness(fb, width, height, state, rect);
 }
@@ -2057,9 +2334,9 @@ fn handle_widget_click(mx: usize, my: usize, width: usize, _height: usize, state
         let launcher_y = 172;
         let apps = [
             AppType::Terminal,
-            AppType::Files,
-            AppType::Settings,
+            AppType::Calculator,
             AppType::Monitor,
+            AppType::Files,
             AppType::Editor,
         ];
         for i in 0..apps.len() {
@@ -2113,6 +2390,10 @@ fn apply_ui_action(state: &mut UiState, action: UiAction) -> bool {
         UiAction::ToggleApp(app_type) => {
             if app_type == AppType::Terminal {
                 launch_gui_terminal_app(state);
+            } else if app_type == AppType::Calculator {
+                launch_gui_calculator_app(state);
+            } else if app_type == AppType::Monitor {
+                launch_gui_stats_app(state);
             } else if let Some(wm) = window_manager::get_wm() {
                 wm.toggle_window(app_type);
             }
@@ -2297,6 +2578,17 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                 }
             }
 
+            if !handled_click {
+                if let Some((local_x, local_y)) = gui_app_content_hit(&state, mx, my, width, height) {
+                    pointer_op = None;
+                    if send_gui_pointer_event(&state.gui_app, local_x, local_y) {
+                        state.gui_app_needs_run = true;
+                    }
+                    full_redraw = true;
+                    handled_click = true;
+                }
+            }
+
             let closed = if handled_click {
                 None
             } else {
@@ -2346,6 +2638,10 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                 pointer_op = None;
                 if app_type == AppType::Terminal {
                     launch_gui_terminal_app(&mut state);
+                } else if app_type == AppType::Calculator {
+                    launch_gui_calculator_app(&mut state);
+                } else if app_type == AppType::Monitor {
+                    launch_gui_stats_app(&mut state);
                 } else {
                     let dock_rect = dock_icon_rect(dock_app_index(app_type).unwrap_or(0), width, height);
                     let app_state = window_manager::get_wm()

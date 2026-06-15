@@ -32,6 +32,7 @@ pub enum Syscall {
     Chdir = 23,
     Yield = 24,
     GetTerminalCursor = 25,
+    GetSystemStats = 26,
 }
 
 impl Syscall {
@@ -63,6 +64,7 @@ impl Syscall {
             23 => Some(Syscall::Chdir),
             24 => Some(Syscall::Yield),
             25 => Some(Syscall::GetTerminalCursor),
+            26 => Some(Syscall::GetSystemStats),
             _ => None,
         }
     }
@@ -106,6 +108,35 @@ pub struct TerminalCursorInfo {
     pub y: u32,
     pub char_width: u32,
     pub char_height: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SystemStats {
+    pub process_total: u64,
+    pub process_prepared: u64,
+    pub process_ready: u64,
+    pub process_running: u64,
+    pub process_blocked: u64,
+    pub process_dead: u64,
+    pub process_reaped: u64,
+    pub pmm_total_bytes: u64,
+    pub pmm_free_bytes: u64,
+    pub pmm_used_bytes: u64,
+    pub heap_total_bytes: u64,
+    pub heap_free_bytes: u64,
+    pub heap_used_bytes: u64,
+    pub heap_free_blocks: u64,
+    pub ipc_queue_count: u64,
+    pub ipc_queued_messages: u64,
+    pub ipc_shared_regions: u64,
+    pub ipc_max_queue_messages: u64,
+    pub fs_files: u64,
+    pub fs_directories: u64,
+    pub fs_bytes: u64,
+    pub fs_open_handles: u64,
+    pub uptime_ticks: u64,
+    pub uptime_available: u64,
 }
 
 const USER_SPACE_START: u64 = 0x0000_0000_0000_0000;
@@ -348,6 +379,7 @@ pub extern "C" fn syscall_handler(
         Syscall::Chdir => sys_chdir(arg0 as *const u8, arg1 as usize),
         Syscall::Yield => sys_yield(),
         Syscall::GetTerminalCursor => sys_get_terminal_cursor(arg0 as *mut TerminalCursorInfo),
+        Syscall::GetSystemStats => sys_get_system_stats(arg0 as *mut SystemStats),
     }
 }
 
@@ -740,6 +772,53 @@ fn sys_get_terminal_cursor(info: *mut TerminalCursorInfo) -> i64 {
         core::slice::from_raw_parts(
             &user_info as *const TerminalCursorInfo as *const u8,
             core::mem::size_of::<TerminalCursorInfo>(),
+        )
+    };
+    if let Err(error) = copy_buffer_to_user(info as *mut u8, bytes) {
+        return error;
+    }
+    0
+}
+
+fn sys_get_system_stats(info: *mut SystemStats) -> i64 {
+    let process = crate::process::process_stats();
+    let (pmm_total, pmm_free) = match crate::memory::pmm::get_pmm() {
+        Some(pmm) => (pmm.total_memory() as u64, pmm.available_memory() as u64),
+        None => (0, 0),
+    };
+    let heap = crate::allocator::heap_stats();
+    let ipc = crate::ipc::ipc_stats();
+    let fs = crate::fs::vfs::root_memfs_stats();
+    let stats = SystemStats {
+        process_total: process.total,
+        process_prepared: process.prepared,
+        process_ready: process.ready,
+        process_running: process.running,
+        process_blocked: process.blocked,
+        process_dead: process.dead,
+        process_reaped: process.reaped,
+        pmm_total_bytes: pmm_total,
+        pmm_free_bytes: pmm_free,
+        pmm_used_bytes: pmm_total.saturating_sub(pmm_free),
+        heap_total_bytes: heap.total_bytes,
+        heap_free_bytes: heap.free_bytes,
+        heap_used_bytes: heap.used_bytes,
+        heap_free_blocks: heap.free_blocks,
+        ipc_queue_count: ipc.queue_count,
+        ipc_queued_messages: ipc.queued_messages,
+        ipc_shared_regions: ipc.shared_regions,
+        ipc_max_queue_messages: ipc.max_queue_messages,
+        fs_files: fs.files,
+        fs_directories: fs.directories,
+        fs_bytes: fs.bytes,
+        fs_open_handles: fs.open_handles,
+        uptime_ticks: 0,
+        uptime_available: 0,
+    };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            &stats as *const SystemStats as *const u8,
+            core::mem::size_of::<SystemStats>(),
         )
     };
     if let Err(error) = copy_buffer_to_user(info as *mut u8, bytes) {
