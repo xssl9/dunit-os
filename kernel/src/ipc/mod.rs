@@ -227,6 +227,10 @@ pub fn send_bytes(sender: ProcessId, target: ProcessId, data: &[u8]) -> Result<(
 }
 
 pub fn recv_bytes(pid: ProcessId, out: &mut [u8]) -> Result<usize, IpcError> {
+    recv_bytes_with_sender(pid, out).map(|(_, len)| len)
+}
+
+pub fn recv_bytes_with_sender(pid: ProcessId, out: &mut [u8]) -> Result<(ProcessId, usize), IpcError> {
     let manager = get_ipc_manager().ok_or(IpcError::Unavailable)?;
     let queue = manager.message_queues.get_mut(&pid).ok_or(IpcError::NoMessage)?;
     if queue.is_empty() {
@@ -238,7 +242,7 @@ pub fn recv_bytes(pid: ProcessId, out: &mut [u8]) -> Result<usize, IpcError> {
     }
     let message = queue.remove(0);
     out[..len].copy_from_slice(&message.data[..len]);
-    Ok(len)
+    Ok((message.sender, len))
 }
 
 pub fn ipc_stats() -> IpcStats {
