@@ -16,6 +16,18 @@ pub struct PciDevice {
     pub prog_if: u8,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PciBar {
+    None,
+    Io(u32),
+    Memory32(u32),
+    Memory64(u64),
+}
+
+const COMMAND_IO_SPACE: u16 = 1 << 0;
+const COMMAND_MEMORY_SPACE: u16 = 1 << 1;
+const COMMAND_BUS_MASTER: u16 = 1 << 2;
+
 pub fn init() {
     let mut usb_count = 0usize;
     scan(|dev| {
@@ -70,6 +82,46 @@ pub fn read_bar(bus: u8, device: u8, function: u8, index: u8) -> u32 {
     read_config(bus, device, function, 0x10 + index * 4)
 }
 
+pub fn read_bar_decoded(dev: PciDevice, index: u8) -> PciBar {
+    let raw = read_bar(dev.bus, dev.device, dev.function, index);
+    if raw == 0 {
+        return PciBar::None;
+    }
+
+    if (raw & 0x1) != 0 {
+        return PciBar::Io(raw & !0x3);
+    }
+
+    match raw & 0x6 {
+        0x4 if index < 5 => {
+            let high = read_bar(dev.bus, dev.device, dev.function, index + 1) as u64;
+            PciBar::Memory64((high << 32) | ((raw & !0xF) as u64))
+        }
+        _ => PciBar::Memory32(raw & !0xF),
+    }
+}
+
+pub fn command(dev: PciDevice) -> u16 {
+    (read_config(dev.bus, dev.device, dev.function, 0x04) & 0xFFFF) as u16
+}
+
+pub fn set_command(dev: PciDevice, value: u16) {
+    let current = read_config(dev.bus, dev.device, dev.function, 0x04);
+    let next = (current & 0xFFFF_0000) | value as u32;
+    write_config(dev.bus, dev.device, dev.function, 0x04, next);
+}
+
+pub fn enable_mmio_bus_master(dev: PciDevice) {
+    set_command(
+        dev,
+        command(dev) | COMMAND_MEMORY_SPACE | COMMAND_BUS_MASTER,
+    );
+}
+
+pub fn enable_io_bus_master(dev: PciDevice) {
+    set_command(dev, command(dev) | COMMAND_IO_SPACE | COMMAND_BUS_MASTER);
+}
+
 fn read_device(bus: u8, device: u8, function: u8) -> Option<PciDevice> {
     let ids = read_config(bus, device, function, 0x00);
     let vendor_id = (ids & 0xFFFF) as u16;
@@ -90,7 +142,7 @@ fn read_device(bus: u8, device: u8, function: u8) -> Option<PciDevice> {
     })
 }
 
-fn read_config(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
+pub fn read_config(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
     let address = 0x8000_0000u32
         | ((bus as u32) << 16)
         | ((device as u32) << 11)
@@ -100,6 +152,19 @@ fn read_config(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
     unsafe {
         hal::hal_outl(PCI_CONFIG_ADDRESS, address);
         hal::hal_inl(PCI_CONFIG_DATA)
+    }
+}
+
+pub fn write_config(bus: u8, device: u8, function: u8, offset: u8, value: u32) {
+    let address = 0x8000_0000u32
+        | ((bus as u32) << 16)
+        | ((device as u32) << 11)
+        | ((function as u32) << 8)
+        | ((offset as u32) & 0xFC);
+
+    unsafe {
+        hal::hal_outl(PCI_CONFIG_ADDRESS, address);
+        hal::hal_outl(PCI_CONFIG_DATA, value);
     }
 }
 

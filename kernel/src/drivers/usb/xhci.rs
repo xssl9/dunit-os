@@ -1,0 +1,433 @@
+use crate::drivers::pci::{self, PciBar, PciDevice};
+use crate::memory::vmm;
+use crate::serial_write;
+
+const XHCI_PROG_IF: u8 = 0x30;
+
+const CAP_CAPLENGTH: usize = 0x00;
+const CAP_HCIVERSION: usize = 0x02;
+const CAP_HCSPARAMS1: usize = 0x04;
+const CAP_HCCPARAMS1: usize = 0x10;
+const CAP_DBOFF: usize = 0x14;
+const CAP_RTSOFF: usize = 0x18;
+
+const OP_USBCMD: usize = 0x00;
+const OP_USBSTS: usize = 0x04;
+const OP_PAGESIZE: usize = 0x08;
+const OP_CONFIG: usize = 0x38;
+const OP_PORTS_BASE: usize = 0x400;
+const OP_PORT_STRIDE: usize = 0x10;
+
+const USBCMD_RUN_STOP: u32 = 1 << 0;
+const USBCMD_HOST_CONTROLLER_RESET: u32 = 1 << 1;
+const USBSTS_HOST_CONTROLLER_HALTED: u32 = 1 << 0;
+const USBSTS_CONTROLLER_NOT_READY: u32 = 1 << 11;
+
+const PORTSC_CURRENT_CONNECT_STATUS: u32 = 1 << 0;
+const PORTSC_PORT_ENABLED: u32 = 1 << 1;
+const PORTSC_PORT_POWER: u32 = 1 << 9;
+const PORTSC_CHANGE_BITS: u32 = (1 << 17) | (1 << 18) | (1 << 20) | (1 << 21) | (1 << 22);
+
+const MAX_CONTROLLERS: usize = 4;
+const TIMEOUT_SPINS: usize = 1_000_000;
+const XHCI_MMIO_MAP_SIZE: usize = 0x10000;
+
+#[derive(Clone, Copy)]
+struct XhciController {
+    pci: PciDevice,
+    mmio_phys: u64,
+    mmio_virt: usize,
+    cap_length: usize,
+    max_slots: u8,
+    max_ports: u8,
+    doorbell_offset: u32,
+    runtime_offset: u32,
+}
+
+pub fn init() {
+    let mut found = 0usize;
+    let mut initialized = 0usize;
+
+    pci::scan(|dev| {
+        if found >= MAX_CONTROLLERS {
+            return;
+        }
+
+        if dev.class_code != 0x0C || dev.subclass != 0x03 || dev.prog_if != XHCI_PROG_IF {
+            return;
+        }
+
+        found += 1;
+        serial_write("[USB:xHCI] controller ");
+        write_pci_addr(dev);
+        serial_write(" vendor=");
+        write_hex(dev.vendor_id as u64, 4);
+        serial_write(" device=");
+        write_hex(dev.device_id as u64, 4);
+        serial_write("\r\n");
+
+        match bring_up_controller(dev) {
+            Ok(controller) => {
+                initialized += 1;
+                log_controller(controller);
+                log_ports(controller);
+            }
+            Err(error) => {
+                serial_write("[USB:xHCI] init failed: ");
+                serial_write(error.as_str());
+                serial_write("\r\n");
+            }
+        }
+    });
+
+    serial_write("[USB:xHCI] controllers found=");
+    write_dec(found);
+    serial_write(" initialized=");
+    write_dec(initialized);
+    serial_write("\r\n");
+}
+
+fn bring_up_controller(dev: PciDevice) -> Result<XhciController, XhciError> {
+    pci::enable_mmio_bus_master(dev);
+
+    let mmio_phys = find_xhci_mmio_bar(dev)?;
+
+    let mmio_virt =
+        vmm::map_mmio_region(mmio_phys as usize, XHCI_MMIO_MAP_SIZE).ok_or(XhciError::MmioMap)?;
+    let cap_length = read8(mmio_virt, CAP_CAPLENGTH) as usize;
+    if cap_length < 0x20 || cap_length > 0x100 {
+        return Err(XhciError::BadCapabilityLength);
+    }
+
+    let raw_version = read16(mmio_virt, CAP_HCIVERSION);
+    let version = normalize_hci_version(raw_version);
+    let hcsparams1 = read32(mmio_virt, CAP_HCSPARAMS1);
+    let hccparams1 = read32(mmio_virt, CAP_HCCPARAMS1);
+    let max_slots = (hcsparams1 & 0xFF) as u8;
+    let max_ports = ((hcsparams1 >> 24) & 0xFF) as u8;
+    if version < 0x0090 && !hcsparams_look_valid(hcsparams1) {
+        serial_write("[USB:xHCI] unsupported version raw=");
+        write_hex(raw_version as u64, 4);
+        serial_write(" normalized=");
+        write_hex(version as u64, 4);
+        serial_write("\r\n");
+        return Err(XhciError::UnsupportedVersion);
+    }
+    if version < 0x0090 {
+        serial_write("[USB:xHCI] version register is non-standard raw=");
+        write_hex(raw_version as u64, 4);
+        serial_write("; continuing because HCSPARAMS1 is plausible\r\n");
+    }
+
+    let doorbell_offset = read32(mmio_virt, CAP_DBOFF) & !0x3;
+    let runtime_offset = read32(mmio_virt, CAP_RTSOFF) & !0x1F;
+
+    serial_write("[USB:xHCI] version=");
+    write_hex(version as u64, 4);
+    if raw_version != version {
+        serial_write(" raw=");
+        write_hex(raw_version as u64, 4);
+    }
+    serial_write(" hcs1=");
+    write_hex(hcsparams1 as u64, 8);
+    serial_write(" hcc1=");
+    write_hex(hccparams1 as u64, 8);
+    serial_write("\r\n");
+
+    let op = mmio_virt + cap_length;
+    halt_controller(op)?;
+    reset_controller(op)?;
+
+    if max_slots != 0 {
+        write32(op, OP_CONFIG, max_slots as u32);
+    }
+
+    Ok(XhciController {
+        pci: dev,
+        mmio_phys,
+        mmio_virt,
+        cap_length,
+        max_slots,
+        max_ports,
+        doorbell_offset,
+        runtime_offset,
+    })
+}
+
+fn find_xhci_mmio_bar(dev: PciDevice) -> Result<u64, XhciError> {
+    let mut index = 0u8;
+    while index < 6 {
+        let raw = pci::read_bar(dev.bus, dev.device, dev.function, index);
+        let decoded = pci::read_bar_decoded(dev, index);
+        serial_write("[USB:xHCI] BAR");
+        write_dec(index as usize);
+        serial_write(" raw=");
+        write_hex(raw as u64, 8);
+        serial_write(" ");
+
+        match decoded {
+            PciBar::Memory64(addr) if addr != 0 => {
+                serial_write("mem64=");
+                write_hex(addr, 16);
+                serial_write("\r\n");
+                if mmio_bar_looks_like_xhci(addr) {
+                    return Ok(addr);
+                }
+                index += 2;
+                continue;
+            }
+            PciBar::Memory32(addr) if addr != 0 => {
+                serial_write("mem32=");
+                write_hex(addr as u64, 8);
+                serial_write("\r\n");
+                if mmio_bar_looks_like_xhci(addr as u64) {
+                    return Ok(addr as u64);
+                }
+            }
+            PciBar::Io(addr) => {
+                serial_write("io=");
+                write_hex(addr as u64, 8);
+                serial_write("\r\n");
+            }
+            PciBar::None | PciBar::Memory32(_) | PciBar::Memory64(_) => {
+                serial_write("none\r\n");
+            }
+        }
+
+        index += 1;
+    }
+
+    Err(XhciError::NoMmioBar)
+}
+
+fn mmio_bar_looks_like_xhci(phys: u64) -> bool {
+    let Some(virt) = vmm::map_mmio_region(phys as usize, 0x1000) else {
+        return false;
+    };
+    let cap_length = read8(virt, CAP_CAPLENGTH);
+    let raw_version = read16(virt, CAP_HCIVERSION);
+    let version = normalize_hci_version(raw_version);
+    serial_write("[USB:xHCI] BAR probe cap=");
+    write_hex(cap_length as u64, 2);
+    serial_write(" version=");
+    write_hex(raw_version as u64, 4);
+    if raw_version != version {
+        serial_write(" normalized=");
+        write_hex(version as u64, 4);
+    }
+    let hcsparams1 = read32(virt, CAP_HCSPARAMS1);
+    serial_write(" hcs1=");
+    write_hex(hcsparams1 as u64, 8);
+    serial_write("\r\n");
+
+    (cap_length as usize) >= 0x20
+        && (cap_length as usize) <= 0x100
+        && (version >= 0x0090 || hcsparams_look_valid(hcsparams1))
+}
+
+fn hcsparams_look_valid(hcsparams1: u32) -> bool {
+    let max_slots = hcsparams1 & 0xFF;
+    let max_ports = (hcsparams1 >> 24) & 0xFF;
+    max_slots > 0 && max_ports > 0 && max_ports <= 0x7F
+}
+
+fn normalize_hci_version(raw: u16) -> u16 {
+    if raw < 0x0090 {
+        let swapped = raw.swap_bytes();
+        if swapped >= 0x0090 {
+            return swapped;
+        }
+    }
+    raw
+}
+
+fn halt_controller(op: usize) -> Result<(), XhciError> {
+    let command = read32(op, OP_USBCMD);
+    if (command & USBCMD_RUN_STOP) != 0 {
+        write32(op, OP_USBCMD, command & !USBCMD_RUN_STOP);
+    }
+
+    wait_until(
+        || (read32(op, OP_USBSTS) & USBSTS_HOST_CONTROLLER_HALTED) != 0,
+        XhciError::HaltTimeout,
+    )
+}
+
+fn reset_controller(op: usize) -> Result<(), XhciError> {
+    let command = read32(op, OP_USBCMD);
+    write32(op, OP_USBCMD, command | USBCMD_HOST_CONTROLLER_RESET);
+
+    wait_until(
+        || (read32(op, OP_USBCMD) & USBCMD_HOST_CONTROLLER_RESET) == 0,
+        XhciError::ResetTimeout,
+    )?;
+    wait_until(
+        || (read32(op, OP_USBSTS) & USBSTS_CONTROLLER_NOT_READY) == 0,
+        XhciError::NotReadyTimeout,
+    )
+}
+
+fn log_controller(controller: XhciController) {
+    let op = controller.mmio_virt + controller.cap_length;
+    serial_write("[USB:xHCI] ready ");
+    write_pci_addr(controller.pci);
+    serial_write(" mmio=");
+    write_hex(controller.mmio_phys, 16);
+    serial_write(" cap=");
+    write_dec(controller.cap_length);
+    serial_write(" slots=");
+    write_dec(controller.max_slots as usize);
+    serial_write(" ports=");
+    write_dec(controller.max_ports as usize);
+    serial_write(" pagesize=");
+    write_hex(read32(op, OP_PAGESIZE) as u64, 8);
+    serial_write(" dboff=");
+    write_hex(controller.doorbell_offset as u64, 8);
+    serial_write(" rtsoff=");
+    write_hex(controller.runtime_offset as u64, 8);
+    serial_write("\r\n");
+}
+
+fn log_ports(controller: XhciController) {
+    let op = controller.mmio_virt + controller.cap_length;
+    let ports = (controller.max_ports as usize).min(32);
+
+    let mut connected = 0usize;
+    let mut port_index = 0usize;
+    while port_index < ports {
+        let portsc_offset = OP_PORTS_BASE + port_index * OP_PORT_STRIDE;
+        let mut portsc = read32(op, portsc_offset);
+
+        if (portsc & PORTSC_PORT_POWER) == 0 {
+            write32(
+                op,
+                portsc_offset,
+                (portsc & !PORTSC_CHANGE_BITS) | PORTSC_PORT_POWER,
+            );
+            portsc = read32(op, portsc_offset);
+        }
+
+        if (portsc & PORTSC_CURRENT_CONNECT_STATUS) != 0 {
+            connected += 1;
+            serial_write("[USB:xHCI] port ");
+            write_dec(port_index + 1);
+            serial_write(" connected enabled=");
+            serial_write(if (portsc & PORTSC_PORT_ENABLED) != 0 {
+                "yes"
+            } else {
+                "no"
+            });
+            serial_write(" speed=");
+            write_dec(((portsc >> 10) & 0xF) as usize);
+            serial_write(" portsc=");
+            write_hex(portsc as u64, 8);
+            serial_write("\r\n");
+        }
+
+        port_index += 1;
+    }
+
+    serial_write("[USB:xHCI] connected ports=");
+    write_dec(connected);
+    serial_write("\r\n");
+}
+
+fn wait_until<F: Fn() -> bool>(condition: F, timeout_error: XhciError) -> Result<(), XhciError> {
+    let mut spins = 0usize;
+    while spins < TIMEOUT_SPINS {
+        if condition() {
+            return Ok(());
+        }
+        unsafe {
+            core::arch::asm!("pause", options(nomem, nostack, preserves_flags));
+        }
+        spins += 1;
+    }
+    Err(timeout_error)
+}
+
+fn read8(base: usize, offset: usize) -> u8 {
+    unsafe { core::ptr::read_volatile((base + offset) as *const u8) }
+}
+
+fn read16(base: usize, offset: usize) -> u16 {
+    unsafe { core::ptr::read_volatile((base + offset) as *const u16) }
+}
+
+fn read32(base: usize, offset: usize) -> u32 {
+    unsafe { core::ptr::read_volatile((base + offset) as *const u32) }
+}
+
+fn write32(base: usize, offset: usize, value: u32) {
+    unsafe {
+        core::ptr::write_volatile((base + offset) as *mut u32, value);
+    }
+}
+
+fn write_pci_addr(dev: PciDevice) {
+    write_hex(dev.bus as u64, 2);
+    serial_write(":");
+    write_hex(dev.device as u64, 2);
+    serial_write(".");
+    write_hex(dev.function as u64, 1);
+}
+
+fn write_hex(mut value: u64, digits: usize) {
+    let mut buf = [0u8; 16];
+    let mut index = digits.min(buf.len());
+    while index > 0 {
+        index -= 1;
+        let nibble = (value & 0xF) as u8;
+        buf[index] = if nibble < 10 {
+            b'0' + nibble
+        } else {
+            b'a' + nibble - 10
+        };
+        value >>= 4;
+    }
+    if let Ok(text) = core::str::from_utf8(&buf[..digits.min(buf.len())]) {
+        serial_write(text);
+    }
+}
+
+fn write_dec(mut value: usize) {
+    let mut buf = [0u8; 20];
+    let mut index = buf.len();
+    if value == 0 {
+        serial_write("0");
+        return;
+    }
+    while value > 0 {
+        index -= 1;
+        buf[index] = b'0' + (value % 10) as u8;
+        value /= 10;
+    }
+    if let Ok(text) = core::str::from_utf8(&buf[index..]) {
+        serial_write(text);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum XhciError {
+    NoMmioBar,
+    MmioMap,
+    BadCapabilityLength,
+    UnsupportedVersion,
+    HaltTimeout,
+    ResetTimeout,
+    NotReadyTimeout,
+}
+
+impl XhciError {
+    fn as_str(self) -> &'static str {
+        match self {
+            XhciError::NoMmioBar => "missing MMIO BAR",
+            XhciError::MmioMap => "MMIO map failed",
+            XhciError::BadCapabilityLength => "bad capability length",
+            XhciError::UnsupportedVersion => "unsupported xHCI version",
+            XhciError::HaltTimeout => "halt timeout",
+            XhciError::ResetTimeout => "reset timeout",
+            XhciError::NotReadyTimeout => "controller not ready timeout",
+        }
+    }
+}

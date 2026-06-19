@@ -1,9 +1,12 @@
 use super::pmm::{get_pmm, PhysicalAddress};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 const PAGE_SIZE: usize = 4096;
 const USER_SPACE_END: usize = 0x0000_8000_0000_0000;
 const PML4_KERNEL_START: usize = 256;
+const KERNEL_MMIO_BASE: usize = 0xFFFF_C000_0000_0000;
+const KERNEL_MMIO_SIZE: usize = 0x0000_0080_0000_0000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VirtualAddress(pub usize);
@@ -504,6 +507,7 @@ impl VirtualMemoryManager {
 
 static mut VMM_INSTANCE: Option<VirtualMemoryManager> = None;
 static mut HHDM_OFFSET: u64 = 0;
+static NEXT_MMIO_VIRT: AtomicUsize = AtomicUsize::new(KERNEL_MMIO_BASE);
 
 pub fn init() {
     super::serial_write("[VMM] START\r\n");
@@ -530,6 +534,90 @@ pub fn phys_to_virt(phys: usize) -> usize {
 
 pub fn virt_to_phys(virt: usize) -> usize {
     virt - (unsafe { HHDM_OFFSET } as usize)
+}
+
+pub fn map_mmio_region(phys: usize, length: usize) -> Option<usize> {
+    if length == 0 {
+        return None;
+    }
+
+    let phys_start = phys & !(PAGE_SIZE - 1);
+    let phys_offset = phys.saturating_sub(phys_start);
+    let map_length = align_up(phys_offset.checked_add(length)?, PAGE_SIZE)?;
+
+    let virt_start = NEXT_MMIO_VIRT.fetch_add(map_length, Ordering::SeqCst);
+    if virt_start.checked_add(map_length)? > KERNEL_MMIO_BASE + KERNEL_MMIO_SIZE {
+        return None;
+    }
+
+    let root_frame = unsafe { active_root_frame() };
+    let mut offset = 0usize;
+    while offset < map_length {
+        unsafe {
+            map_kernel_page(
+                root_frame,
+                virt_start + offset,
+                phys_start + offset,
+                PageFlags::WRITABLE
+                    | PageFlags::NO_CACHE
+                    | PageFlags::WRITE_THROUGH
+                    | PageFlags::NO_EXECUTE,
+            )?;
+        }
+        offset += PAGE_SIZE;
+    }
+
+    Some(virt_start + phys_offset)
+}
+
+unsafe fn map_kernel_page(
+    root_frame: usize,
+    virt: usize,
+    phys: usize,
+    flags: PageFlags,
+) -> Option<()> {
+    if (virt & (PAGE_SIZE - 1)) != 0 || (phys & (PAGE_SIZE - 1)) != 0 {
+        return None;
+    }
+
+    let root = page_table_from_phys_mut(PhysicalAddress(root_frame));
+    let p4 = (virt >> 39) & 0x1FF;
+    let p3 = (virt >> 30) & 0x1FF;
+    let p2 = (virt >> 21) & 0x1FF;
+    let p1 = (virt >> 12) & 0x1FF;
+
+    let p3_table = ensure_kernel_table(root.get_entry_mut(p4))?;
+    let p2_table = ensure_kernel_table(p3_table.get_entry_mut(p3))?;
+    let p1_table = ensure_kernel_table(p2_table.get_entry_mut(p2))?;
+    p1_table
+        .get_entry_mut(p1)
+        .set(PhysicalAddress(phys), flags | PageFlags::PRESENT);
+
+    core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
+    Some(())
+}
+
+unsafe fn ensure_kernel_table(entry: &mut PageTableEntry) -> Option<&'static mut PageTable> {
+    if !entry.is_unused() {
+        if entry.flags().contains(PageFlags::HUGE) {
+            return None;
+        }
+        return Some(page_table_from_phys_mut(entry.addr()));
+    }
+
+    let pmm = get_pmm()?;
+    let frame = pmm.alloc_frame()?;
+    let table = page_table_from_phys_mut(frame);
+    table.zero();
+    entry.set(frame, PageFlags::PRESENT | PageFlags::WRITABLE);
+    Some(table)
+}
+
+fn align_up(value: usize, align: usize) -> Option<usize> {
+    if align == 0 || !align.is_power_of_two() {
+        return None;
+    }
+    value.checked_add(align - 1).map(|v| v & !(align - 1))
 }
 
 pub fn map_vga_buffer() -> *mut u16 {
