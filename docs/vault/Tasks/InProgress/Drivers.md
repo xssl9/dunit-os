@@ -22,8 +22,12 @@ What is still missing is a general driver model and real hardware/storage/networ
   mouse parser path.
 - PCI config-space scan that detects and logs USB controllers.
 - PCI BAR decoding plus MMIO/bus-master enable path for device drivers.
+- Terminal `lspci` diagnostics for PCI device inventory and USB controller
+  detection.
 - xHCI host-controller bring-up: MMIO capability probe, controller halt/reset,
   slot configuration, port power/status logging.
+- Terminal `usb` diagnostics for xHCI controller count, initialized controller
+  count, connected port count, and last init error.
 - QEMU `qemu-xhci` + `usb-mouse` boot verified: controller initializes and logs
   the connected USB mouse port.
 - Serial output used by logs and userspace stdout/stderr smoke checks.
@@ -38,8 +42,8 @@ What is still missing is a general driver model and real hardware/storage/networ
 - ACPI support.
 - Disk driver, initially ATA/AHCI or a simpler QEMU-friendly target.
 - Network driver, likely E1000 or RTL8139 first.
-- USB stack: xHCI command ring, event ring, device contexts, enumeration, and
-  real HID polling/interrupt transfers.
+- USB stack beyond host-controller bring-up: xHCI command ring, event ring,
+  device contexts, enumeration, and real HID polling/interrupt transfers.
 - Sound driver.
 - A cleaner device registration layer for future DevFS integration.
 

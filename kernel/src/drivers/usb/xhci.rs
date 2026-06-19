@@ -1,6 +1,7 @@
 use crate::drivers::pci::{self, PciBar, PciDevice};
 use crate::memory::vmm;
 use crate::serial_write;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 const XHCI_PROG_IF: u8 = 0x30;
 
@@ -32,6 +33,19 @@ const MAX_CONTROLLERS: usize = 4;
 const TIMEOUT_SPINS: usize = 1_000_000;
 const XHCI_MMIO_MAP_SIZE: usize = 0x10000;
 
+static XHCI_FOUND: AtomicUsize = AtomicUsize::new(0);
+static XHCI_INITIALIZED: AtomicUsize = AtomicUsize::new(0);
+static XHCI_CONNECTED_PORTS: AtomicUsize = AtomicUsize::new(0);
+static XHCI_LAST_ERROR: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone, Copy)]
+pub struct XhciStatus {
+    pub found: usize,
+    pub initialized: usize,
+    pub connected_ports: usize,
+    pub last_error: Option<XhciError>,
+}
+
 #[derive(Clone, Copy)]
 struct XhciController {
     pci: PciDevice,
@@ -47,6 +61,8 @@ struct XhciController {
 pub fn init() {
     let mut found = 0usize;
     let mut initialized = 0usize;
+    let mut connected_ports = 0usize;
+    XHCI_LAST_ERROR.store(0, Ordering::Relaxed);
 
     pci::scan(|dev| {
         if found >= MAX_CONTROLLERS {
@@ -70,9 +86,10 @@ pub fn init() {
             Ok(controller) => {
                 initialized += 1;
                 log_controller(controller);
-                log_ports(controller);
+                connected_ports += log_ports(controller);
             }
             Err(error) => {
+                XHCI_LAST_ERROR.store(error.code(), Ordering::Relaxed);
                 serial_write("[USB:xHCI] init failed: ");
                 serial_write(error.as_str());
                 serial_write("\r\n");
@@ -85,6 +102,19 @@ pub fn init() {
     serial_write(" initialized=");
     write_dec(initialized);
     serial_write("\r\n");
+
+    XHCI_FOUND.store(found, Ordering::Relaxed);
+    XHCI_INITIALIZED.store(initialized, Ordering::Relaxed);
+    XHCI_CONNECTED_PORTS.store(connected_ports, Ordering::Relaxed);
+}
+
+pub fn status() -> XhciStatus {
+    XhciStatus {
+        found: XHCI_FOUND.load(Ordering::Relaxed),
+        initialized: XHCI_INITIALIZED.load(Ordering::Relaxed),
+        connected_ports: XHCI_CONNECTED_PORTS.load(Ordering::Relaxed),
+        last_error: XhciError::from_code(XHCI_LAST_ERROR.load(Ordering::Relaxed)),
+    }
 }
 
 fn bring_up_controller(dev: PciDevice) -> Result<XhciController, XhciError> {
@@ -288,7 +318,7 @@ fn log_controller(controller: XhciController) {
     serial_write("\r\n");
 }
 
-fn log_ports(controller: XhciController) {
+fn log_ports(controller: XhciController) -> usize {
     let op = controller.mmio_virt + controller.cap_length;
     let ports = (controller.max_ports as usize).min(32);
 
@@ -330,6 +360,7 @@ fn log_ports(controller: XhciController) {
     serial_write("[USB:xHCI] connected ports=");
     write_dec(connected);
     serial_write("\r\n");
+    connected
 }
 
 fn wait_until<F: Fn() -> bool>(condition: F, timeout_error: XhciError) -> Result<(), XhciError> {
@@ -408,7 +439,7 @@ fn write_dec(mut value: usize) {
 }
 
 #[derive(Clone, Copy)]
-enum XhciError {
+pub enum XhciError {
     NoMmioBar,
     MmioMap,
     BadCapabilityLength,
@@ -419,7 +450,7 @@ enum XhciError {
 }
 
 impl XhciError {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             XhciError::NoMmioBar => "missing MMIO BAR",
             XhciError::MmioMap => "MMIO map failed",
@@ -428,6 +459,31 @@ impl XhciError {
             XhciError::HaltTimeout => "halt timeout",
             XhciError::ResetTimeout => "reset timeout",
             XhciError::NotReadyTimeout => "controller not ready timeout",
+        }
+    }
+
+    fn code(self) -> usize {
+        match self {
+            XhciError::NoMmioBar => 1,
+            XhciError::MmioMap => 2,
+            XhciError::BadCapabilityLength => 3,
+            XhciError::UnsupportedVersion => 4,
+            XhciError::HaltTimeout => 5,
+            XhciError::ResetTimeout => 6,
+            XhciError::NotReadyTimeout => 7,
+        }
+    }
+
+    fn from_code(code: usize) -> Option<Self> {
+        match code {
+            1 => Some(XhciError::NoMmioBar),
+            2 => Some(XhciError::MmioMap),
+            3 => Some(XhciError::BadCapabilityLength),
+            4 => Some(XhciError::UnsupportedVersion),
+            5 => Some(XhciError::HaltTimeout),
+            6 => Some(XhciError::ResetTimeout),
+            7 => Some(XhciError::NotReadyTimeout),
+            _ => None,
         }
     }
 }

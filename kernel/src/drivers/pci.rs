@@ -3,6 +3,7 @@ use crate::{hal, serial_write};
 const PCI_CONFIG_ADDRESS: u16 = 0xCF8;
 const PCI_CONFIG_DATA: u16 = 0xCFC;
 const INVALID_VENDOR: u16 = 0xFFFF;
+const MAX_SNAPSHOT_DEVICES: usize = 64;
 
 #[derive(Clone, Copy)]
 pub struct PciDevice {
@@ -14,6 +15,14 @@ pub struct PciDevice {
     pub class_code: u8,
     pub subclass: u8,
     pub prog_if: u8,
+}
+
+#[derive(Clone, Copy)]
+pub struct PciSnapshot {
+    pub devices: [Option<PciDevice>; MAX_SNAPSHOT_DEVICES],
+    pub total_devices: usize,
+    pub stored_devices: usize,
+    pub usb_controllers: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,6 +61,28 @@ pub fn init() {
     serial_write("[PCI] USB controllers detected=");
     write_dec(usb_count);
     serial_write("\r\n");
+}
+
+pub fn snapshot() -> PciSnapshot {
+    let mut snapshot = PciSnapshot {
+        devices: [None; MAX_SNAPSHOT_DEVICES],
+        total_devices: 0,
+        stored_devices: 0,
+        usb_controllers: 0,
+    };
+
+    scan(|dev| {
+        if snapshot.stored_devices < snapshot.devices.len() {
+            snapshot.devices[snapshot.stored_devices] = Some(dev);
+            snapshot.stored_devices += 1;
+        }
+        snapshot.total_devices += 1;
+        if dev.class_code == 0x0C && dev.subclass == 0x03 {
+            snapshot.usb_controllers += 1;
+        }
+    });
+
+    snapshot
 }
 
 pub fn scan<F: FnMut(PciDevice)>(mut visitor: F) {

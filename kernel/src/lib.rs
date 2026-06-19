@@ -409,6 +409,107 @@ fn terminal_write_usize(console: &mut terminal::FbConsole, value: usize) {
     terminal_write_u64(console, value as u64);
 }
 
+fn terminal_write_hex_fixed(console: &mut terminal::FbConsole, mut value: u64, digits: usize) {
+    let mut buf = [0u8; 16];
+    let mut index = digits.min(buf.len());
+    while index > 0 {
+        index -= 1;
+        let nibble = (value & 0xF) as u8;
+        buf[index] = if nibble < 10 {
+            b'0' + nibble
+        } else {
+            b'a' + nibble - 10
+        };
+        value >>= 4;
+    }
+
+    console.write_str("0x");
+    for byte in &buf[..digits.min(buf.len())] {
+        let ch = [*byte];
+        let s = unsafe { core::str::from_utf8_unchecked(&ch) };
+        console.write_str(s);
+    }
+}
+
+fn terminal_write_hex_digits(console: &mut terminal::FbConsole, mut value: u64, digits: usize) {
+    let mut buf = [0u8; 16];
+    let mut index = digits.min(buf.len());
+    while index > 0 {
+        index -= 1;
+        let nibble = (value & 0xF) as u8;
+        buf[index] = if nibble < 10 {
+            b'0' + nibble
+        } else {
+            b'a' + nibble - 10
+        };
+        value >>= 4;
+    }
+
+    for byte in &buf[..digits.min(buf.len())] {
+        let ch = [*byte];
+        let s = unsafe { core::str::from_utf8_unchecked(&ch) };
+        console.write_str(s);
+    }
+}
+
+fn terminal_write_pci_addr(console: &mut terminal::FbConsole, dev: drivers::pci::PciDevice) {
+    terminal_write_hex_digits(console, dev.bus as u64, 2);
+    console.write_str(":");
+    terminal_write_hex_digits(console, dev.device as u64, 2);
+    console.write_str(".");
+    terminal_write_hex_digits(console, dev.function as u64, 1);
+}
+
+fn terminal_lspci(console: &mut terminal::FbConsole) {
+    let snapshot = drivers::pci::snapshot();
+    console.write_str("PCI devices: ");
+    terminal_write_usize(console, snapshot.total_devices);
+    console.write_str(" stored=");
+    terminal_write_usize(console, snapshot.stored_devices);
+    console.write_str(" usb_controllers=");
+    terminal_write_usize(console, snapshot.usb_controllers);
+    console.write_str("\n");
+
+    for entry in snapshot.devices.iter().take(snapshot.stored_devices) {
+        let Some(dev) = entry else {
+            continue;
+        };
+        terminal_write_pci_addr(console, *dev);
+        console.write_str(" vendor=");
+        terminal_write_hex_fixed(console, dev.vendor_id as u64, 4);
+        console.write_str(" device=");
+        terminal_write_hex_fixed(console, dev.device_id as u64, 4);
+        console.write_str(" class=");
+        terminal_write_hex_fixed(console, dev.class_code as u64, 2);
+        console.write_str(" subclass=");
+        terminal_write_hex_fixed(console, dev.subclass as u64, 2);
+        console.write_str(" prog_if=");
+        terminal_write_hex_fixed(console, dev.prog_if as u64, 2);
+        if dev.class_code == 0x0C && dev.subclass == 0x03 {
+            console.write_str(" USB");
+        }
+        console.write_str("\n");
+    }
+}
+
+fn terminal_usb(console: &mut terminal::FbConsole) {
+    let status = drivers::usb::xhci::status();
+    console.write_str("USB xHCI: found=");
+    terminal_write_usize(console, status.found);
+    console.write_str(" initialized=");
+    terminal_write_usize(console, status.initialized);
+    console.write_str(" connected_ports=");
+    terminal_write_usize(console, status.connected_ports);
+    if let Some(error) = status.last_error {
+        console.write_str(" last_error=");
+        console.write_str(error.as_str());
+    } else {
+        console.write_str(" last_error=none");
+    }
+    console.write_str("\n");
+    console.write_str("USB HID mouse parser: boot-protocol reports supported; enumeration/polling not implemented\n");
+}
+
 fn terminal_write_process_state(console: &mut terminal::FbConsole, state: process::ProcessState) {
     console.write_str(match state {
         process::ProcessState::Prepared => "Prepared",
@@ -508,6 +609,8 @@ fn terminal_handle_system_command(console: &mut terminal::FbConsole, cmd_str: &s
             console.write_str("  rm         - Remove file\n");
             console.write_str("  tree       - Show directory tree\n");
             console.write_str("  exec       - Execute userspace program\n");
+            console.write_str("  lspci      - Show PCI devices\n");
+            console.write_str("  usb        - Show USB/xHCI driver status\n");
             console.write_str("  ps         - Show process table records\n");
             console.write_str("  ps aux     - Show detailed process table records\n");
             console.write_str("  uname      - System name\n");
@@ -553,6 +656,14 @@ fn terminal_handle_system_command(console: &mut terminal::FbConsole, cmd_str: &s
         }
         "ps aux" => {
             terminal_ps(console, true);
+            true
+        }
+        "lspci" => {
+            terminal_lspci(console);
+            true
+        }
+        "usb" => {
+            terminal_usb(console);
             true
         }
         "top" => {
@@ -1435,7 +1546,7 @@ pub extern "C" fn kernel_main(
                                             "help", "dufetch", "ls", "pwd", "cd", "mkdir", "touch",
                                             "cat", "echo", "exec", "ps", "top", "uname", "date",
                                             "whoami", "uptime", "free", "exit", "poweroff",
-                                            "shutdown",
+                                            "shutdown", "lspci", "usb",
                                         ];
 
                                         let mut matches: [&str; 20] = [""; 20];
