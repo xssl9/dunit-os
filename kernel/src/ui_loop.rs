@@ -224,6 +224,7 @@ struct GuiAppRuntime {
     rect_count: usize,
     lines: [GuiTextLine; GUI_APP_LINES],
     line_count: usize,
+    dirty_revision: u32,
     cwd: [u8; GUI_APP_CWD_CAP],
     cwd_len: usize,
 }
@@ -250,14 +251,20 @@ impl GuiAppRuntime {
             rect_count: 0,
             lines: [GuiTextLine::empty(); GUI_APP_LINES],
             line_count: 0,
+            dirty_revision: 0,
             cwd: [0; GUI_APP_CWD_CAP],
             cwd_len: 0,
         }
     }
 
+    fn mark_dirty(&mut self) {
+        self.dirty_revision = self.dirty_revision.wrapping_add(1);
+    }
+
     fn set_title(&mut self, data: &[u8]) {
         self.title_len = data.len().min(self.title.len());
         self.title[..self.title_len].copy_from_slice(&data[..self.title_len]);
+        self.mark_dirty();
     }
 
     fn title(&self) -> &str {
@@ -267,6 +274,7 @@ impl GuiAppRuntime {
     fn set_status(&mut self, data: &[u8]) {
         self.status_len = data.len().min(self.status.len());
         self.status[..self.status_len].copy_from_slice(&data[..self.status_len]);
+        self.mark_dirty();
     }
 
     fn status(&self) -> &str {
@@ -278,6 +286,7 @@ impl GuiAppRuntime {
         while index < self.line_count {
             if self.lines[index].x == x && self.lines[index].y == y {
                 self.lines[index].set(x, y, data);
+                self.mark_dirty();
                 return;
             }
             index += 1;
@@ -285,6 +294,7 @@ impl GuiAppRuntime {
         if self.line_count < self.lines.len() {
             self.lines[self.line_count].set(x, y, data);
             self.line_count += 1;
+            self.mark_dirty();
             return;
         }
         let mut index = 1usize;
@@ -293,6 +303,7 @@ impl GuiAppRuntime {
             index += 1;
         }
         self.lines[self.lines.len() - 1].set(x, y, data);
+        self.mark_dirty();
     }
 
     fn push_rect(&mut self, x: i32, y: i32, width: usize, height: usize, color: u32) {
@@ -308,6 +319,7 @@ impl GuiAppRuntime {
                 color,
             };
             self.rect_count += 1;
+            self.mark_dirty();
         }
     }
 
@@ -322,9 +334,11 @@ impl GuiAppRuntime {
     fn set_cwd(&mut self, cwd: &str) {
         self.cwd_len = cwd.len().min(self.cwd.len());
         self.cwd[..self.cwd_len].copy_from_slice(&cwd.as_bytes()[..self.cwd_len]);
+        self.mark_dirty();
     }
 
     fn reset_window(&mut self) {
+        let next_revision = self.dirty_revision.wrapping_add(1);
         self.kind = GuiAppKind::None;
         self.launched = false;
         self.running = false;
@@ -340,6 +354,7 @@ impl GuiAppRuntime {
         self.status_len = 0;
         self.rect_count = 0;
         self.line_count = 0;
+        self.dirty_revision = next_revision;
         self.cwd_len = 0;
     }
 }
@@ -3944,6 +3959,7 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                     let before_rects = state.gui_apps[app_index].rect_count;
                     let before_window = state.gui_apps[app_index].window_id;
                     let before_pid = state.gui_apps[app_index].pid;
+                    let before_revision = state.gui_apps[app_index].dirty_revision;
                     let before_rect =
                         gui_app_window_rect(width, height, &state.gui_apps[app_index]);
                     state.gui_app_needs_run[app_index] = false;
@@ -3952,6 +3968,7 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                         || state.gui_apps[app_index].rect_count != before_rects
                         || state.gui_apps[app_index].window_id != before_window
                         || state.gui_apps[app_index].pid != before_pid
+                        || state.gui_apps[app_index].dirty_revision != before_revision
                     {
                         let after_rect =
                             gui_app_window_rect(width, height, &state.gui_apps[app_index]);

@@ -100,7 +100,6 @@ pub extern "C" fn _start() -> ! {
 
         match event.kind {
             libdunit::GUI_MSG_KEY_EVENT => {
-                libdunit::println("gui_terminal_stub: received KEY_EVENT");
                 if terminal.handle_key(event.a as u8) {
                     libdunit::exit(0);
                 }
