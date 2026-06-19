@@ -1,6 +1,6 @@
-use crate::gui::renderer::{BackBuffer, DamageTracker, Framebuffer, Rect};
 use crate::drivers::{keyboard, mouse};
 use crate::fs::vfs::{self, OpenFlags};
+use crate::gui::renderer::{BackBuffer, DamageTracker, Framebuffer, Rect};
 use crate::serial_write;
 use crate::window_manager::{self, AppType};
 use alloc::string::String;
@@ -77,6 +77,7 @@ const MAX_BLUR_PIXELS: usize = MAX_BLUR_WIDTH * MAX_BLUR_HEIGHT;
 const BLUR_RADIUS: usize = 4;
 const BLUR_WEIGHTS: [u32; BLUR_RADIUS * 2 + 1] = [1, 4, 10, 16, 19, 16, 10, 4, 1];
 const BLUR_WEIGHT_SUM: u32 = 81;
+const GUI_VERBOSE_PROTO_LOGS: bool = false;
 
 static mut BLUR_TEMP: [u32; MAX_BLUR_PIXELS] = [0; MAX_BLUR_PIXELS];
 static mut BLUR_CACHE: [u32; MAX_BLUR_PIXELS] = [0; MAX_BLUR_PIXELS];
@@ -299,7 +300,13 @@ impl GuiAppRuntime {
             return;
         }
         if self.rect_count < self.rects.len() {
-            self.rects[self.rect_count] = GuiRectShape { x, y, width, height, color };
+            self.rects[self.rect_count] = GuiRectShape {
+                x,
+                y,
+                width,
+                height,
+                color,
+            };
             self.rect_count += 1;
         }
     }
@@ -357,7 +364,7 @@ impl UiState {
             launcher_open: false,
             quick_open: true,
             notifications_open: true,
-            brightness: 80,
+            brightness: 100,
             keyboard_extended: false,
             gui_app_needs_run: [false; MAX_GUI_APPS],
             focused_gui_app: NO_GUI_FOCUS,
@@ -413,7 +420,10 @@ fn gui_app_slot_by_pid(state: &UiState, pid: u64) -> Option<usize> {
 fn allocate_gui_app_slot(state: &UiState) -> Option<usize> {
     let mut index = 0usize;
     while index < MAX_GUI_APPS {
-        if !state.gui_apps[index].launched || state.gui_apps[index].exited || state.gui_apps[index].pid == 0 {
+        if !state.gui_apps[index].launched
+            || state.gui_apps[index].exited
+            || state.gui_apps[index].pid == 0
+        {
             return Some(index);
         }
         index += 1;
@@ -651,7 +661,9 @@ fn launch_terminal_bridge(state: &mut UiState) {
         _ => {
             serial_write("[GUI-BRIDGE] failed: process faulted\r\n");
             let _ = crate::process::autoreap_process(pid, "gui-bridge-faulted");
-            state.terminal_bridge.set_error("process did not exit cleanly");
+            state
+                .terminal_bridge
+                .set_error("process did not exit cleanly");
             return;
         }
     }
@@ -662,7 +674,9 @@ fn launch_terminal_bridge(state: &mut UiState) {
         Err(_) => {
             serial_write("[GUI-BRIDGE] failed: no IPC message\r\n");
             let _ = crate::process::autoreap_process(pid, "gui-bridge-no-message");
-            state.terminal_bridge.set_error("no IPC message from gui_ping");
+            state
+                .terminal_bridge
+                .set_error("no IPC message from gui_ping");
             return;
         }
     };
@@ -683,7 +697,9 @@ fn launch_terminal_bridge(state: &mut UiState) {
     if state.terminal_bridge.ok {
         serial_write("[GUI-BRIDGE] Terminal runtime bridge OK\r\n");
     } else {
-        state.terminal_bridge.set_error("gui_ping exit code was nonzero");
+        state
+            .terminal_bridge
+            .set_error("gui_ping exit code was nonzero");
     }
 }
 
@@ -713,8 +729,18 @@ fn gui_message_rect_size(message: &GuiMessage) -> Option<(usize, usize)> {
     if message.len < 8 {
         return None;
     }
-    let width = u32::from_le_bytes([message.data[0], message.data[1], message.data[2], message.data[3]]) as usize;
-    let height = u32::from_le_bytes([message.data[4], message.data[5], message.data[6], message.data[7]]) as usize;
+    let width = u32::from_le_bytes([
+        message.data[0],
+        message.data[1],
+        message.data[2],
+        message.data[3],
+    ]) as usize;
+    let height = u32::from_le_bytes([
+        message.data[4],
+        message.data[5],
+        message.data[6],
+        message.data[7],
+    ]) as usize;
     if width == 0 || height == 0 {
         return None;
     }
@@ -744,28 +770,34 @@ fn send_gui_event(app: &GuiAppRuntime, kind: u16, key: u8) -> bool {
         )
     };
 
-    match crate::ipc::send_bytes(crate::process::ProcessId(1), crate::process::ProcessId(app.pid), bytes) {
+    match crate::ipc::send_bytes(
+        crate::process::ProcessId(1),
+        crate::process::ProcessId(app.pid),
+        bytes,
+    ) {
         Ok(()) => {
-            if kind == GUI_MSG_KEY_EVENT {
-                serial_write("[GUI-PROTO] send KEY_EVENT pid=");
-            } else {
-                serial_write("[GUI-PROTO] send CLOSE_EVENT pid=");
-            }
-            serial_write_u64(app.pid);
-            serial_write(" window_id=");
-            serial_write_u64(app.window_id as u64);
-            if kind == GUI_MSG_KEY_EVENT {
-                serial_write(" key=");
-                if key == b'\n' {
-                    serial_write("Enter");
-                } else if key == 8 {
-                    serial_write("Backspace");
+            if GUI_VERBOSE_PROTO_LOGS {
+                if kind == GUI_MSG_KEY_EVENT {
+                    serial_write("[GUI-PROTO] send KEY_EVENT pid=");
                 } else {
-                    let text = [key];
-                    serial_write(core::str::from_utf8(&text).unwrap_or("?"));
+                    serial_write("[GUI-PROTO] send CLOSE_EVENT pid=");
                 }
+                serial_write_u64(app.pid);
+                serial_write(" window_id=");
+                serial_write_u64(app.window_id as u64);
+                if kind == GUI_MSG_KEY_EVENT {
+                    serial_write(" key=");
+                    if key == b'\n' {
+                        serial_write("Enter");
+                    } else if key == 8 {
+                        serial_write("Backspace");
+                    } else {
+                        let text = [key];
+                        serial_write(core::str::from_utf8(&text).unwrap_or("?"));
+                    }
+                }
+                serial_write("\r\n");
             }
-            serial_write("\r\n");
             true
         }
         Err(_) => {
@@ -810,17 +842,23 @@ fn send_gui_pointer_event(app: &GuiAppRuntime, x: i32, y: i32) -> bool {
         )
     };
 
-    match crate::ipc::send_bytes(crate::process::ProcessId(1), crate::process::ProcessId(app.pid), bytes) {
+    match crate::ipc::send_bytes(
+        crate::process::ProcessId(1),
+        crate::process::ProcessId(app.pid),
+        bytes,
+    ) {
         Ok(()) => {
-            serial_write("[GUI-PROTO] send POINTER_EVENT pid=");
-            serial_write_u64(app.pid);
-            serial_write(" window_id=");
-            serial_write_u64(app.window_id as u64);
-            serial_write(" x=");
-            serial_write_i32(x);
-            serial_write(" y=");
-            serial_write_i32(y);
-            serial_write("\r\n");
+            if GUI_VERBOSE_PROTO_LOGS {
+                serial_write("[GUI-PROTO] send POINTER_EVENT pid=");
+                serial_write_u64(app.pid);
+                serial_write(" window_id=");
+                serial_write_u64(app.window_id as u64);
+                serial_write(" x=");
+                serial_write_i32(x);
+                serial_write(" y=");
+                serial_write_i32(y);
+                serial_write("\r\n");
+            }
             true
         }
         Err(_) => {
@@ -830,7 +868,13 @@ fn send_gui_pointer_event(app: &GuiAppRuntime, x: i32, y: i32) -> bool {
     }
 }
 
-fn gui_app_content_hit(app: &GuiAppRuntime, mx: usize, my: usize, width: usize, height: usize) -> Option<(i32, i32)> {
+fn gui_app_content_hit(
+    app: &GuiAppRuntime,
+    mx: usize,
+    my: usize,
+    width: usize,
+    height: usize,
+) -> Option<(i32, i32)> {
     let rect = gui_app_window_rect(width, height, app)?;
     let content_x = rect.x + 18;
     let content_y = rect.y + 50;
@@ -853,12 +897,25 @@ fn gui_app_window_rect(width: usize, height: usize, app: &GuiAppRuntime) -> Opti
     let window_height = app.height.max(180);
     let max_x = width.saturating_sub(window_width);
     let max_y = height.saturating_sub(window_height);
-    Some(Rect::new(app.x.min(max_x), app.y.min(max_y), window_width, window_height))
+    Some(Rect::new(
+        app.x.min(max_x),
+        app.y.min(max_y),
+        window_width,
+        window_height,
+    ))
 }
 
-fn topmost_gui_app_at(state: &UiState, mx: usize, my: usize, width: usize, height: usize) -> Option<(usize, Rect)> {
+fn topmost_gui_app_at(
+    state: &UiState,
+    mx: usize,
+    my: usize,
+    width: usize,
+    height: usize,
+) -> Option<(usize, Rect)> {
     if state.focused_gui_app < MAX_GUI_APPS {
-        if let Some(rect) = gui_app_window_rect(width, height, &state.gui_apps[state.focused_gui_app]) {
+        if let Some(rect) =
+            gui_app_window_rect(width, height, &state.gui_apps[state.focused_gui_app])
+        {
             if inside(mx, my, rect.x, rect.y, rect.width, rect.height) {
                 return Some((state.focused_gui_app, rect));
             }
@@ -900,7 +957,14 @@ fn close_gui_app_window(state: &mut UiState, index: usize) -> bool {
     }
 }
 
-fn begin_gui_app_drag(state: &UiState, index: usize, mx: usize, my: usize, width: usize, height: usize) -> Option<PointerOp> {
+fn begin_gui_app_drag(
+    state: &UiState,
+    index: usize,
+    mx: usize,
+    my: usize,
+    width: usize,
+    height: usize,
+) -> Option<PointerOp> {
     if index >= MAX_GUI_APPS {
         return None;
     }
@@ -918,7 +982,16 @@ fn begin_gui_app_drag(state: &UiState, index: usize, mx: usize, my: usize, width
     None
 }
 
-fn drag_gui_app_window(state: &mut UiState, index: usize, mx: usize, my: usize, width: usize, height: usize, offset_x: usize, offset_y: usize) -> Option<(Rect, Rect)> {
+fn drag_gui_app_window(
+    state: &mut UiState,
+    index: usize,
+    mx: usize,
+    my: usize,
+    width: usize,
+    height: usize,
+    offset_x: usize,
+    offset_y: usize,
+) -> Option<(Rect, Rect)> {
     if index >= MAX_GUI_APPS {
         return None;
     }
@@ -1016,29 +1089,41 @@ fn gui_terminal_vfs_error(app: &mut GuiAppRuntime, command: &str, error: vfs::Vf
     let mut len = 0usize;
     append_str(&mut line, &mut len, command);
     append_str(&mut line, &mut len, ": ");
-    append_str(&mut line, &mut len, match error {
-        vfs::VfsError::NotFound => "not found",
-        vfs::VfsError::PermissionDenied => "permission denied",
-        vfs::VfsError::InvalidDescriptor => "invalid descriptor",
-        vfs::VfsError::AlreadyExists => "already exists",
-        vfs::VfsError::NotADirectory => "not a directory",
-        vfs::VfsError::IsADirectory => "is a directory",
-        vfs::VfsError::InvalidPath => "invalid path",
-        vfs::VfsError::Unsupported => "unsupported",
-        vfs::VfsError::IoError => "io error",
-    });
+    append_str(
+        &mut line,
+        &mut len,
+        match error {
+            vfs::VfsError::NotFound => "not found",
+            vfs::VfsError::PermissionDenied => "permission denied",
+            vfs::VfsError::InvalidDescriptor => "invalid descriptor",
+            vfs::VfsError::AlreadyExists => "already exists",
+            vfs::VfsError::NotADirectory => "not a directory",
+            vfs::VfsError::IsADirectory => "is a directory",
+            vfs::VfsError::InvalidPath => "invalid path",
+            vfs::VfsError::Unsupported => "unsupported",
+            vfs::VfsError::IoError => "io error",
+        },
+    );
     gui_terminal_append_bytes(app, &line[..len]);
 }
 
-fn gui_terminal_append_process_state(out: &mut [u8], len: &mut usize, state: crate::process::ProcessState) {
-    append_str(out, len, match state {
-        crate::process::ProcessState::Prepared => "Prepared",
-        crate::process::ProcessState::Ready => "Ready",
-        crate::process::ProcessState::Running => "Running",
-        crate::process::ProcessState::Blocked => "Blocked",
-        crate::process::ProcessState::Dead => "Dead",
-        crate::process::ProcessState::Reaped => "Reaped",
-    });
+fn gui_terminal_append_process_state(
+    out: &mut [u8],
+    len: &mut usize,
+    state: crate::process::ProcessState,
+) {
+    append_str(
+        out,
+        len,
+        match state {
+            crate::process::ProcessState::Prepared => "Prepared",
+            crate::process::ProcessState::Ready => "Ready",
+            crate::process::ProcessState::Running => "Running",
+            crate::process::ProcessState::Blocked => "Blocked",
+            crate::process::ProcessState::Dead => "Dead",
+            crate::process::ProcessState::Reaped => "Reaped",
+        },
+    );
 }
 
 fn execute_gui_terminal_command(state: &mut UiState, app_index: usize, command: &str) {
@@ -1209,17 +1294,21 @@ fn execute_gui_terminal_command(state: &mut UiState, app_index: usize, command: 
                 append_str(&mut line, &mut len, "exec: ");
                 append_str(&mut line, &mut len, &path);
                 append_str(&mut line, &mut len, " ");
-                append_str(&mut line, &mut len, match error {
-                    vfs::VfsError::NotFound => "not found",
-                    vfs::VfsError::PermissionDenied => "permission denied",
-                    vfs::VfsError::InvalidDescriptor => "invalid descriptor",
-                    vfs::VfsError::AlreadyExists => "already exists",
-                    vfs::VfsError::NotADirectory => "not a directory",
-                    vfs::VfsError::IsADirectory => "is a directory",
-                    vfs::VfsError::InvalidPath => "invalid path",
-                    vfs::VfsError::Unsupported => "unsupported",
-                    vfs::VfsError::IoError => "I/O error",
-                });
+                append_str(
+                    &mut line,
+                    &mut len,
+                    match error {
+                        vfs::VfsError::NotFound => "not found",
+                        vfs::VfsError::PermissionDenied => "permission denied",
+                        vfs::VfsError::InvalidDescriptor => "invalid descriptor",
+                        vfs::VfsError::AlreadyExists => "already exists",
+                        vfs::VfsError::NotADirectory => "not a directory",
+                        vfs::VfsError::IsADirectory => "is a directory",
+                        vfs::VfsError::InvalidPath => "invalid path",
+                        vfs::VfsError::Unsupported => "unsupported",
+                        vfs::VfsError::IoError => "I/O error",
+                    },
+                );
                 gui_terminal_append_bytes(app, &line[..len]);
             }
             Err(crate::command::ExecRunError::ProcessCreate) => {
@@ -1251,10 +1340,11 @@ fn execute_gui_terminal_command(state: &mut UiState, app_index: usize, command: 
 fn process_gui_messages(state: &mut UiState) {
     loop {
         let mut raw = [0u8; 256];
-        let (sender, len) = match crate::ipc::recv_bytes_with_sender(crate::process::ProcessId(1), &mut raw) {
-            Ok((sender, len)) => (sender, len),
-            Err(_) => break,
-        };
+        let (sender, len) =
+            match crate::ipc::recv_bytes_with_sender(crate::process::ProcessId(1), &mut raw) {
+                Ok((sender, len)) => (sender, len),
+                Err(_) => break,
+            };
         let Some(message) = gui_message_from_bytes(&raw[..len]) else {
             serial_write("[GUI-PROTO] ignored invalid IPC payload\r\n");
             continue;
@@ -1309,16 +1399,15 @@ fn process_gui_messages(state: &mut UiState) {
                 } else {
                     app.push_line(message.a, message.b, gui_message_data(&message));
                 }
-                serial_write("[GUI-PROTO] recv DRAW_TEXT pid=");
-                serial_write_u64(pid);
-                serial_write(" window_id=");
-                serial_write_u64(message.window_id as u64);
-                serial_write(" text=");
-                serial_write(text);
-                serial_write("\r\n");
-                serial_write("[GUI-PROTO] render text window_id=");
-                serial_write_u64(message.window_id as u64);
-                serial_write("\r\n");
+                if GUI_VERBOSE_PROTO_LOGS {
+                    serial_write("[GUI-PROTO] recv DRAW_TEXT pid=");
+                    serial_write_u64(pid);
+                    serial_write(" window_id=");
+                    serial_write_u64(message.window_id as u64);
+                    serial_write(" text=");
+                    serial_write(text);
+                    serial_write("\r\n");
+                }
             }
             GUI_MSG_DRAW_RECT => {
                 let app = &mut state.gui_apps[app_index];
@@ -1331,19 +1420,21 @@ fn process_gui_messages(state: &mut UiState) {
                     continue;
                 };
                 app.push_rect(message.a, message.b, rect_width, rect_height, message.c);
-                serial_write("[GUI-PROTO] recv DRAW_RECT pid=");
-                serial_write_u64(pid);
-                serial_write(" window_id=");
-                serial_write_u64(message.window_id as u64);
-                serial_write(" x=");
-                serial_write_i32(message.a);
-                serial_write(" y=");
-                serial_write_i32(message.b);
-                serial_write(" w=");
-                serial_write_u64(rect_width as u64);
-                serial_write(" h=");
-                serial_write_u64(rect_height as u64);
-                serial_write("\r\n");
+                if GUI_VERBOSE_PROTO_LOGS {
+                    serial_write("[GUI-PROTO] recv DRAW_RECT pid=");
+                    serial_write_u64(pid);
+                    serial_write(" window_id=");
+                    serial_write_u64(message.window_id as u64);
+                    serial_write(" x=");
+                    serial_write_i32(message.a);
+                    serial_write(" y=");
+                    serial_write_i32(message.b);
+                    serial_write(" w=");
+                    serial_write_u64(rect_width as u64);
+                    serial_write(" h=");
+                    serial_write_u64(rect_height as u64);
+                    serial_write("\r\n");
+                }
             }
             GUI_MSG_SET_STATUS => {
                 state.gui_apps[app_index].set_status(gui_message_data(&message));
@@ -1431,8 +1522,8 @@ fn run_gui_app_once(state: &mut UiState, app_index: usize) {
             serial_write("\r\n");
             let _ = crate::process::autoreap_process(pid, "gui-proto-exit");
         }
-        Err(crate::process::ProcessError::SchedulerUnavailable) if crate::process::is_pid_runnable(pid) => {
-        }
+        Err(crate::process::ProcessError::SchedulerUnavailable)
+            if crate::process::is_pid_runnable(pid) => {}
         Err(_) => {
             state.gui_apps[app_index].running = false;
             state.gui_apps[app_index].exited = true;
@@ -1532,12 +1623,7 @@ fn launch_gui_calculator_app(state: &mut UiState) {
 }
 
 fn launch_gui_stats_app(state: &mut UiState) {
-    launch_gui_userspace_app(
-        state,
-        GUI_STATS_PATH,
-        "gui_stats",
-        GuiAppKind::Stats,
-    );
+    launch_gui_userspace_app(state, GUI_STATS_PATH, "gui_stats", GuiAppKind::Stats);
 }
 
 fn launch_gui_file_manager_app(state: &mut UiState) {
@@ -1553,11 +1639,36 @@ fn put_pixel(fb: Framebuffer, _width: usize, _height: usize, x: usize, y: usize,
     fb.put_pixel(x, y, color);
 }
 
-fn draw_rect(fb: Framebuffer, _width: usize, _height: usize, x: usize, y: usize, w: usize, h: usize, color: u32) {
+#[inline(always)]
+fn put_pixel_clipped(fb: Framebuffer, x: usize, y: usize, color: u32) {
+    unsafe {
+        fb.put_pixel_unchecked(x, y, color);
+    }
+}
+
+fn draw_rect(
+    fb: Framebuffer,
+    _width: usize,
+    _height: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    color: u32,
+) {
     fb.fill_rect(Rect::new(x, y, w, h), color);
 }
 
-fn draw_rect_border(fb: Framebuffer, _width: usize, _height: usize, x: usize, y: usize, w: usize, h: usize, color: u32) {
+fn draw_rect_border(
+    fb: Framebuffer,
+    _width: usize,
+    _height: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    color: u32,
+) {
     fb.stroke_rect(Rect::new(x, y, w, h), color);
 }
 
@@ -1574,7 +1685,15 @@ fn rgb_blend(dst: u32, src: u32, alpha: u32) -> u32 {
         | ((sb * alpha + db * inv) / 255)
 }
 
-fn rounded_contains(px: usize, py: usize, x: usize, y: usize, w: usize, h: usize, radius: usize) -> bool {
+fn rounded_contains(
+    px: usize,
+    py: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    radius: usize,
+) -> bool {
     if w == 0 || h == 0 {
         return false;
     }
@@ -1668,8 +1787,9 @@ fn rebuild_blur_cache(width: usize, height: usize) {
                     b += (color & 0xff) * weight;
                 }
 
-                BLUR_CACHE[y * width + x] =
-                    ((r / BLUR_WEIGHT_SUM) << 16) | ((g / BLUR_WEIGHT_SUM) << 8) | (b / BLUR_WEIGHT_SUM);
+                BLUR_CACHE[y * width + x] = ((r / BLUR_WEIGHT_SUM) << 16)
+                    | ((g / BLUR_WEIGHT_SUM) << 8)
+                    | (b / BLUR_WEIGHT_SUM);
             }
         }
 
@@ -1683,7 +1803,8 @@ fn rebuild_blur_cache(width: usize, height: usize) {
 fn blurred_desktop_pixel(x: usize, y: usize, width: usize, height: usize) -> u32 {
     unsafe {
         if BLUR_CACHE_READY && BLUR_CACHE_WIDTH == width && BLUR_CACHE_HEIGHT == height {
-            return BLUR_CACHE[y.min(height.saturating_sub(1)) * width + x.min(width.saturating_sub(1))];
+            return BLUR_CACHE
+                [y.min(height.saturating_sub(1)) * width + x.min(width.saturating_sub(1))];
         }
     }
 
@@ -1707,11 +1828,13 @@ fn draw_blur_round_rect(
     };
 
     for py in rect.y..rect.bottom() {
-        for px in rect.x..rect.right() {
-            if rounded_contains(px, py, x, y, w, h, radius) {
-                let blurred = blurred_desktop_pixel(px, py, width, height);
-                put_pixel(fb, width, height, px, py, rgb_blend(blurred, tint, tint_alpha));
-            }
+        let (span_x, span_w) = rounded_row_span(py, x, y, w, h, radius);
+        let Some(span) = Rect::new(span_x, py, span_w, 1).clipped(width, height) else {
+            continue;
+        };
+        for px in span.x..span.right() {
+            let blurred = blurred_desktop_pixel(px, py, width, height);
+            put_pixel_clipped(fb, px, py, rgb_blend(blurred, tint, tint_alpha));
         }
     }
 }
@@ -1735,14 +1858,26 @@ fn draw_rgba_icon(fb: Framebuffer, width: usize, height: usize, x: usize, y: usi
                 continue;
             }
 
-            let src_color = ((data[src] as u32) << 16) | ((data[src + 1] as u32) << 8) | data[src + 2] as u32;
+            let src_color =
+                ((data[src] as u32) << 16) | ((data[src + 1] as u32) << 8) | data[src + 2] as u32;
             let dst_color = fb.read_pixel(px, py);
-            put_pixel(fb, width, height, px, py, rgb_blend(dst_color, src_color, alpha));
+            put_pixel(
+                fb,
+                width,
+                height,
+                px,
+                py,
+                rgb_blend(dst_color, src_color, alpha),
+            );
         }
     }
 }
 
 fn apply_brightness(fb: Framebuffer, width: usize, height: usize, state: &UiState, rect: Rect) {
+    if state.brightness >= 100 {
+        return;
+    }
+
     let Some(rect) = rect.clipped(width, height) else {
         return;
     };
@@ -1754,26 +1889,90 @@ fn apply_brightness(fb: Framebuffer, width: usize, height: usize, state: &UiStat
             let r = ((color >> 16) & 0xff) * brightness / 100;
             let g = ((color >> 8) & 0xff) * brightness / 100;
             let b = (color & 0xff) * brightness / 100;
-            put_pixel(fb, width, height, x, y, (r << 16) | (g << 8) | b);
+            put_pixel_clipped(fb, x, y, (r << 16) | (g << 8) | b);
         }
     }
 }
 
-fn draw_round_rect(fb: Framebuffer, width: usize, height: usize, x: usize, y: usize, w: usize, h: usize, radius: usize, color: u32) {
+fn rounded_row_span(
+    py: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    radius: usize,
+) -> (usize, usize) {
+    if w == 0 || h == 0 {
+        return (x, 0);
+    }
+
+    let r = radius.min(w / 2).min(h / 2);
+    if r == 0 {
+        return (x, w);
+    }
+
+    let mut inset = 0usize;
+    if py < y.saturating_add(r) {
+        let dy = y.saturating_add(r).saturating_sub(py);
+        inset = rounded_inset_for_dy(r, dy);
+    } else {
+        let bottom_arc = y.saturating_add(h).saturating_sub(r + 1);
+        if py > bottom_arc {
+            let dy = py.saturating_sub(bottom_arc);
+            inset = rounded_inset_for_dy(r, dy);
+        }
+    }
+
+    let span_w = w.saturating_sub(inset.saturating_mul(2));
+    (x.saturating_add(inset), span_w)
+}
+
+fn rounded_inset_for_dy(radius: usize, dy: usize) -> usize {
+    let r2 = radius.saturating_mul(radius);
+    let dy2 = dy.saturating_mul(dy);
+    if dy2 >= r2 {
+        return radius;
+    }
+
+    let mut dx = radius;
+    while dx > 0 && dx.saturating_mul(dx).saturating_add(dy2) > r2 {
+        dx -= 1;
+    }
+    radius.saturating_sub(dx)
+}
+
+fn draw_round_rect(
+    fb: Framebuffer,
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    radius: usize,
+    color: u32,
+) {
     let Some(rect) = Rect::new(x, y, w, h).clipped(width, height) else {
         return;
     };
 
     for py in rect.y..rect.bottom() {
-        for px in rect.x..rect.right() {
-            if rounded_contains(px, py, x, y, w, h, radius) {
-                put_pixel(fb, width, height, px, py, color);
-            }
-        }
+        let (span_x, span_w) = rounded_row_span(py, x, y, w, h, radius);
+        fb.fill_rect(Rect::new(span_x, py, span_w, 1), color);
     }
 }
 
-fn draw_round_rect_border(fb: Framebuffer, width: usize, height: usize, x: usize, y: usize, w: usize, h: usize, radius: usize, color: u32) {
+fn draw_round_rect_border(
+    fb: Framebuffer,
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    radius: usize,
+    color: u32,
+) {
     if w < 2 || h < 2 {
         return;
     }
@@ -1785,7 +1984,8 @@ fn draw_round_rect_border(fb: Framebuffer, width: usize, height: usize, x: usize
     for py in rect.y..rect.bottom() {
         for px in rect.x..rect.right() {
             let outer = rounded_contains(px, py, x, y, w, h, radius);
-            let inner = rounded_contains(px, py, x + 1, y + 1, w - 2, h - 2, radius.saturating_sub(1));
+            let inner =
+                rounded_contains(px, py, x + 1, y + 1, w - 2, h - 2, radius.saturating_sub(1));
             if outer && !inner {
                 put_pixel(fb, width, height, px, py, color);
             }
@@ -1888,7 +2088,15 @@ fn draw_char(fb: Framebuffer, width: usize, height: usize, x: usize, y: usize, c
     }
 }
 
-fn draw_text(fb: Framebuffer, width: usize, height: usize, x: usize, y: usize, text: &str, color: u32) {
+fn draw_text(
+    fb: Framebuffer,
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    text: &str,
+    color: u32,
+) {
     for (i, ch) in text.bytes().enumerate() {
         draw_char(fb, width, height, x + i * 6, y, ch, color);
     }
@@ -1903,12 +2111,28 @@ fn draw_terminal_bridge(
     bridge: &GuiRuntimeBridge,
 ) {
     if !bridge.attempted {
-        draw_text(fb, width, height, x, y, "Terminal runtime bridge pending", MUTED);
+        draw_text(
+            fb,
+            width,
+            height,
+            x,
+            y,
+            "Terminal runtime bridge pending",
+            MUTED,
+        );
         return;
     }
 
     if !bridge.launched {
-        draw_text(fb, width, height, x, y, "Terminal runtime bridge failed", RED);
+        draw_text(
+            fb,
+            width,
+            height,
+            x,
+            y,
+            "Terminal runtime bridge failed",
+            RED,
+        );
         draw_text(fb, width, height, x, y + 20, bridge.error, MUTED);
         return;
     }
@@ -1923,20 +2147,60 @@ fn draw_terminal_bridge(
     let mut exit_len = 0usize;
     append_str(&mut exit_line, &mut exit_len, "exit code=");
     append_i32(&mut exit_line, &mut exit_len, bridge.exit_code);
-    draw_text(fb, width, height, x, y + 20, line_str(&exit_line, exit_len), TEXT);
+    draw_text(
+        fb,
+        width,
+        height,
+        x,
+        y + 20,
+        line_str(&exit_line, exit_len),
+        TEXT,
+    );
 
     if bridge.message_len > 0 {
         draw_text(fb, width, height, x, y + 40, "message:", MUTED);
-        draw_text(fb, width, height, x + 58, y + 40, bridge.message_str(), TEXT);
+        draw_text(
+            fb,
+            width,
+            height,
+            x + 58,
+            y + 40,
+            bridge.message_str(),
+            TEXT,
+        );
     } else {
         draw_text(fb, width, height, x, y + 40, "message: <none>", RED);
     }
 
     if bridge.ok {
-        draw_text(fb, width, height, x, y + 66, "Terminal runtime bridge OK", GREEN);
-        draw_text(fb, width, height, x, y + 86, "interactive input not implemented", MUTED);
+        draw_text(
+            fb,
+            width,
+            height,
+            x,
+            y + 66,
+            "Terminal runtime bridge OK",
+            GREEN,
+        );
+        draw_text(
+            fb,
+            width,
+            height,
+            x,
+            y + 86,
+            "interactive input not implemented",
+            MUTED,
+        );
     } else {
-        draw_text(fb, width, height, x, y + 66, "Terminal runtime bridge failed", RED);
+        draw_text(
+            fb,
+            width,
+            height,
+            x,
+            y + 66,
+            "Terminal runtime bridge failed",
+            RED,
+        );
         draw_text(fb, width, height, x, y + 86, bridge.error, MUTED);
     }
 }
@@ -1944,7 +2208,8 @@ fn draw_terminal_bridge(
 fn dock_layout(width: usize, height: usize) -> (usize, usize, usize, usize, usize) {
     let icon_size = 48;
     let icon_spacing = 12;
-    let dock_width = DOCK_APPS.len() * icon_size + DOCK_APPS.len().saturating_sub(1) * icon_spacing + 48;
+    let dock_width =
+        DOCK_APPS.len() * icon_size + DOCK_APPS.len().saturating_sub(1) * icon_spacing + 48;
     let dock_x = width.saturating_sub(dock_width) / 2;
     let dock_y = height.saturating_sub(82);
     (dock_x, dock_y, dock_width, icon_size, icon_spacing)
@@ -1957,7 +2222,9 @@ fn wallpaper_pixel(x: usize, y: usize, width: usize, height: usize) -> u32 {
 
     let src_x = x.saturating_mul(WALLPAPER_WIDTH) / width.max(1);
     let src_y = y.saturating_mul(WALLPAPER_HEIGHT) / height.max(1);
-    let bmp_y = WALLPAPER_HEIGHT.saturating_sub(1).saturating_sub(src_y.min(WALLPAPER_HEIGHT - 1));
+    let bmp_y = WALLPAPER_HEIGHT
+        .saturating_sub(1)
+        .saturating_sub(src_y.min(WALLPAPER_HEIGHT - 1));
     let offset = WALLPAPER_OFFSET + bmp_y * WALLPAPER_STRIDE + src_x.min(WALLPAPER_WIDTH - 1) * 3;
 
     if offset + 2 >= wallpaper.len() {
@@ -1979,7 +2246,14 @@ fn desktop_pixel(x: usize, y: usize, width: usize, height: usize) -> u32 {
     wallpaper_pixel(x, y, width, height)
 }
 
-fn draw_icon_symbol(fb: Framebuffer, width: usize, height: usize, x: usize, y: usize, app_type: AppType) {
+fn draw_icon_symbol(
+    fb: Framebuffer,
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    app_type: AppType,
+) {
     let cx = x + 24;
     let cy = y + 24;
     match app_type {
@@ -2012,7 +2286,14 @@ fn draw_icon_symbol(fb: Framebuffer, width: usize, height: usize, x: usize, y: u
     }
 }
 
-fn draw_traffic_button(fb: Framebuffer, width: usize, height: usize, x: usize, y: usize, color: u32) {
+fn draw_traffic_button(
+    fb: Framebuffer,
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    color: u32,
+) {
     draw_round_rect(fb, width, height, x, y, 12, 12, 6, color);
     draw_round_rect_border(fb, width, height, x, y, 12, 12, 6, 0x9aa3ad);
 }
@@ -2045,86 +2326,355 @@ fn gui_app_active(state: &UiState, app_type: AppType) -> bool {
 
 fn draw_dock(fb: Framebuffer, width: usize, height: usize, state: &UiState) {
     let (dock_x, dock_y, dock_width, icon_size, icon_spacing) = dock_layout(width, height);
-    draw_round_rect(fb, width, height, dock_x + 8, dock_y + 8, dock_width, 68, 20, SHADOW);
-    draw_blur_round_rect(fb, width, height, dock_x, dock_y, dock_width, 68, 20, GLASS, 182);
-    draw_blur_round_rect(fb, width, height, dock_x + 2, dock_y + 2, dock_width.saturating_sub(4), 64, 18, 0x202a31, 156);
-    draw_round_rect_border(fb, width, height, dock_x, dock_y, dock_width, 68, 20, GLASS_EDGE);
+    draw_round_rect(
+        fb,
+        width,
+        height,
+        dock_x + 8,
+        dock_y + 8,
+        dock_width,
+        68,
+        20,
+        SHADOW,
+    );
+    draw_blur_round_rect(
+        fb, width, height, dock_x, dock_y, dock_width, 68, 20, GLASS, 182,
+    );
+    draw_blur_round_rect(
+        fb,
+        width,
+        height,
+        dock_x + 2,
+        dock_y + 2,
+        dock_width.saturating_sub(4),
+        64,
+        18,
+        0x202a31,
+        156,
+    );
+    draw_round_rect_border(
+        fb, width, height, dock_x, dock_y, dock_width, 68, 20, GLASS_EDGE,
+    );
 
     let first_icon_x = dock_x + 24;
     for i in 0..DOCK_APPS.len() {
         let icon_x = first_icon_x + i * (icon_size + icon_spacing);
         let icon_y = dock_y + 10;
-        draw_round_rect(fb, width, height, icon_x + 3, icon_y + 5, icon_size, icon_size, 12, SHADOW);
-        draw_round_rect(fb, width, height, icon_x, icon_y, icon_size, icon_size, 12, 0x000000);
-        draw_round_rect_border(fb, width, height, icon_x, icon_y, icon_size, icon_size, 12, 0x2d353b);
+        draw_round_rect(
+            fb,
+            width,
+            height,
+            icon_x + 3,
+            icon_y + 5,
+            icon_size,
+            icon_size,
+            12,
+            SHADOW,
+        );
+        draw_round_rect(
+            fb, width, height, icon_x, icon_y, icon_size, icon_size, 12, 0x000000,
+        );
+        draw_round_rect_border(
+            fb, width, height, icon_x, icon_y, icon_size, icon_size, 12, 0x2d353b,
+        );
         match DOCK_APPS[i].0 {
-            AppType::Terminal => draw_rgba_icon(fb, width, height, icon_x + 2, icon_y + 2, TERMINAL_ICON),
-            AppType::Calculator => draw_rgba_icon(fb, width, height, icon_x + 2, icon_y + 2, CALCULATOR_ICON),
-            AppType::Monitor => draw_rgba_icon(fb, width, height, icon_x + 2, icon_y + 2, MONITOR_ICON),
+            AppType::Terminal => {
+                draw_rgba_icon(fb, width, height, icon_x + 2, icon_y + 2, TERMINAL_ICON)
+            }
+            AppType::Calculator => {
+                draw_rgba_icon(fb, width, height, icon_x + 2, icon_y + 2, CALCULATOR_ICON)
+            }
+            AppType::Monitor => {
+                draw_rgba_icon(fb, width, height, icon_x + 2, icon_y + 2, MONITOR_ICON)
+            }
             AppType::Editor => draw_rgba_icon(fb, width, height, icon_x + 2, icon_y + 2, TEXT_ICON),
             _ => draw_icon_symbol(fb, width, height, icon_x, icon_y, DOCK_APPS[i].0),
         }
         let active = gui_app_active(state, DOCK_APPS[i].0);
-        draw_round_rect(fb, width, height, icon_x + 18, icon_y + icon_size + 7, 12, 3, 2, if active { GREEN } else { 0x56616a });
-        draw_text(fb, width, height, icon_x + 8, icon_y + icon_size + 12, DOCK_APPS[i].2, MUTED);
+        draw_round_rect(
+            fb,
+            width,
+            height,
+            icon_x + 18,
+            icon_y + icon_size + 7,
+            12,
+            3,
+            2,
+            if active { GREEN } else { 0x56616a },
+        );
+        draw_text(
+            fb,
+            width,
+            height,
+            icon_x + 8,
+            icon_y + icon_size + 12,
+            DOCK_APPS[i].2,
+            MUTED,
+        );
     }
 }
 
-fn draw_finder_button(fb: Framebuffer, width: usize, height: usize, x: usize, y: usize, label: &str, active: bool) {
+fn draw_finder_button(
+    fb: Framebuffer,
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    label: &str,
+    active: bool,
+) {
     let fill = if active { 0x173622 } else { 0x141b20 };
     let border = if active { GREEN } else { 0x2f3a42 };
     draw_round_rect(fb, width, height, x, y, 132, 34, 10, fill);
     draw_round_rect_border(fb, width, height, x, y, 132, 34, 10, border);
-    draw_round_rect(fb, width, height, x + 10, y + 10, 14, 14, 7, if active { GREEN } else { MUTED });
+    draw_round_rect(
+        fb,
+        width,
+        height,
+        x + 10,
+        y + 10,
+        14,
+        14,
+        7,
+        if active { GREEN } else { MUTED },
+    );
     draw_text(fb, width, height, x + 34, y + 13, label, TEXT);
 }
 
-fn draw_window(fb: Framebuffer, width: usize, height: usize, window: &window_manager::Window, state: &UiState) {
-    draw_round_rect(fb, width, height, window.x + 10, window.y + 12, window.width, window.height, 14, SHADOW);
-    draw_round_rect(fb, width, height, window.x, window.y, window.width, window.height, 14, WINDOW_BG);
-    draw_rect(fb, width, height, window.x, window.y, window.width, 34, WINDOW_TITLE);
-    draw_rect(fb, width, height, window.x, window.y + 33, window.width, 1, 0x2f3a42);
-    draw_round_rect_border(fb, width, height, window.x, window.y, window.width, window.height, 14, GLASS_EDGE);
+fn draw_window(
+    fb: Framebuffer,
+    width: usize,
+    height: usize,
+    window: &window_manager::Window,
+    state: &UiState,
+) {
+    draw_round_rect(
+        fb,
+        width,
+        height,
+        window.x + 10,
+        window.y + 12,
+        window.width,
+        window.height,
+        14,
+        SHADOW,
+    );
+    draw_round_rect(
+        fb,
+        width,
+        height,
+        window.x,
+        window.y,
+        window.width,
+        window.height,
+        14,
+        WINDOW_BG,
+    );
+    draw_rect(
+        fb,
+        width,
+        height,
+        window.x,
+        window.y,
+        window.width,
+        34,
+        WINDOW_TITLE,
+    );
+    draw_rect(
+        fb,
+        width,
+        height,
+        window.x,
+        window.y + 33,
+        window.width,
+        1,
+        0x2f3a42,
+    );
+    draw_round_rect_border(
+        fb,
+        width,
+        height,
+        window.x,
+        window.y,
+        window.width,
+        window.height,
+        14,
+        GLASS_EDGE,
+    );
     draw_traffic_button(fb, width, height, window.x + 12, window.y + 11, RED);
     draw_traffic_button(fb, width, height, window.x + 32, window.y + 11, YELLOW);
     draw_traffic_button(fb, width, height, window.x + 52, window.y + 11, GREEN);
-    draw_text(fb, width, height, window.x + 82, window.y + 13, window.title, TEXT);
-    draw_rect(fb, width, height, window.x + window.width.saturating_sub(16), window.y + window.height.saturating_sub(5), 10, 1, 0x425047);
-    draw_rect(fb, width, height, window.x + window.width.saturating_sub(11), window.y + window.height.saturating_sub(10), 5, 1, 0x425047);
+    draw_text(
+        fb,
+        width,
+        height,
+        window.x + 82,
+        window.y + 13,
+        window.title,
+        TEXT,
+    );
+    draw_rect(
+        fb,
+        width,
+        height,
+        window.x + window.width.saturating_sub(16),
+        window.y + window.height.saturating_sub(5),
+        10,
+        1,
+        0x425047,
+    );
+    draw_rect(
+        fb,
+        width,
+        height,
+        window.x + window.width.saturating_sub(11),
+        window.y + window.height.saturating_sub(10),
+        5,
+        1,
+        0x425047,
+    );
 
     let x = window.x + 18;
     let y = window.y + 50;
     match window.app_type {
         AppType::Terminal => {
-            draw_round_rect(fb, width, height, window.x + 8, window.y + 42, window.width.saturating_sub(16), window.height.saturating_sub(50), 8, TERMINAL_BG);
+            draw_round_rect(
+                fb,
+                width,
+                height,
+                window.x + 8,
+                window.y + 42,
+                window.width.saturating_sub(16),
+                window.height.saturating_sub(50),
+                8,
+                TERMINAL_BG,
+            );
             draw_terminal_bridge(fb, width, height, x, y, &state.terminal_bridge);
         }
         AppType::Calculator => {
-            draw_text(fb, width, height, x, y, "Calculator is provided by /app/gui_calculator", MUTED);
-            draw_text(fb, width, height, x, y + 24, "Launch it from dock or launcher.", GREEN);
+            draw_text(
+                fb,
+                width,
+                height,
+                x,
+                y,
+                "Calculator is provided by /app/gui_calculator",
+                MUTED,
+            );
+            draw_text(
+                fb,
+                width,
+                height,
+                x,
+                y + 24,
+                "Launch it from dock or launcher.",
+                GREEN,
+            );
         }
         AppType::Files => {
-            draw_round_rect(fb, width, height, window.x + 8, window.y + 42, 92, window.height.saturating_sub(50), 8, 0x111820);
+            draw_round_rect(
+                fb,
+                width,
+                height,
+                window.x + 8,
+                window.y + 42,
+                92,
+                window.height.saturating_sub(50),
+                8,
+                0x111820,
+            );
             draw_text(fb, width, height, x, y, "Favorites", MUTED);
             draw_text(fb, width, height, x, y + 24, "Widgets", GREEN);
             draw_text(fb, width, height, x + 110, y, "Finder controls", TEXT);
-            draw_finder_button(fb, width, height, x + 110, y + 28, "Launcher", state.launcher_open);
-            draw_finder_button(fb, width, height, x + 110, y + 72, "Quick Panel", state.quick_open);
-            draw_finder_button(fb, width, height, x + 110, y + 116, "Notifications", state.notifications_open);
+            draw_finder_button(
+                fb,
+                width,
+                height,
+                x + 110,
+                y + 28,
+                "Launcher",
+                state.launcher_open,
+            );
+            draw_finder_button(
+                fb,
+                width,
+                height,
+                x + 110,
+                y + 72,
+                "Quick Panel",
+                state.quick_open,
+            );
+            draw_finder_button(
+                fb,
+                width,
+                height,
+                x + 110,
+                y + 116,
+                "Notifications",
+                state.notifications_open,
+            );
         }
         AppType::Settings => {
             draw_text(fb, width, height, x, y, "Mode       GUI", TEXT);
-            draw_text(fb, width, height, x, y + 24, "Theme      Green Tea Dark", MUTED);
-            draw_text(fb, width, height, x, y + 48, "Runtime    Single task", MUTED);
+            draw_text(
+                fb,
+                width,
+                height,
+                x,
+                y + 24,
+                "Theme      Green Tea Dark",
+                MUTED,
+            );
+            draw_text(
+                fb,
+                width,
+                height,
+                x,
+                y + 48,
+                "Runtime    Single task",
+                MUTED,
+            );
         }
         AppType::Monitor => {
-            draw_text(fb, width, height, x, y, "Stats is provided by /app/gui_stats", MUTED);
-            draw_text(fb, width, height, x, y + 24, "Launch it from dock or launcher.", GREEN);
+            draw_text(
+                fb,
+                width,
+                height,
+                x,
+                y,
+                "Stats is provided by /app/gui_stats",
+                MUTED,
+            );
+            draw_text(
+                fb,
+                width,
+                height,
+                x,
+                y + 24,
+                "Launch it from dock or launcher.",
+                GREEN,
+            );
         }
         AppType::Editor => {
             draw_text(fb, width, height, x, y, "notes.txt", ACCENT);
-            draw_text(fb, width, height, x, y + 24, "Dunit GUI mode is alive.", TEXT);
-            draw_text(fb, width, height, x, y + 44, "Cursor and dock are kernel builtins.", MUTED);
+            draw_text(
+                fb,
+                width,
+                height,
+                x,
+                y + 24,
+                "Dunit GUI mode is alive.",
+                TEXT,
+            );
+            draw_text(
+                fb,
+                width,
+                height,
+                x,
+                y + 44,
+                "Cursor and dock are kernel builtins.",
+                MUTED,
+            );
         }
     }
 }
@@ -2138,17 +2688,57 @@ fn draw_gui_app_window(fb: Framebuffer, width: usize, height: usize, app: &GuiAp
     let window_height = rect.height;
     let x = rect.x;
     let y = rect.y;
-    draw_round_rect(fb, width, height, x + 10, y + 12, window_width, window_height, 14, SHADOW);
-    draw_round_rect(fb, width, height, x, y, window_width, window_height, 14, WINDOW_BG);
+    draw_round_rect(
+        fb,
+        width,
+        height,
+        x + 10,
+        y + 12,
+        window_width,
+        window_height,
+        14,
+        SHADOW,
+    );
+    draw_round_rect(
+        fb,
+        width,
+        height,
+        x,
+        y,
+        window_width,
+        window_height,
+        14,
+        WINDOW_BG,
+    );
     draw_rect(fb, width, height, x, y, window_width, 34, WINDOW_TITLE);
     draw_rect(fb, width, height, x, y + 33, window_width, 1, 0x2f3a42);
-    draw_round_rect_border(fb, width, height, x, y, window_width, window_height, 14, GLASS_EDGE);
+    draw_round_rect_border(
+        fb,
+        width,
+        height,
+        x,
+        y,
+        window_width,
+        window_height,
+        14,
+        GLASS_EDGE,
+    );
     draw_traffic_button(fb, width, height, x + 12, y + 11, RED);
     draw_traffic_button(fb, width, height, x + 32, y + 11, YELLOW);
     draw_traffic_button(fb, width, height, x + 52, y + 11, GREEN);
     draw_text(fb, width, height, x + 82, y + 13, app.title(), TEXT);
 
-    draw_round_rect(fb, width, height, x + 8, y + 42, window_width.saturating_sub(16), window_height.saturating_sub(50), 8, TERMINAL_BG);
+    draw_round_rect(
+        fb,
+        width,
+        height,
+        x + 8,
+        y + 42,
+        window_width.saturating_sub(16),
+        window_height.saturating_sub(50),
+        8,
+        TERMINAL_BG,
+    );
     let content_x = x + 18;
     let content_y = y + 50;
     let content_w = window_width.saturating_sub(36);
@@ -2190,7 +2780,11 @@ fn draw_gui_app_window(fb: Framebuffer, width: usize, height: usize, app: &GuiAp
         }
         let draw_x = content_x + local_x;
         let draw_y = content_y + local_y;
-        let color = if line.text().starts_with("Dunit GUI Terminal") { GREEN } else { TEXT };
+        let color = if line.text().starts_with("Dunit GUI Terminal") {
+            GREEN
+        } else {
+            TEXT
+        };
         draw_text(fb, width, height, draw_x, draw_y, line.text(), color);
     }
 }
@@ -2220,30 +2814,178 @@ fn draw_desktop_widgets(fb: Framebuffer, width: usize, height: usize, state: &Ui
     draw_rect(fb, width, height, 0, 40, width, 2, 0x1f292f);
     draw_round_rect(fb, width, height, 12, 8, 62, 24, 12, 0x172017);
     draw_text(fb, width, height, 24, 16, "Dunit", GREEN);
-    draw_round_rect(fb, width, height, 88, 8, 86, 24, 12, if state.launcher_open { 0x173622 } else { 0x111820 });
-    draw_text(fb, width, height, 104, 16, "Launcher", if state.launcher_open { GREEN } else { MUTED });
-    draw_round_rect(fb, width, height, 182, 8, 62, 24, 12, if state.quick_open { 0x173622 } else { 0x111820 });
-    draw_text(fb, width, height, 198, 16, "Quick", if state.quick_open { GREEN } else { MUTED });
-    draw_round_rect(fb, width, height, 252, 8, 72, 24, 12, if state.notifications_open { 0x173622 } else { 0x111820 });
-    draw_text(fb, width, height, 266, 16, "Alerts", if state.notifications_open { GREEN } else { MUTED });
+    draw_round_rect(
+        fb,
+        width,
+        height,
+        88,
+        8,
+        86,
+        24,
+        12,
+        if state.launcher_open {
+            0x173622
+        } else {
+            0x111820
+        },
+    );
+    draw_text(
+        fb,
+        width,
+        height,
+        104,
+        16,
+        "Launcher",
+        if state.launcher_open { GREEN } else { MUTED },
+    );
+    draw_round_rect(
+        fb,
+        width,
+        height,
+        182,
+        8,
+        62,
+        24,
+        12,
+        if state.quick_open { 0x173622 } else { 0x111820 },
+    );
+    draw_text(
+        fb,
+        width,
+        height,
+        198,
+        16,
+        "Quick",
+        if state.quick_open { GREEN } else { MUTED },
+    );
+    draw_round_rect(
+        fb,
+        width,
+        height,
+        252,
+        8,
+        72,
+        24,
+        12,
+        if state.notifications_open {
+            0x173622
+        } else {
+            0x111820
+        },
+    );
+    draw_text(
+        fb,
+        width,
+        height,
+        266,
+        16,
+        "Alerts",
+        if state.notifications_open {
+            GREEN
+        } else {
+            MUTED
+        },
+    );
 
-    draw_round_rect(fb, width, height, width.saturating_sub(172), 8, 148, 24, 12, GLASS);
-    draw_text(fb, width, height, width.saturating_sub(158), 16, "Brightness", MUTED);
-    draw_text(fb, width, height, width.saturating_sub(66), 16, "Live", GREEN);
+    draw_round_rect(
+        fb,
+        width,
+        height,
+        width.saturating_sub(172),
+        8,
+        148,
+        24,
+        12,
+        GLASS,
+    );
+    draw_text(
+        fb,
+        width,
+        height,
+        width.saturating_sub(158),
+        16,
+        "Brightness",
+        MUTED,
+    );
+    draw_text(
+        fb,
+        width,
+        height,
+        width.saturating_sub(66),
+        16,
+        "Live",
+        GREEN,
+    );
 
     draw_text(fb, width, height, 56, 78, "Dunit 2026", TEXT);
-    draw_text(fb, width, height, 56, 102, "Green Tea desktop with forest-green system accents", MUTED);
-    draw_text(fb, width, height, 56, 126, "Green Tea shell with live brightness control", GREEN);
+    draw_text(
+        fb,
+        width,
+        height,
+        56,
+        102,
+        "Green Tea desktop with forest-green system accents",
+        MUTED,
+    );
+    draw_text(
+        fb,
+        width,
+        height,
+        56,
+        126,
+        "Green Tea shell with live brightness control",
+        GREEN,
+    );
 
     let launcher_x = 56;
     let launcher_y = 172;
     if state.launcher_open {
-        draw_round_rect(fb, width, height, launcher_x + 10, launcher_y + 12, 330, 250, 16, SHADOW);
-        draw_blur_round_rect(fb, width, height, launcher_x, launcher_y, 330, 250, 16, GLASS, 184);
-        draw_round_rect_border(fb, width, height, launcher_x, launcher_y, 330, 250, 16, GLASS_EDGE);
-        draw_text(fb, width, height, launcher_x + 22, launcher_y + 20, "Application Launcher", TEXT);
-        draw_round_rect(fb, width, height, launcher_x + 20, launcher_y + 46, 290, 30, 15, 0x0d1215);
-        draw_text(fb, width, height, launcher_x + 36, launcher_y + 57, "Search apps, files, settings", MUTED);
+        draw_round_rect(
+            fb,
+            width,
+            height,
+            launcher_x + 10,
+            launcher_y + 12,
+            330,
+            250,
+            16,
+            SHADOW,
+        );
+        draw_blur_round_rect(
+            fb, width, height, launcher_x, launcher_y, 330, 250, 16, GLASS, 184,
+        );
+        draw_round_rect_border(
+            fb, width, height, launcher_x, launcher_y, 330, 250, 16, GLASS_EDGE,
+        );
+        draw_text(
+            fb,
+            width,
+            height,
+            launcher_x + 22,
+            launcher_y + 20,
+            "Application Launcher",
+            TEXT,
+        );
+        draw_round_rect(
+            fb,
+            width,
+            height,
+            launcher_x + 20,
+            launcher_y + 46,
+            290,
+            30,
+            15,
+            0x0d1215,
+        );
+        draw_text(
+            fb,
+            width,
+            height,
+            launcher_x + 36,
+            launcher_y + 57,
+            "Search apps, files, settings",
+            MUTED,
+        );
         let app_cards = [
             ("Terminal", GREEN, AppType::Terminal),
             ("Calculator", BLUE, AppType::Calculator),
@@ -2257,12 +2999,40 @@ fn draw_desktop_widgets(fb: Framebuffer, width: usize, height: usize, state: &Ui
             let x = launcher_x + 20 + col * 148;
             let y = launcher_y + 92 + row * 44;
             let active = gui_app_active(state, app_cards[i].2);
-            draw_round_rect(fb, width, height, x, y, 132, 34, 10, if active { 0x173622 } else { 0x141b20 });
-            draw_round_rect_border(fb, width, height, x, y, 132, 34, 10, if active { GREEN } else { 0x25313a });
+            draw_round_rect(
+                fb,
+                width,
+                height,
+                x,
+                y,
+                132,
+                34,
+                10,
+                if active { 0x173622 } else { 0x141b20 },
+            );
+            draw_round_rect_border(
+                fb,
+                width,
+                height,
+                x,
+                y,
+                132,
+                34,
+                10,
+                if active { GREEN } else { 0x25313a },
+            );
             draw_round_rect(fb, width, height, x + 10, y + 9, 16, 16, 5, app_cards[i].1);
             draw_text(fb, width, height, x + 34, y + 13, app_cards[i].0, TEXT);
         }
-        draw_text(fb, width, height, launcher_x + 22, launcher_y + 224, "Applications", GREEN);
+        draw_text(
+            fb,
+            width,
+            height,
+            launcher_x + 22,
+            launcher_y + 224,
+            "Applications",
+            GREEN,
+        );
     }
 
     let qs_x = width.saturating_sub(322);
@@ -2271,31 +3041,109 @@ fn draw_desktop_widgets(fb: Framebuffer, width: usize, height: usize, state: &Ui
         draw_round_rect(fb, width, height, qs_x + 8, qs_y + 10, 282, 154, 16, SHADOW);
         draw_blur_round_rect(fb, width, height, qs_x, qs_y, 282, 154, 16, GLASS, 188);
         draw_round_rect_border(fb, width, height, qs_x, qs_y, 282, 154, 16, GLASS_EDGE);
-        draw_text(fb, width, height, qs_x + 20, qs_y + 20, "Quick Settings", TEXT);
-        draw_text(fb, width, height, qs_x + 20, qs_y + 58, "Display brightness", TEXT);
-        draw_round_rect(fb, width, height, qs_x + 20, qs_y + 84, 240, 12, 6, 0x2a343c);
+        draw_text(
+            fb,
+            width,
+            height,
+            qs_x + 20,
+            qs_y + 20,
+            "Quick Settings",
+            TEXT,
+        );
+        draw_text(
+            fb,
+            width,
+            height,
+            qs_x + 20,
+            qs_y + 58,
+            "Display brightness",
+            TEXT,
+        );
+        draw_round_rect(
+            fb,
+            width,
+            height,
+            qs_x + 20,
+            qs_y + 84,
+            240,
+            12,
+            6,
+            0x2a343c,
+        );
         let fill = 240usize.saturating_mul(state.brightness as usize) / 100;
         draw_round_rect(fb, width, height, qs_x + 20, qs_y + 84, fill, 12, 6, GREEN);
-        draw_text(fb, width, height, qs_x + 20, qs_y + 116, "40     55     70     85     100", MUTED);
+        draw_text(
+            fb,
+            width,
+            height,
+            qs_x + 20,
+            qs_y + 116,
+            "40     55     70     85     100",
+            MUTED,
+        );
     }
 
     let note_x = width.saturating_sub(322);
     let note_y = qs_y + 376;
     if state.notifications_open {
-        draw_round_rect(fb, width, height, note_x + 8, note_y + 10, 282, 96, 16, SHADOW);
+        draw_round_rect(
+            fb,
+            width,
+            height,
+            note_x + 8,
+            note_y + 10,
+            282,
+            96,
+            16,
+            SHADOW,
+        );
         draw_blur_round_rect(fb, width, height, note_x, note_y, 282, 96, 16, GLASS, 188);
         draw_round_rect_border(fb, width, height, note_x, note_y, 282, 96, 16, GLASS_EDGE);
-        draw_text(fb, width, height, note_x + 20, note_y + 18, "Notifications", TEXT);
-        draw_round_rect(fb, width, height, note_x + 20, note_y + 42, 242, 38, 12, 0x12191e);
-        draw_text(fb, width, height, note_x + 34, note_y + 54, "Dunit shell is running", GREEN);
-        draw_text(fb, width, height, note_x + 34, note_y + 68, "Back buffer and input active", MUTED);
+        draw_text(
+            fb,
+            width,
+            height,
+            note_x + 20,
+            note_y + 18,
+            "Notifications",
+            TEXT,
+        );
+        draw_round_rect(
+            fb,
+            width,
+            height,
+            note_x + 20,
+            note_y + 42,
+            242,
+            38,
+            12,
+            0x12191e,
+        );
+        draw_text(
+            fb,
+            width,
+            height,
+            note_x + 34,
+            note_y + 54,
+            "Dunit shell is running",
+            GREEN,
+        );
+        draw_text(
+            fb,
+            width,
+            height,
+            note_x + 34,
+            note_y + 68,
+            "Back buffer and input active",
+            MUTED,
+        );
     }
 }
 
 fn redraw_full_screen(fb: Framebuffer, width: usize, height: usize, state: &UiState) {
     for y in 0..height {
         for x in 0..width {
-            put_pixel(fb, width, height, x, y, desktop_pixel(x, y, width, height));
+            put_pixel_clipped(fb, x, y, desktop_pixel(x, y, width, height));
         }
     }
 
@@ -2324,7 +3172,7 @@ fn redraw_region(fb: Framebuffer, width: usize, height: usize, rect: Rect, state
 
     for y in rect.y..rect.bottom() {
         for x in rect.x..rect.right() {
-            put_pixel(fb, width, height, x, y, desktop_pixel(x, y, width, height));
+            put_pixel_clipped(fb, x, y, desktop_pixel(x, y, width, height));
         }
     }
 
@@ -2345,7 +3193,8 @@ fn redraw_region(fb: Framebuffer, width: usize, height: usize, rect: Rect, state
     if let Some(wm) = window_manager::get_wm() {
         for window in wm.get_windows() {
             if window.visible {
-                let window_rect = Rect::new(window.x, window.y, window.width + 12, window.height + 14);
+                let window_rect =
+                    Rect::new(window.x, window.y, window.width + 12, window.height + 14);
                 if rects_intersect(rect, window_rect) {
                     draw_window(fb, width, height, window, state);
                 }
@@ -2357,7 +3206,15 @@ fn redraw_region(fb: Framebuffer, width: usize, height: usize, rect: Rect, state
     while app_index < MAX_GUI_APPS {
         if app_index != state.focused_gui_app {
             if let Some(gui_rect) = gui_app_window_rect(width, height, &state.gui_apps[app_index]) {
-                if rects_intersect(rect, Rect::new(gui_rect.x, gui_rect.y, gui_rect.width + 12, gui_rect.height + 14)) {
+                if rects_intersect(
+                    rect,
+                    Rect::new(
+                        gui_rect.x,
+                        gui_rect.y,
+                        gui_rect.width + 12,
+                        gui_rect.height + 14,
+                    ),
+                ) {
                     draw_gui_app_window(fb, width, height, &state.gui_apps[app_index]);
                 }
             }
@@ -2365,8 +3222,18 @@ fn redraw_region(fb: Framebuffer, width: usize, height: usize, rect: Rect, state
         app_index += 1;
     }
     if state.focused_gui_app < MAX_GUI_APPS {
-        if let Some(gui_rect) = gui_app_window_rect(width, height, &state.gui_apps[state.focused_gui_app]) {
-            if rects_intersect(rect, Rect::new(gui_rect.x, gui_rect.y, gui_rect.width + 12, gui_rect.height + 14)) {
+        if let Some(gui_rect) =
+            gui_app_window_rect(width, height, &state.gui_apps[state.focused_gui_app])
+        {
+            if rects_intersect(
+                rect,
+                Rect::new(
+                    gui_rect.x,
+                    gui_rect.y,
+                    gui_rect.width + 12,
+                    gui_rect.height + 14,
+                ),
+            ) {
                 draw_gui_app_window(fb, width, height, &state.gui_apps[state.focused_gui_app]);
             }
         }
@@ -2379,7 +3246,14 @@ fn redraw_region(fb: Framebuffer, width: usize, height: usize, rect: Rect, state
     apply_brightness(fb, width, height, state, rect);
 }
 
-fn save_cursor_area(fb: Framebuffer, _width: usize, _height: usize, x: i32, y: i32, buffer: &mut [u32; CURSOR_AREA]) {
+fn save_cursor_area(
+    fb: Framebuffer,
+    _width: usize,
+    _height: usize,
+    x: i32,
+    y: i32,
+    buffer: &mut [u32; CURSOR_AREA],
+) {
     let start_x = x.max(0) as usize;
     let start_y = y.max(0) as usize;
     for dy in 0..CURSOR_H {
@@ -2392,7 +3266,14 @@ fn save_cursor_area(fb: Framebuffer, _width: usize, _height: usize, x: i32, y: i
     }
 }
 
-fn restore_cursor_area(fb: Framebuffer, width: usize, height: usize, x: i32, y: i32, buffer: &[u32; CURSOR_AREA]) {
+fn restore_cursor_area(
+    fb: Framebuffer,
+    width: usize,
+    height: usize,
+    x: i32,
+    y: i32,
+    buffer: &[u32; CURSOR_AREA],
+) {
     let start_x = x.max(0) as usize;
     let start_y = y.max(0) as usize;
     for dy in 0..CURSOR_H {
@@ -2430,7 +3311,12 @@ fn cursor_rect(x: i32, y: i32) -> Rect {
 fn dock_icon_rect(index: usize, width: usize, height: usize) -> Rect {
     let (dock_x, dock_y, _dock_width, icon_size, icon_spacing) = dock_layout(width, height);
     let first_icon_x = dock_x + 24;
-    Rect::new(first_icon_x + index * (icon_size + icon_spacing), dock_y + 10, icon_size, icon_size)
+    Rect::new(
+        first_icon_x + index * (icon_size + icon_spacing),
+        dock_y + 10,
+        icon_size,
+        icon_size,
+    )
 }
 
 fn dock_app_index(app_type: AppType) -> Option<usize> {
@@ -2476,7 +3362,13 @@ fn handle_finder_widget_click(mx: usize, my: usize) -> Option<UiAction> {
     None
 }
 
-fn handle_widget_click(mx: usize, my: usize, width: usize, _height: usize, state: &UiState) -> Option<UiAction> {
+fn handle_widget_click(
+    mx: usize,
+    my: usize,
+    width: usize,
+    _height: usize,
+    state: &UiState,
+) -> Option<UiAction> {
     if inside(mx, my, 88, 8, 86, 24) {
         return Some(UiAction::ToggleLauncher);
     }
@@ -2602,7 +3494,6 @@ fn handle_keyboard_shortcuts(state: &mut UiState) -> bool {
             if let Some(key) = key {
                 if send_gui_key_event(&state.gui_apps[app_index], key) {
                     mark_gui_app_needs_run(state, app_index);
-                    redraw = true;
                 }
             }
         }
@@ -2613,7 +3504,9 @@ fn handle_keyboard_shortcuts(state: &mut UiState) -> bool {
 
 fn ease_step(step: usize, total: usize) -> usize {
     let t = step.saturating_mul(1000) / total.max(1);
-    t.saturating_mul(t).saturating_mul(3000usize.saturating_sub(2 * t)) / 1_000_000
+    t.saturating_mul(t)
+        .saturating_mul(3000usize.saturating_sub(2 * t))
+        / 1_000_000
 }
 
 fn lerp_usize(a: usize, b: usize, t: usize) -> usize {
@@ -2621,12 +3514,44 @@ fn lerp_usize(a: usize, b: usize, t: usize) -> usize {
 }
 
 fn draw_genie_frame(fb: Framebuffer, width: usize, height: usize, rect: Rect, color: u32) {
-    draw_round_rect(fb, width, height, rect.x + 8, rect.y + 10, rect.width, rect.height, 14, SHADOW);
-    draw_round_rect(fb, width, height, rect.x, rect.y, rect.width, rect.height, 14, color);
+    draw_round_rect(
+        fb,
+        width,
+        height,
+        rect.x + 8,
+        rect.y + 10,
+        rect.width,
+        rect.height,
+        14,
+        SHADOW,
+    );
+    draw_round_rect(
+        fb,
+        width,
+        height,
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
+        14,
+        color,
+    );
     if rect.height > 16 {
-        draw_round_rect(fb, width, height, rect.x, rect.y, rect.width, 12, 6, GLASS_SOFT);
+        draw_round_rect(
+            fb, width, height, rect.x, rect.y, rect.width, 12, 6, GLASS_SOFT,
+        );
     }
-    draw_round_rect_border(fb, width, height, rect.x, rect.y, rect.width, rect.height, 14, GREEN);
+    draw_round_rect_border(
+        fb,
+        width,
+        height,
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
+        14,
+        GREEN,
+    );
 }
 
 fn animate_genie(
@@ -2648,7 +3573,11 @@ fn animate_genie(
     let mut last_rect = dock_rect;
     for step in 0..=frames {
         let t = ease_step(step, frames);
-        let t = if opening { t } else { 1000usize.saturating_sub(t) };
+        let t = if opening {
+            t
+        } else {
+            1000usize.saturating_sub(t)
+        };
         let rect = Rect::new(
             lerp_usize(dock_rect.x, window_rect.x, t),
             lerp_usize(dock_rect.y, window_rect.y, t),
@@ -2689,15 +3618,18 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
     serial_write("[GUI] renderer init start\r\n");
     let front = Framebuffer::new(fb_addr, width, height, pitch);
     let back_buffer = BackBuffer::init(width, height);
-    let scene = back_buffer.as_ref().map(|buffer| buffer.canvas()).unwrap_or(front);
+    let scene = back_buffer
+        .as_ref()
+        .map(|buffer| buffer.canvas())
+        .unwrap_or(front);
     if back_buffer.is_some() {
         serial_write("[GUI] back buffer enabled\r\n");
     } else {
         serial_write("[GUI] back buffer unavailable, direct framebuffer fallback\r\n");
     }
     serial_write("[GUI] dirty cursor redraw enabled\r\n");
-    mouse::set_bounds(width, height);
-    mouse::set_position((width / 2) as i32, (height / 2) as i32);
+    crate::input::set_mouse_bounds(width, height);
+    crate::input::set_mouse_position((width / 2) as i32, (height / 2) as i32);
 
     let mut state = UiState::new();
 
@@ -2708,26 +3640,34 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
         buffer.present_full(front);
     }
 
-    let (mut old_mouse_x, mut old_mouse_y) = mouse::get_position();
-    let mut old_buttons = mouse::get_buttons();
+    let (mut old_mouse_x, mut old_mouse_y) = crate::input::mouse_position();
+    let mut old_buttons = crate::input::mouse_buttons();
     let mut pointer_op: Option<PointerOp> = None;
     let mut cursor_background = [0u32; CURSOR_AREA];
     let mut damage = DamageTracker::new();
     if back_buffer.is_none() {
-        save_cursor_area(front, width, height, old_mouse_x, old_mouse_y, &mut cursor_background);
+        save_cursor_area(
+            front,
+            width,
+            height,
+            old_mouse_x,
+            old_mouse_y,
+            &mut cursor_background,
+        );
     }
     draw_cursor(front, width, height, old_mouse_x, old_mouse_y);
 
     loop {
         let keyboard_redraw = handle_keyboard_shortcuts(&mut state);
         mouse::update();
-        let (mouse_x, mouse_y) = mouse::get_position();
-        let buttons = mouse::get_buttons();
+        let (mouse_x, mouse_y) = crate::input::mouse_position();
+        let buttons = crate::input::mouse_buttons();
         let pressed = (buttons & 0x01) != 0;
         let was_pressed = (old_buttons & 0x01) != 0;
         let cursor_moved = mouse_x != old_mouse_x || mouse_y != old_mouse_y;
         let mut full_redraw = keyboard_redraw;
         let mut drag_damage: Option<Rect> = None;
+        let mut update_damage: Option<Rect> = None;
 
         if pressed && !was_pressed {
             let mx = mouse_x as usize;
@@ -2749,14 +3689,15 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
             if !handled_click {
                 if let Some((app_index, _)) = topmost_gui_app_at(&state, mx, my, width, height) {
                     focus_gui_app(&mut state, app_index);
-                    let hit = gui_app_content_hit(&state.gui_apps[app_index], mx, my, width, height);
+                    let hit =
+                        gui_app_content_hit(&state.gui_apps[app_index], mx, my, width, height);
                     if let Some((local_x, local_y)) = hit {
-                    pointer_op = None;
-                    if send_gui_pointer_event(&state.gui_apps[app_index], local_x, local_y) {
-                        mark_gui_app_needs_run(&mut state, app_index);
-                    }
-                    full_redraw = true;
-                    handled_click = true;
+                        pointer_op = None;
+                        if send_gui_pointer_event(&state.gui_apps[app_index], local_x, local_y) {
+                            mark_gui_app_needs_run(&mut state, app_index);
+                        }
+                        full_redraw = true;
+                        handled_click = true;
                     }
                 }
             }
@@ -2765,8 +3706,8 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                 None
             } else {
                 window_manager::get_wm()
-                .map(|wm| wm.close_at(mx, my))
-                .unwrap_or(None)
+                    .map(|wm| wm.close_at(mx, my))
+                    .unwrap_or(None)
             };
 
             if let Some((x, y, w, h, app_type)) = closed {
@@ -2774,7 +3715,17 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                 let window_rect = Rect::new(x, y, w, h);
                 if let Some(index) = dock_app_index(app_type) {
                     let dock_rect = dock_icon_rect(index, width, height);
-                    animate_genie(scene, front, back_buffer.as_ref(), width, height, dock_rect, window_rect, false, &state);
+                    animate_genie(
+                        scene,
+                        front,
+                        back_buffer.as_ref(),
+                        width,
+                        height,
+                        dock_rect,
+                        window_rect,
+                        false,
+                        &state,
+                    );
                 }
                 full_redraw = true;
             } else if handled_click {
@@ -2786,7 +3737,17 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                 let window_rect = Rect::new(x, y, w, h);
                 if let Some(index) = dock_app_index(app_type) {
                     let dock_rect = dock_icon_rect(index, width, height);
-                    animate_genie(scene, front, back_buffer.as_ref(), width, height, dock_rect, window_rect, false, &state);
+                    animate_genie(
+                        scene,
+                        front,
+                        back_buffer.as_ref(),
+                        width,
+                        height,
+                        dock_rect,
+                        window_rect,
+                        false,
+                        &state,
+                    );
                 }
                 full_redraw = true;
             } else if let Some((x, y, w, h, app_type)) = window_manager::get_wm()
@@ -2817,18 +3778,41 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                 } else if app_type == AppType::Monitor {
                     launch_gui_stats_app(&mut state);
                 } else {
-                    let dock_rect = dock_icon_rect(dock_app_index(app_type).unwrap_or(0), width, height);
-                    let app_state = window_manager::get_wm()
-                        .and_then(|wm| wm.app_bounds(app_type).map(|bounds| (wm.app_visible(app_type), bounds)));
+                    let dock_rect =
+                        dock_icon_rect(dock_app_index(app_type).unwrap_or(0), width, height);
+                    let app_state = window_manager::get_wm().and_then(|wm| {
+                        wm.app_bounds(app_type)
+                            .map(|bounds| (wm.app_visible(app_type), bounds))
+                    });
                     if let Some((was_visible, bounds)) = app_state {
                         let window_rect = rect_from_bounds(bounds);
                         if was_visible {
                             if let Some(wm) = window_manager::get_wm() {
                                 wm.toggle_window(app_type);
                             }
-                            animate_genie(scene, front, back_buffer.as_ref(), width, height, dock_rect, window_rect, false, &state);
+                            animate_genie(
+                                scene,
+                                front,
+                                back_buffer.as_ref(),
+                                width,
+                                height,
+                                dock_rect,
+                                window_rect,
+                                false,
+                                &state,
+                            );
                         } else {
-                            animate_genie(scene, front, back_buffer.as_ref(), width, height, dock_rect, window_rect, true, &state);
+                            animate_genie(
+                                scene,
+                                front,
+                                back_buffer.as_ref(),
+                                width,
+                                height,
+                                dock_rect,
+                                window_rect,
+                                true,
+                                &state,
+                            );
                             if let Some(wm) = window_manager::get_wm() {
                                 wm.toggle_window(app_type);
                             }
@@ -2842,14 +3826,24 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                         focus_gui_app(&mut state, app_index);
                         begin_gui_app_drag(&state, app_index, mx, my, width, height)
                     })
-                    .or_else(|| window_manager::get_wm()
-                    .and_then(|wm| wm.begin_resize_at(mx, my))
-                    .map(|(idx, offset_x, offset_y)| PointerOp::Resize { idx, offset_x, offset_y })
                     .or_else(|| {
                         window_manager::get_wm()
-                            .and_then(|wm| wm.begin_drag_at(mx, my))
-                            .map(|(idx, offset_x, offset_y)| PointerOp::Drag { idx, offset_x, offset_y })
-                    }));
+                            .and_then(|wm| wm.begin_resize_at(mx, my))
+                            .map(|(idx, offset_x, offset_y)| PointerOp::Resize {
+                                idx,
+                                offset_x,
+                                offset_y,
+                            })
+                            .or_else(|| {
+                                window_manager::get_wm()
+                                    .and_then(|wm| wm.begin_drag_at(mx, my))
+                                    .map(|(idx, offset_x, offset_y)| PointerOp::Drag {
+                                        idx,
+                                        offset_x,
+                                        offset_y,
+                                    })
+                            })
+                    });
             }
         }
 
@@ -2858,8 +3852,14 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                 let mx = mouse_x.max(0) as usize;
                 let my = mouse_y.max(0) as usize;
                 match op {
-                    PointerOp::GuiAppDrag { index, offset_x, offset_y } => {
-                        if let Some((old_rect, new_rect)) = drag_gui_app_window(&mut state, index, mx, my, width, height, offset_x, offset_y) {
+                    PointerOp::GuiAppDrag {
+                        index,
+                        offset_x,
+                        offset_y,
+                    } => {
+                        if let Some((old_rect, new_rect)) = drag_gui_app_window(
+                            &mut state, index, mx, my, width, height, offset_x, offset_y,
+                        ) {
                             let window_damage = old_rect
                                 .union(new_rect)
                                 .union(cursor_rect(old_mouse_x, old_mouse_y))
@@ -2873,51 +3873,60 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                     }
                     PointerOp::Drag { .. } | PointerOp::Resize { .. } => {
                         if let Some(wm) = window_manager::get_wm() {
-                    let (idx, offset_x, offset_y) = match op {
-                        PointerOp::Drag { idx, offset_x, offset_y } => (idx, offset_x, offset_y),
-                        PointerOp::Resize { idx, offset_x, offset_y } => (idx, offset_x, offset_y),
-                        PointerOp::GuiAppDrag { .. } => unreachable!(),
-                    };
-                    let old_bounds = wm.window_bounds(idx);
-                    match op {
-                        PointerOp::Drag { .. } => {
-                            if let Some((x, y, _, _)) = old_bounds {
-                                let target_x = mx.saturating_sub(offset_x);
-                                let target_y = my.saturating_sub(offset_y);
-                                let smooth_x = (x.saturating_mul(2) + target_x) / 3;
-                                let smooth_y = (y.saturating_mul(2) + target_y) / 3;
-                                wm.drag_window(idx, smooth_x, smooth_y, width, height);
+                            let (idx, offset_x, offset_y) = match op {
+                                PointerOp::Drag {
+                                    idx,
+                                    offset_x,
+                                    offset_y,
+                                } => (idx, offset_x, offset_y),
+                                PointerOp::Resize {
+                                    idx,
+                                    offset_x,
+                                    offset_y,
+                                } => (idx, offset_x, offset_y),
+                                PointerOp::GuiAppDrag { .. } => unreachable!(),
+                            };
+                            let old_bounds = wm.window_bounds(idx);
+                            match op {
+                                PointerOp::Drag { .. } => {
+                                    if let Some((x, y, _, _)) = old_bounds {
+                                        let target_x = mx.saturating_sub(offset_x);
+                                        let target_y = my.saturating_sub(offset_y);
+                                        wm.drag_window(idx, target_x, target_y, width, height);
+                                    }
+                                }
+                                PointerOp::Resize { .. } => {
+                                    if let Some((x, y, _, _)) = old_bounds {
+                                        let target_w =
+                                            mx.saturating_sub(x).saturating_add(offset_x);
+                                        let target_h =
+                                            my.saturating_sub(y).saturating_add(offset_y);
+                                        wm.resize_window(idx, target_w, target_h, width, height);
+                                    }
+                                }
+                                PointerOp::GuiAppDrag { .. } => {}
                             }
-                        }
-                        PointerOp::Resize { .. } => {
-                            if let Some((x, y, _, _)) = old_bounds {
-                                let target_w = mx.saturating_sub(x).saturating_add(offset_x);
-                                let target_h = my.saturating_sub(y).saturating_add(offset_y);
-                                wm.resize_window(idx, target_w, target_h, width, height);
+                            let new_bounds = wm.window_bounds(idx);
+                            if let (Some(old_bounds), Some(new_bounds)) = (old_bounds, new_bounds) {
+                                if old_bounds == new_bounds && !cursor_moved {
+                                    old_mouse_x = mouse_x;
+                                    old_mouse_y = mouse_y;
+                                    old_buttons = buttons;
+                                    continue;
+                                }
+                                let window_damage = rect_from_bounds(old_bounds)
+                                    .union(rect_from_bounds(new_bounds))
+                                    .union(cursor_rect(old_mouse_x, old_mouse_y))
+                                    .union(cursor_rect(mouse_x, mouse_y));
+                                if back_buffer.is_some() {
+                                    drag_damage =
+                                        Some(padded_rect(window_damage, 10, width, height));
+                                } else {
+                                    full_redraw = true;
+                                }
+                            } else {
+                                full_redraw = true;
                             }
-                        }
-                        PointerOp::GuiAppDrag { .. } => {}
-                    }
-                    let new_bounds = wm.window_bounds(idx);
-                    if let (Some(old_bounds), Some(new_bounds)) = (old_bounds, new_bounds) {
-                        if old_bounds == new_bounds && !cursor_moved {
-                            old_mouse_x = mouse_x;
-                            old_mouse_y = mouse_y;
-                            old_buttons = buttons;
-                            continue;
-                        }
-                        let window_damage = rect_from_bounds(old_bounds)
-                            .union(rect_from_bounds(new_bounds))
-                            .union(cursor_rect(old_mouse_x, old_mouse_y))
-                            .union(cursor_rect(mouse_x, mouse_y));
-                        if back_buffer.is_some() {
-                            drag_damage = Some(padded_rect(window_damage, 10, width, height));
-                        } else {
-                            full_redraw = true;
-                        }
-                    } else {
-                        full_redraw = true;
-                    }
                         }
                     }
                 }
@@ -2935,6 +3944,8 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                     let before_rects = state.gui_apps[app_index].rect_count;
                     let before_window = state.gui_apps[app_index].window_id;
                     let before_pid = state.gui_apps[app_index].pid;
+                    let before_rect =
+                        gui_app_window_rect(width, height, &state.gui_apps[app_index]);
                     state.gui_app_needs_run[app_index] = false;
                     run_gui_app_once(&mut state, app_index);
                     if state.gui_apps[app_index].line_count != before_lines
@@ -2942,11 +3953,35 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                         || state.gui_apps[app_index].window_id != before_window
                         || state.gui_apps[app_index].pid != before_pid
                     {
-                        full_redraw = true;
+                        let after_rect =
+                            gui_app_window_rect(width, height, &state.gui_apps[app_index]);
+                        let app_damage = match (before_rect, after_rect) {
+                            (Some(before), Some(after)) => before.union(after),
+                            (Some(before), None) => before,
+                            (None, Some(after)) => after,
+                            (None, None) => Rect::new(0, 0, width, height),
+                        };
+                        let app_damage = padded_rect(
+                            app_damage
+                                .union(cursor_rect(old_mouse_x, old_mouse_y))
+                                .union(cursor_rect(mouse_x, mouse_y)),
+                            10,
+                            width,
+                            height,
+                        );
+                        update_damage = Some(match update_damage {
+                            Some(current) => current.union(app_damage),
+                            None => app_damage,
+                        });
                     }
                 }
             }
             app_index += 1;
+        }
+
+        if let (Some(drag), Some(update)) = (drag_damage, update_damage) {
+            drag_damage = Some(drag.union(update));
+            update_damage = None;
         }
 
         if full_redraw {
@@ -2954,12 +3989,34 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
             if let Some(buffer) = back_buffer.as_ref() {
                 buffer.present_full(front);
             } else {
-                save_cursor_area(front, width, height, mouse_x, mouse_y, &mut cursor_background);
+                save_cursor_area(
+                    front,
+                    width,
+                    height,
+                    mouse_x,
+                    mouse_y,
+                    &mut cursor_background,
+                );
             }
             draw_cursor(front, width, height, mouse_x, mouse_y);
         } else if let (Some(buffer), Some(rect)) = (back_buffer.as_ref(), drag_damage) {
             redraw_region(scene, width, height, rect, &state);
             buffer.present_rect(front, rect);
+            draw_cursor(front, width, height, mouse_x, mouse_y);
+        } else if let (Some(buffer), Some(rect)) = (back_buffer.as_ref(), update_damage) {
+            redraw_region(scene, width, height, rect, &state);
+            buffer.present_rect(front, rect);
+            draw_cursor(front, width, height, mouse_x, mouse_y);
+        } else if let Some(rect) = update_damage {
+            redraw_region(scene, width, height, rect, &state);
+            save_cursor_area(
+                front,
+                width,
+                height,
+                mouse_x,
+                mouse_y,
+                &mut cursor_background,
+            );
             draw_cursor(front, width, height, mouse_x, mouse_y);
         } else if cursor_moved {
             if let Some(buffer) = back_buffer.as_ref() {
@@ -2971,8 +4028,22 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                 }
                 draw_cursor(front, width, height, mouse_x, mouse_y);
             } else {
-                restore_cursor_area(front, width, height, old_mouse_x, old_mouse_y, &cursor_background);
-                save_cursor_area(front, width, height, mouse_x, mouse_y, &mut cursor_background);
+                restore_cursor_area(
+                    front,
+                    width,
+                    height,
+                    old_mouse_x,
+                    old_mouse_y,
+                    &cursor_background,
+                );
+                save_cursor_area(
+                    front,
+                    width,
+                    height,
+                    mouse_x,
+                    mouse_y,
+                    &mut cursor_background,
+                );
                 draw_cursor(front, width, height, mouse_x, mouse_y);
             }
         }
@@ -2982,7 +4053,9 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
         old_buttons = buttons;
 
         for _ in 0..100 {
-            unsafe { core::arch::asm!("pause"); }
+            unsafe {
+                core::arch::asm!("pause");
+            }
         }
     }
 }

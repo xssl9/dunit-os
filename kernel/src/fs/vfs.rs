@@ -27,7 +27,8 @@ static FILE_API_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/fil
 static ENV_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/env_test");
 static CALC_BYTES: &[u8] = include_bytes!("../../../build/userspace/calc");
 static GUI_PING_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_ping");
-static GUI_TERMINAL_STUB_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_terminal_stub");
+static GUI_TERMINAL_STUB_BYTES: &[u8] =
+    include_bytes!("../../../build/userspace/gui_terminal_stub");
 static GUI_CALCULATOR_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_calculator");
 static GUI_STATS_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_stats");
 static GUI_FILE_MANAGER_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_file_manager");
@@ -211,10 +212,7 @@ pub struct OpenFile {
 
 impl OpenFile {
     pub fn new(fs: *mut dyn FileSystem, handle: FileHandle) -> Self {
-        Self {
-            fs,
-            handle,
-        }
+        Self { fs, handle }
     }
 
     pub fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
@@ -285,19 +283,24 @@ impl VirtualFileSystem {
     }
 
     pub fn read(&mut self, fd: FileDescriptor, buf: &mut [u8]) -> Result<usize> {
-        let open_file = self.open_files.get_mut(&fd)
+        let open_file = self
+            .open_files
+            .get_mut(&fd)
             .ok_or(VfsError::InvalidDescriptor)?;
         open_file.read(buf)
     }
 
     pub fn write(&mut self, fd: FileDescriptor, buf: &[u8]) -> Result<usize> {
-        let open_file = self.open_files.get_mut(&fd)
+        let open_file = self
+            .open_files
+            .get_mut(&fd)
             .ok_or(VfsError::InvalidDescriptor)?;
         open_file.write(buf)
     }
 
     pub fn close(&mut self, fd: FileDescriptor) -> Result<()> {
-        self.open_files.remove(&fd)
+        self.open_files
+            .remove(&fd)
             .ok_or(VfsError::InvalidDescriptor)?;
         Ok(())
     }
@@ -363,11 +366,7 @@ pub fn normalize_path(path: &str, cwd: &str) -> Result<String> {
     Ok(String::from(normalized))
 }
 
-pub fn normalize_path_into<'a>(
-    path: &str,
-    cwd: &str,
-    out: &'a mut [u8; 256],
-) -> Result<&'a str> {
+pub fn normalize_path_into<'a>(path: &str, cwd: &str, out: &'a mut [u8; 256]) -> Result<&'a str> {
     let mut len = 1;
     out[0] = b'/';
 

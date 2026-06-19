@@ -35,9 +35,7 @@ struct KeyboardBuffer {
 
 impl KeyboardBuffer {
     fn new() -> Self {
-        Self {
-            buffer: Vec::new(),
-        }
+        Self { buffer: Vec::new() }
     }
 
     fn push(&mut self, scancode: u8) {
@@ -78,11 +76,11 @@ fn keyboard_buffer_has_data() -> bool {
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
-    
+
     #[test]
     fn prop_keyboard_interrupt_processing(scancode in any::<u8>()) {
         init_keyboard_buffer();
-        
+
         let frame = InterruptFrame {
             r15: 0,
             r14: 0,
@@ -107,9 +105,9 @@ proptest! {
             rsp: 0x7fff_ffff_f000,
             ss: 0x10,
         };
-        
+
         handle_keyboard_interrupt(&frame);
-        
+
         assert!(keyboard_buffer_has_data(), "Keyboard interrupt should process input and make it available");
     }
 }

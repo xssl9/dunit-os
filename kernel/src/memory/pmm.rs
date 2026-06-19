@@ -305,7 +305,11 @@ pub fn init() -> bool {
 
 pub fn init_pmm(memory_start: usize, memory_size: usize, bitmap: &'static mut [u8]) {
     unsafe {
-        PMM_INSTANCE = Some(PhysicalMemoryManager::new(memory_start, memory_size, bitmap));
+        PMM_INSTANCE = Some(PhysicalMemoryManager::new(
+            memory_start,
+            memory_size,
+            bitmap,
+        ));
     }
 }
 

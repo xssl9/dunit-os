@@ -18,6 +18,9 @@ What is still missing is a general driver model and real hardware/storage/networ
 
 - Framebuffer output for boot UI, terminal mode, and experimental GUI mode.
 - Keyboard input for terminal interaction and automated QEMU command injection.
+- Shared mouse input state used by PS/2 mouse packets and the early USB HID
+  mouse parser path.
+- PCI config-space scan that detects and logs USB controllers.
 - Serial output used by logs and userspace stdout/stderr smoke checks.
 - Basic port IO support through the HAL layer.
 - Timer/PIC initialization paths used by the boot flow.
@@ -26,11 +29,11 @@ What is still missing is a general driver model and real hardware/storage/networ
 
 ## Skeleton / Planned
 
-- PCI enumeration.
+- PCI enumeration beyond discovery logs.
 - ACPI support.
 - Disk driver, initially ATA/AHCI or a simpler QEMU-friendly target.
 - Network driver, likely E1000 or RTL8139 first.
-- USB stack.
+- USB stack: xHCI device enumeration and real HID polling/interrupt transfers.
 - Sound driver.
 - A cleaner device registration layer for future DevFS integration.
 
@@ -39,10 +42,12 @@ What is still missing is a general driver model and real hardware/storage/networ
 ## Development Order
 
 ```text
-PCI enumeration
+PCI enumeration hardening
+    -> block device abstraction
     -> disk driver
     -> network driver -> [[../Future/Network-Stack|Network Stack]]
-    -> USB / sound later
+    -> USB xHCI HID path
+    -> sound later
 
 ACPI
     -> power management

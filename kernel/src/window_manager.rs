@@ -95,10 +95,16 @@ impl WindowManager {
     }
 
     pub fn get_windows(&self) -> impl Iterator<Item = &Window> {
-        self.windows[..self.window_count].iter().filter_map(|w| w.as_ref())
+        self.windows[..self.window_count]
+            .iter()
+            .filter_map(|w| w.as_ref())
     }
 
-    pub fn close_at(&mut self, x: usize, y: usize) -> Option<(usize, usize, usize, usize, AppType)> {
+    pub fn close_at(
+        &mut self,
+        x: usize,
+        y: usize,
+    ) -> Option<(usize, usize, usize, usize, AppType)> {
         for i in (0..self.window_count).rev() {
             if let Some(ref mut window) = self.windows[i] {
                 if !window.visible {
@@ -108,7 +114,13 @@ impl WindowManager {
                 let close_x = window.x + 12;
                 let close_y = window.y + 11;
                 if x >= close_x && x < close_x + 12 && y >= close_y && y < close_y + 12 {
-                    let bounds = (window.x, window.y, window.width, window.height, window.app_type);
+                    let bounds = (
+                        window.x,
+                        window.y,
+                        window.width,
+                        window.height,
+                        window.app_type,
+                    );
                     window.visible = false;
                     return Some(bounds);
                 }
@@ -118,7 +130,11 @@ impl WindowManager {
         None
     }
 
-    pub fn minimize_at(&mut self, x: usize, y: usize) -> Option<(usize, usize, usize, usize, AppType)> {
+    pub fn minimize_at(
+        &mut self,
+        x: usize,
+        y: usize,
+    ) -> Option<(usize, usize, usize, usize, AppType)> {
         for i in (0..self.window_count).rev() {
             if let Some(ref mut window) = self.windows[i] {
                 if !window.visible {
@@ -128,7 +144,13 @@ impl WindowManager {
                 let button_x = window.x + 32;
                 let button_y = window.y + 11;
                 if x >= button_x && x < button_x + 12 && y >= button_y && y < button_y + 12 {
-                    let bounds = (window.x, window.y, window.width, window.height, window.app_type);
+                    let bounds = (
+                        window.x,
+                        window.y,
+                        window.width,
+                        window.height,
+                        window.app_type,
+                    );
                     window.visible = false;
                     return Some(bounds);
                 }
@@ -138,7 +160,13 @@ impl WindowManager {
         None
     }
 
-    pub fn zoom_at(&mut self, x: usize, y: usize, screen_width: usize, screen_height: usize) -> Option<(usize, usize, usize, usize, AppType)> {
+    pub fn zoom_at(
+        &mut self,
+        x: usize,
+        y: usize,
+        screen_width: usize,
+        screen_height: usize,
+    ) -> Option<(usize, usize, usize, usize, AppType)> {
         for i in (0..self.window_count).rev() {
             if let Some(ref mut window) = self.windows[i] {
                 if !window.visible {
@@ -148,7 +176,13 @@ impl WindowManager {
                 let button_x = window.x + 52;
                 let button_y = window.y + 11;
                 if x >= button_x && x < button_x + 12 && y >= button_y && y < button_y + 12 {
-                    let old = (window.x, window.y, window.width, window.height, window.app_type);
+                    let old = (
+                        window.x,
+                        window.y,
+                        window.width,
+                        window.height,
+                        window.app_type,
+                    );
                     if window.maximized {
                         window.x = window.restore_x;
                         window.y = window.restore_y;
@@ -183,7 +217,10 @@ impl WindowManager {
 
                 let inside_x = x >= window.x && x < window.x + window.width;
                 let inside_title = y >= window.y && y < window.y + 32;
-                let over_buttons = x >= window.x + 12 && x < window.x + 64 && y >= window.y + 11 && y < window.y + 23;
+                let over_buttons = x >= window.x + 12
+                    && x < window.x + 64
+                    && y >= window.y + 11
+                    && y < window.y + 23;
 
                 if inside_x && inside_title && !over_buttons {
                     return Some((i, x - window.x, y - window.y));
@@ -194,7 +231,14 @@ impl WindowManager {
         None
     }
 
-    pub fn drag_window(&mut self, idx: usize, x: usize, y: usize, screen_width: usize, screen_height: usize) {
+    pub fn drag_window(
+        &mut self,
+        idx: usize,
+        x: usize,
+        y: usize,
+        screen_width: usize,
+        screen_height: usize,
+    ) {
         if idx >= self.window_count {
             return;
         }
@@ -217,7 +261,11 @@ impl WindowManager {
 
                 let grip_x = window.x + window.width.saturating_sub(18);
                 let grip_y = window.y + window.height.saturating_sub(18);
-                if x >= grip_x && x < window.x + window.width && y >= grip_y && y < window.y + window.height {
+                if x >= grip_x
+                    && x < window.x + window.width
+                    && y >= grip_y
+                    && y < window.y + window.height
+                {
                     return Some((i, window.x + window.width - x, window.y + window.height - y));
                 }
             }
@@ -226,7 +274,14 @@ impl WindowManager {
         None
     }
 
-    pub fn resize_window(&mut self, idx: usize, width: usize, height: usize, screen_width: usize, screen_height: usize) {
+    pub fn resize_window(
+        &mut self,
+        idx: usize,
+        width: usize,
+        height: usize,
+        screen_width: usize,
+        screen_height: usize,
+    ) {
         if idx >= self.window_count {
             return;
         }

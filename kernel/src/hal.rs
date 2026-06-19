@@ -28,9 +28,9 @@ extern "C" {
 #[no_mangle]
 pub extern "C" fn interrupt_handler(frame: *const InterruptFrame) -> u64 {
     let frame = unsafe { &*frame };
-    
+
     use crate::interrupts::*;
-    
+
     match frame.int_no {
         0 => handle_divide_by_zero(frame),
         1 => handle_debug(frame),

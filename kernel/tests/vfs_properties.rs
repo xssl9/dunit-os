@@ -1,8 +1,8 @@
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 use std::string::String;
-use std::vec::Vec;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::vec::Vec;
 
 type FileDescriptor = u32;
 type FileHandle = usize;
@@ -105,30 +105,35 @@ impl VirtualFileSystem {
     fn open(&mut self, path: &str, flags: OpenFlags) -> Result<FileDescriptor> {
         let (fs, relative_path) = self.resolve_path(path)?;
         let handle = fs.open(relative_path, flags)?;
-        
+
         let fd = self.next_fd;
         self.next_fd += 1;
-        
+
         let open_file = OpenFile::new(fs, handle);
         self.open_files.insert(fd, open_file);
-        
+
         Ok(fd)
     }
 
     fn read(&mut self, fd: FileDescriptor, buf: &mut [u8]) -> Result<usize> {
-        let open_file = self.open_files.get_mut(&fd)
+        let open_file = self
+            .open_files
+            .get_mut(&fd)
             .ok_or(VfsError::InvalidDescriptor)?;
         open_file.read(buf)
     }
 
     fn write(&mut self, fd: FileDescriptor, buf: &[u8]) -> Result<usize> {
-        let open_file = self.open_files.get_mut(&fd)
+        let open_file = self
+            .open_files
+            .get_mut(&fd)
             .ok_or(VfsError::InvalidDescriptor)?;
         open_file.write(buf)
     }
 
     fn close(&mut self, fd: FileDescriptor) -> Result<()> {
-        self.open_files.remove(&fd)
+        self.open_files
+            .remove(&fd)
             .ok_or(VfsError::InvalidDescriptor)?;
         Ok(())
     }
@@ -186,7 +191,7 @@ proptest! {
     #[test]
     fn prop_file_open_returns_descriptor(filename in "[a-z]{1,10}") {
         static mut TEST_FS: Option<TestFs> = None;
-        
+
         unsafe {
             TEST_FS = Some(TestFs::new());
             if let Some(ref mut fs) = TEST_FS {
@@ -195,7 +200,7 @@ proptest! {
         }
 
         let mut vfs = VirtualFileSystem::new();
-        
+
         unsafe {
             if let Some(ref fs) = TEST_FS {
                 let fs_ref: &'static dyn FileSystem = std::mem::transmute(fs as &dyn FileSystem);
@@ -205,7 +210,7 @@ proptest! {
 
         let path = format!("/test/{}", filename);
         let result = vfs.open(&path, OpenFlags::ReadOnly);
-        
+
         assert!(result.is_ok());
         let fd = result.unwrap();
         assert!(fd >= 3);
@@ -214,9 +219,9 @@ proptest! {
     #[test]
     fn prop_file_not_found_error(filename in "[a-z]{1,10}", nonexistent in "[A-Z]{1,10}") {
         prop_assume!(filename != nonexistent.to_lowercase());
-        
+
         static mut TEST_FS: Option<TestFs> = None;
-        
+
         unsafe {
             TEST_FS = Some(TestFs::new());
             if let Some(ref mut fs) = TEST_FS {
@@ -225,7 +230,7 @@ proptest! {
         }
 
         let mut vfs = VirtualFileSystem::new();
-        
+
         unsafe {
             if let Some(ref fs) = TEST_FS {
                 let fs_ref: &'static dyn FileSystem = std::mem::transmute(fs as &dyn FileSystem);
@@ -235,7 +240,7 @@ proptest! {
 
         let path = format!("/test/{}", nonexistent);
         let result = vfs.open(&path, OpenFlags::ReadOnly);
-        
+
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), VfsError::NotFound);
     }
@@ -243,7 +248,7 @@ proptest! {
     #[test]
     fn prop_open_read_close_roundtrip(filename in "[a-z]{1,10}") {
         static mut TEST_FS: Option<TestFs> = None;
-        
+
         unsafe {
             TEST_FS = Some(TestFs::new());
             if let Some(ref mut fs) = TEST_FS {
@@ -252,7 +257,7 @@ proptest! {
         }
 
         let mut vfs = VirtualFileSystem::new();
-        
+
         unsafe {
             if let Some(ref fs) = TEST_FS {
                 let fs_ref: &'static dyn FileSystem = std::mem::transmute(fs as &dyn FileSystem);
@@ -261,16 +266,16 @@ proptest! {
         }
 
         let path = format!("/test/{}", filename);
-        
+
         let fd = vfs.open(&path, OpenFlags::ReadOnly).unwrap();
-        
+
         let mut buf = [0u8; 64];
         let bytes_read = vfs.read(fd, &mut buf).unwrap();
         assert!(bytes_read > 0);
-        
+
         let close_result = vfs.close(fd);
         assert!(close_result.is_ok());
-        
+
         let read_after_close = vfs.read(fd, &mut buf);
         assert!(read_after_close.is_err());
         assert_eq!(read_after_close.unwrap_err(), VfsError::InvalidDescriptor);

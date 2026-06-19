@@ -73,7 +73,7 @@ impl IpcManager {
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
-    
+
     #[test]
     fn prop_ipc_message_delivery(
         sender_id in 1u64..1000,
@@ -83,25 +83,25 @@ proptest! {
         buttons in 0u8..8
     ) {
         let mut ipc = IpcManager::new();
-        
+
         let sender = ProcessId(sender_id);
         let target = ProcessId(target_id);
-        
+
         let msg_type = MessageType::MouseEvent { x, y, buttons };
         let msg = Message::new(sender, msg_type);
-        
+
         let original_sender = msg.sender;
         let original_x = if let MessageType::MouseEvent { x, .. } = msg.msg_type { x } else { 0 };
         let original_y = if let MessageType::MouseEvent { y, .. } = msg.msg_type { y } else { 0 };
         let original_buttons = if let MessageType::MouseEvent { buttons, .. } = msg.msg_type { buttons } else { 0 };
-        
+
         assert!(ipc.send_message(target, msg).is_ok());
-        
+
         assert!(ipc.has_messages(target));
-        
+
         if let Some(received) = ipc.receive_message(target) {
             assert_eq!(received.sender, original_sender);
-            
+
             if let MessageType::MouseEvent { x: rx, y: ry, buttons: rb } = received.msg_type {
                 assert_eq!(rx, original_x);
                 assert_eq!(ry, original_y);
@@ -112,10 +112,10 @@ proptest! {
         } else {
             panic!("Message not received");
         }
-        
+
         assert!(!ipc.has_messages(target));
     }
-    
+
     #[test]
     fn prop_message_with_data(
         sender_id in 1u64..1000,
@@ -124,16 +124,16 @@ proptest! {
         data_len in 1usize..256
     ) {
         let mut ipc = IpcManager::new();
-        
+
         let sender = ProcessId(sender_id);
         let target = ProcessId(target_id);
-        
+
         let data = vec![data_byte; data_len];
         let msg_type = MessageType::RenderFrame { buffer_id: 42 };
         let msg = Message::with_data(sender, msg_type, &data);
-        
+
         assert!(ipc.send_message(target, msg).is_ok());
-        
+
         if let Some(received) = ipc.receive_message(target) {
             assert_eq!(received.sender, sender);
             assert_eq!(&received.data[..data_len], &data[..]);
@@ -141,7 +141,7 @@ proptest! {
             panic!("Message not received");
         }
     }
-    
+
     #[test]
     fn prop_multiple_messages_fifo(
         sender_id in 1u64..1000,
@@ -149,10 +149,10 @@ proptest! {
         num_messages in 1usize..20
     ) {
         let mut ipc = IpcManager::new();
-        
+
         let sender = ProcessId(sender_id);
         let target = ProcessId(target_id);
-        
+
         let mut sent_ids = Vec::new();
         for i in 0..num_messages {
             let msg_type = MessageType::WindowClose { window_id: i as u32 };
@@ -160,7 +160,7 @@ proptest! {
             sent_ids.push(i as u32);
             assert!(ipc.send_message(target, msg).is_ok());
         }
-        
+
         for expected_id in sent_ids {
             if let Some(received) = ipc.receive_message(target) {
                 if let MessageType::WindowClose { window_id } = received.msg_type {
@@ -172,7 +172,7 @@ proptest! {
                 panic!("Message not received");
             }
         }
-        
+
         assert!(!ipc.has_messages(target));
     }
 }

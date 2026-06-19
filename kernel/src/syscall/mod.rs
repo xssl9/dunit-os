@@ -228,13 +228,13 @@ fn is_valid_user_pointer(ptr: u64, size: usize) -> bool {
     if ptr == 0 {
         return false;
     }
-    
+
     let end = ptr.saturating_add(size as u64);
-    
+
     if end < ptr {
         return false;
     }
-    
+
     ptr >= USER_SPACE_START && end <= USER_SPACE_END
 }
 
@@ -245,7 +245,11 @@ fn validate_user_range(ptr: u64, size: usize) -> Result<(), i64> {
     }
 
     if !is_valid_user_pointer(ptr, size) {
-        syscall_log!("[SYSCALL] invalid user pointer: ptr={:#x}, len={}\r\n", ptr, size);
+        syscall_log!(
+            "[SYSCALL] invalid user pointer: ptr={:#x}, len={}\r\n",
+            ptr,
+            size
+        );
         return Err(EFAULT);
     }
 
@@ -266,7 +270,7 @@ fn is_valid_string_pointer(ptr: *const u8) -> bool {
     if ptr.is_null() {
         return false;
     }
-    
+
     let addr = ptr as u64;
     is_valid_user_pointer(addr, 1)
 }
@@ -288,7 +292,11 @@ pub fn copy_string_from_user(ptr: *const u8, max_len: usize) -> Result<String, i
         out.push(byte as char);
     }
 
-    syscall_log!("[SYSCALL] unterminated user string: ptr={:#x}, max_len={}\r\n", ptr as u64, max_len);
+    syscall_log!(
+        "[SYSCALL] unterminated user string: ptr={:#x}, max_len={}\r\n",
+        ptr as u64,
+        max_len
+    );
     Err(ENAMETOOLONG)
 }
 
@@ -303,7 +311,11 @@ pub fn copy_string_from_user_len(
     }
 
     if len > max_len {
-        syscall_log!("[SYSCALL] user string too large: len={}, max={}\r\n", len, max_len);
+        syscall_log!(
+            "[SYSCALL] user string too large: len={}, max={}\r\n",
+            len,
+            max_len
+        );
         return Err(ENAMETOOLONG);
     }
 
@@ -385,7 +397,13 @@ pub extern "C" fn syscall_handler(
         Syscall::ReceiveMessage => sys_receive_message(arg0 as *mut u8, arg1 as usize),
         Syscall::GetFramebuffer => sys_get_framebuffer(arg0 as *mut FbInfo),
         Syscall::DrawPixel => sys_draw_pixel(arg0 as u32, arg1 as u32, arg2 as u32),
-        Syscall::DrawRect => sys_draw_rect(arg0 as u32, arg1 as u32, arg2 as u32, arg3 as u32, arg4 as u32),
+        Syscall::DrawRect => sys_draw_rect(
+            arg0 as u32,
+            arg1 as u32,
+            arg2 as u32,
+            arg3 as u32,
+            arg4 as u32,
+        ),
         Syscall::GetKey => sys_get_key(),
         Syscall::GetMousePos => sys_get_mouse_pos(arg0 as *mut u32, arg1 as *mut u32),
         Syscall::SpawnProcess => sys_spawn_process(arg0 as *const u8, arg1 as usize),
@@ -400,7 +418,12 @@ pub extern "C" fn syscall_handler(
         Syscall::Yield => sys_yield(),
         Syscall::GetTerminalCursor => sys_get_terminal_cursor(arg0 as *mut TerminalCursorInfo),
         Syscall::GetSystemStats => sys_get_system_stats(arg0 as *mut SystemStats),
-        Syscall::Readdir => sys_readdir(arg0 as *const u8, arg1 as usize, arg2 as *mut UserDirEntry, arg3 as usize),
+        Syscall::Readdir => sys_readdir(
+            arg0 as *const u8,
+            arg1 as usize,
+            arg2 as *mut UserDirEntry,
+            arg3 as usize,
+        ),
         Syscall::Stat => sys_stat(arg0 as *const u8, arg1 as usize, arg2 as *mut UserFileStat),
     }
 }
@@ -429,7 +452,7 @@ fn sys_read(fd: u32, buf: *mut u8, count: usize) -> i64 {
     if !is_valid_fd_number(fd) {
         return EBADF;
     }
-    
+
     if count == 0 {
         return 0;
     }
@@ -471,10 +494,10 @@ fn sys_read(fd: u32, buf: *mut u8, count: usize) -> i64 {
     let mut kernel_buf = Vec::new();
     kernel_buf.resize(count, 0);
 
-    let bytes_read = match crate::fs::vfs::get_vfs()
-        .ok_or(EIO)
-        .and_then(|vfs| vfs.read(vfs_fd, &mut kernel_buf).map_err(vfs_error_to_errno))
-    {
+    let bytes_read = match crate::fs::vfs::get_vfs().ok_or(EIO).and_then(|vfs| {
+        vfs.read(vfs_fd, &mut kernel_buf)
+            .map_err(vfs_error_to_errno)
+    }) {
         Ok(bytes_read) => bytes_read,
         Err(error) => return error,
     };
@@ -490,7 +513,7 @@ fn sys_write(fd: u32, buf: *const u8, count: usize) -> i64 {
     if !is_valid_fd_number(fd) {
         return EBADF;
     }
-    
+
     if count == 0 {
         return 0;
     }
@@ -629,10 +652,10 @@ fn sys_readdir(
     };
 
     let mut kernel_entries = [crate::fs::vfs::DirEntry::empty(); MAX_USER_DIRENTS];
-    let count = match crate::fs::vfs::get_vfs()
-        .ok_or(EIO)
-        .and_then(|vfs| vfs.readdir_into_at(&cwd, &path, &mut kernel_entries[..capacity]).map_err(vfs_error_to_errno))
-    {
+    let count = match crate::fs::vfs::get_vfs().ok_or(EIO).and_then(|vfs| {
+        vfs.readdir_into_at(&cwd, &path, &mut kernel_entries[..capacity])
+            .map_err(vfs_error_to_errno)
+    }) {
         Ok(count) => count,
         Err(error) => return error,
     };
@@ -734,11 +757,11 @@ fn sys_mmap(addr: usize, length: usize, _prot: u32, _flags: u32) -> i64 {
     if length == 0 {
         return EINVAL;
     }
-    
+
     if addr != 0 && !is_valid_user_pointer(addr as u64, length) {
         return EINVAL;
     }
-    
+
     ENOSYS
 }
 
@@ -826,9 +849,7 @@ fn sys_send_message(target_pid: u32, msg: *const u8, len: usize) -> i64 {
         Ok(()) => {
             syscall_log(format_args!(
                 "[IPC] send from={} to={} len={}\n",
-                sender.0,
-                target.0,
-                len
+                sender.0, target.0, len
             ));
             len as i64
         }
@@ -852,11 +873,7 @@ fn sys_receive_message(msg: *mut u8, len: usize) -> i64 {
     if let Err(error) = copy_buffer_to_user(msg, &buffer[..received]) {
         return error;
     }
-    syscall_log(format_args!(
-        "[IPC] recv pid={} len={}\n",
-        pid.0,
-        received
-    ));
+    syscall_log(format_args!("[IPC] recv pid={} len={}\n", pid.0, received));
     received as i64
 }
 
@@ -998,7 +1015,7 @@ fn sys_get_key() -> i64 {
 }
 
 fn sys_get_mouse_pos(x: *mut u32, y: *mut u32) -> i64 {
-    let (mx, my) = crate::drivers::mouse::get_position();
+    let (mx, my) = crate::input::mouse_position();
     let x_bytes = (mx as u32).to_le_bytes();
     let y_bytes = (my as u32).to_le_bytes();
 
@@ -1042,13 +1059,15 @@ fn sys_spawn_process(path: *const u8, path_len: usize) -> i64 {
         Err(error) => return process_error_to_errno(error),
     };
 
-    let argv0 = resolved.rsplit('/').find(|part| !part.is_empty()).unwrap_or(resolved.as_str());
+    let argv0 = resolved
+        .rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or(resolved.as_str());
     let argv = [String::from(argv0)];
     if crate::elf::prepare_process_elf(pid, &data, &argv).is_err() {
         syscall_log(format_args!(
             "[SPAWN] prepare failed pid={} path={}\n",
-            pid.0,
-            resolved
+            pid.0, resolved
         ));
         let _ = crate::process::autoreap_process(pid, "spawn-prepare-failed");
         return EIO;
@@ -1056,8 +1075,7 @@ fn sys_spawn_process(path: *const u8, path_len: usize) -> i64 {
 
     syscall_log(format_args!(
         "[SPAWN] ready pid={} path={} execution=not-started\n",
-        pid.0,
-        resolved
+        pid.0, resolved
     ));
     pid.0 as i64
 }
@@ -1073,9 +1091,7 @@ fn sys_wait_process(pid: u32, status: *mut WaitStatus) -> i64 {
     };
     syscall_log(format_args!(
         "[WAIT] pid={} kind={} code={}\n",
-        wait_record.pid.0,
-        wait_status.kind,
-        wait_status.code
+        wait_record.pid.0, wait_status.kind, wait_status.code
     ));
     let bytes = unsafe {
         core::slice::from_raw_parts(
@@ -1125,9 +1141,7 @@ fn sys_yield() -> i64 {
         Some(pid) => {
             syscall_log(format_args!(
                 "[YIELD] current={} candidate={} queue={} switch=resumable\n",
-                current,
-                pid.0,
-                queued
+                current, pid.0, queued
             ));
             match crate::process::save_current_user_context_for_yield(pid) {
                 Ok(_) => SMOKE_RETURN_MAGIC,
@@ -1137,8 +1151,7 @@ fn sys_yield() -> i64 {
         None => {
             syscall_log(format_args!(
                 "[YIELD] current={} candidate=kernel queue={} switch=cooperative-return\n",
-                current,
-                queued
+                current, queued
             ));
             match crate::process::save_current_user_context_for_yield(current_pid) {
                 Ok(_) => SMOKE_RETURN_MAGIC,
@@ -1159,15 +1172,13 @@ fn sys_chdir(path: *const u8, path_len: usize) -> i64 {
         None => return EINVAL,
     };
 
-    let normalized = match crate::fs::vfs::get_vfs()
-        .ok_or(EIO)
-        .and_then(|vfs| {
-            let stat = vfs.stat_at(&cwd, &path).map_err(vfs_error_to_errno)?;
-            if stat.file_type != crate::fs::vfs::FileType::Directory {
-                return Err(ENOTDIR);
-            }
-            vfs.normalize_at(&cwd, &path).map_err(vfs_error_to_errno)
-        }) {
+    let normalized = match crate::fs::vfs::get_vfs().ok_or(EIO).and_then(|vfs| {
+        let stat = vfs.stat_at(&cwd, &path).map_err(vfs_error_to_errno)?;
+        if stat.file_type != crate::fs::vfs::FileType::Directory {
+            return Err(ENOTDIR);
+        }
+        vfs.normalize_at(&cwd, &path).map_err(vfs_error_to_errno)
+    }) {
         Ok(path) => path,
         Err(error) => return error,
     };
@@ -1236,7 +1247,9 @@ fn read_vfs_file(cwd: &str, path: &str) -> Result<Vec<u8>, crate::fs::vfs::VfsEr
 fn sys_sleep(ms: u64) -> i64 {
     let iters = ms * 1000;
     for _ in 0..iters {
-        unsafe { core::arch::asm!("pause"); }
+        unsafe {
+            core::arch::asm!("pause");
+        }
     }
     0
 }
@@ -1608,7 +1621,11 @@ unsafe fn prepare_user_fs_smoke_page() -> Result<(), ()> {
     core::ptr::copy_nonoverlapping(SMOKE_FS_DATA.as_ptr(), page.add(64), SMOKE_FS_DATA.len());
     core::ptr::copy_nonoverlapping(SMOKE_APPEND_A.as_ptr(), page.add(192), SMOKE_APPEND_A.len());
     core::ptr::copy_nonoverlapping(SMOKE_APPEND_B.as_ptr(), page.add(256), SMOKE_APPEND_B.len());
-    core::ptr::copy_nonoverlapping(SMOKE_STDOUT_DATA.as_ptr(), page.add(320), SMOKE_STDOUT_DATA.len());
+    core::ptr::copy_nonoverlapping(
+        SMOKE_STDOUT_DATA.as_ptr(),
+        page.add(320),
+        SMOKE_STDOUT_DATA.len(),
+    );
 
     map_current_user_page(SMOKE_USER_PAGE, page_frame)?;
     Ok(())
@@ -1654,7 +1671,10 @@ unsafe fn map_current_user_page(virt: usize, phys: usize) -> Result<(), ()> {
     let pt = ensure_next_table(pd.add(p2), hhdm)?;
     let pte = pt.add(p1);
 
-    core::ptr::write_volatile(pte, (phys as u64) | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+    core::ptr::write_volatile(
+        pte,
+        (phys as u64) | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER,
+    );
     flush_user_mapping(virt);
     Ok(())
 }
@@ -1676,7 +1696,10 @@ unsafe fn ensure_next_table(entry: *mut u64, hhdm: usize) -> Result<*mut u64, ()
     let frame = pmm.alloc_frame().ok_or(())?.as_usize();
     let table = (frame + hhdm) as *mut u64;
     core::ptr::write_bytes(table as *mut u8, 0, 4096);
-    core::ptr::write_volatile(entry, (frame as u64) | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+    core::ptr::write_volatile(
+        entry,
+        (frame as u64) | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER,
+    );
     Ok(table)
 }
 

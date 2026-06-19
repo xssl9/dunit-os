@@ -5,6 +5,7 @@ AS = nasm
 CARGO = cargo
 QEMU = qemu-system-x86_64
 QEMU_DISPLAY ?= sdl,grab-mod=lctrl-lalt,show-cursor=off
+QEMU_USB_INPUT ?= -device qemu-xhci -device usb-mouse
 LIMINE_CONFIG ?= limine.conf
 
 HAL_DIR = hal
@@ -186,10 +187,10 @@ grub-iso: $(BUILD_DIR)/kernel.elf
 	@echo "GRUB ISO created at $(BUILD_DIR)/os.iso"
 
 run: iso
-	$(QEMU) -boot d -cdrom $(BUILD_DIR)/microkernel.iso -m 512M -serial stdio -display $(QEMU_DISPLAY) -boot menu=on
+	$(QEMU) -boot d -cdrom $(BUILD_DIR)/microkernel.iso -m 512M -serial stdio -display $(QEMU_DISPLAY) $(QEMU_USB_INPUT) -boot menu=on
 
 run-gui: iso-test-gui
-	$(QEMU) -boot d -cdrom $(BUILD_DIR)/microkernel.iso -m 512M -serial stdio -display $(QEMU_DISPLAY) -boot menu=on
+	$(QEMU) -boot d -cdrom $(BUILD_DIR)/microkernel.iso -m 512M -serial stdio -display $(QEMU_DISPLAY) $(QEMU_USB_INPUT) -boot menu=on
 
 run-terminal: iso
 	$(QEMU) -boot d -cdrom $(BUILD_DIR)/microkernel.iso -m 512M -serial stdio -nographic -boot menu=on

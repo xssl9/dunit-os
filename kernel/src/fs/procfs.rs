@@ -1,11 +1,11 @@
 use super::vfs::{
-    DirEntry, FileSystem, FileHandle, FileStat, FileType, OpenFlags, Result, VfsError,
+    DirEntry, FileHandle, FileStat, FileSystem, FileType, OpenFlags, Result, VfsError,
 };
-use alloc::vec::Vec;
-use alloc::string::String;
-use alloc::format;
-use core::sync::atomic::{AtomicUsize, Ordering};
 use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub struct ProcFs {
     next_handle: AtomicUsize,
@@ -33,8 +33,11 @@ impl FileSystem for ProcFs {
     }
 
     fn read(&mut self, handle: FileHandle, buf: &mut [u8]) -> Result<usize> {
-        let path = self.open_handles.get(&handle).ok_or(VfsError::InvalidDescriptor)?;
-        
+        let path = self
+            .open_handles
+            .get(&handle)
+            .ok_or(VfsError::InvalidDescriptor)?;
+
         let data = if path == "meminfo" {
             if let Some(pmm) = crate::memory::pmm::get_pmm() {
                 format!(
@@ -42,7 +45,8 @@ impl FileSystem for ProcFs {
                     pmm.total_memory(),
                     pmm.available_memory(),
                     pmm.total_memory() - pmm.available_memory()
-                ).into_bytes()
+                )
+                .into_bytes()
             } else {
                 b"pmm unavailable\n".to_vec()
             }

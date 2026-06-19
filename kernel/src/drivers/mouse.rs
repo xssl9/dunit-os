@@ -1,11 +1,5 @@
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-static MOUSE_X: AtomicI32 = AtomicI32::new(512);
-static MOUSE_Y: AtomicI32 = AtomicI32::new(384);
-static MOUSE_BUTTONS: AtomicU8 = AtomicU8::new(0);
-static MOUSE_MAX_X: AtomicI32 = AtomicI32::new(1023);
-static MOUSE_MAX_Y: AtomicI32 = AtomicI32::new(767);
-static MOUSE_WHEEL_DELTA: AtomicI32 = AtomicI32::new(0);
 static PACKET_SIZE: AtomicUsize = AtomicUsize::new(3);
 static mut PACKET: [u8; 4] = [0; 4];
 static mut PACKET_INDEX: usize = 0;
@@ -52,18 +46,11 @@ pub fn init() {
 }
 
 pub fn set_bounds(width: usize, height: usize) {
-    let max_x = width.saturating_sub(1) as i32;
-    let max_y = height.saturating_sub(1) as i32;
-    MOUSE_MAX_X.store(max_x, Ordering::Relaxed);
-    MOUSE_MAX_Y.store(max_y, Ordering::Relaxed);
-    clamp_position();
+    crate::input::set_mouse_bounds(width, height);
 }
 
 pub fn set_position(x: i32, y: i32) {
-    let max_x = MOUSE_MAX_X.load(Ordering::Relaxed);
-    let max_y = MOUSE_MAX_Y.load(Ordering::Relaxed);
-    MOUSE_X.store(x.max(0).min(max_x), Ordering::Relaxed);
-    MOUSE_Y.store(y.max(0).min(max_y), Ordering::Relaxed);
+    crate::input::set_mouse_position(x, y);
 }
 
 pub fn update() {
@@ -104,54 +91,33 @@ fn push_packet_byte_locked(byte: u8) {
 
         let packet_size = PACKET_SIZE.load(Ordering::Relaxed);
         if PACKET_INDEX == packet_size {
-            MOUSE_BUTTONS.store(PACKET[0] & 0x07, Ordering::Relaxed);
             let dx = PACKET[1] as i8 as i32;
             let dy = -(PACKET[2] as i8 as i32);
-
-            let max_x = MOUSE_MAX_X.load(Ordering::Relaxed);
-            let max_y = MOUSE_MAX_Y.load(Ordering::Relaxed);
-            let x = (MOUSE_X.load(Ordering::Relaxed) + dx).max(0).min(max_x);
-            let y = (MOUSE_Y.load(Ordering::Relaxed) + dy).max(0).min(max_y);
-            MOUSE_X.store(x, Ordering::Relaxed);
-            MOUSE_Y.store(y, Ordering::Relaxed);
+            let mut wheel = 0;
             if packet_size == 4 {
                 let raw = PACKET[3] & 0x0F;
-                let wheel = if (raw & 0x08) != 0 {
+                wheel = if (raw & 0x08) != 0 {
                     (raw | 0xF0) as i8 as i32
                 } else {
                     raw as i32
                 };
-                if wheel != 0 {
-                    MOUSE_WHEEL_DELTA.fetch_add(wheel, Ordering::Relaxed);
-                }
             }
+            crate::input::push_mouse_relative(dx, dy, PACKET[0] & 0x07, wheel);
             PACKET_INDEX = 0;
         }
     }
 }
 
 pub fn get_position() -> (i32, i32) {
-    (
-        MOUSE_X.load(Ordering::Relaxed),
-        MOUSE_Y.load(Ordering::Relaxed),
-    )
+    crate::input::mouse_position()
 }
 
 pub fn get_buttons() -> u8 {
-    MOUSE_BUTTONS.load(Ordering::Relaxed)
+    crate::input::mouse_buttons()
 }
 
 pub fn take_scroll_delta() -> i32 {
-    MOUSE_WHEEL_DELTA.swap(0, Ordering::Relaxed)
-}
-
-fn clamp_position() {
-    let max_x = MOUSE_MAX_X.load(Ordering::Relaxed);
-    let max_y = MOUSE_MAX_Y.load(Ordering::Relaxed);
-    let x = MOUSE_X.load(Ordering::Relaxed).max(0).min(max_x);
-    let y = MOUSE_Y.load(Ordering::Relaxed).max(0).min(max_y);
-    MOUSE_X.store(x, Ordering::Relaxed);
-    MOUSE_Y.store(y, Ordering::Relaxed);
+    crate::input::take_mouse_scroll_delta()
 }
 
 unsafe fn inb(port: u16) -> u8 {

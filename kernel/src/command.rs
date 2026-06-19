@@ -72,7 +72,10 @@ pub fn read_vfs_file(cwd: &str, path: &str) -> Result<Vec<u8>, VfsError> {
     Ok(data)
 }
 
-pub fn parse_exec_argv(command_line: &str, cwd: &str) -> Result<(String, Vec<String>), ExecRunError> {
+pub fn parse_exec_argv(
+    command_line: &str,
+    cwd: &str,
+) -> Result<(String, Vec<String>), ExecRunError> {
     if command_line.trim().is_empty() {
         return Err(ExecRunError::MissingPath);
     }

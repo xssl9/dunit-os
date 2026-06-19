@@ -62,7 +62,7 @@ fn create_valid_elf_header(entry: u64, phoff: u64, phnum: u16) -> Vec<u8> {
         shnum: 0,
         shstrndx: 0,
     };
-    
+
     let mut data = vec![0u8; 4096];
     unsafe {
         core::ptr::write(data.as_mut_ptr() as *mut ElfHeader, header);
@@ -98,14 +98,14 @@ fn parse_elf_header(data: &[u8]) -> Result<ElfHeader, ElfError> {
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
-    
+
     #[test]
     fn prop_elf_header_parsing(entry in 0x400000u64..0x500000u64, phnum in 1u16..10) {
         let data = create_valid_elf_header(entry, 64, phnum);
-        
+
         let result = parse_elf_header(&data);
         assert!(result.is_ok());
-        
+
         let header = result.unwrap();
         assert_eq!(header.magic, ELF_MAGIC);
         assert_eq!(header.class, ELF_CLASS_64);
@@ -114,7 +114,7 @@ proptest! {
         assert_eq!(header.entry, entry);
         assert_eq!(header.phnum, phnum);
     }
-    
+
     #[test]
     fn prop_corrupted_magic_rejection(
         b0 in 0u8..255,
@@ -126,58 +126,58 @@ proptest! {
         if magic == ELF_MAGIC {
             return Ok(());
         }
-        
+
         let mut data = create_valid_elf_header(0x400000, 64, 1);
         data[0] = b0;
         data[1] = b1;
         data[2] = b2;
         data[3] = b3;
-        
+
         let result = parse_elf_header(&data);
         assert!(result.is_err());
     }
-    
+
     #[test]
     fn prop_invalid_class_rejection(class in 0u8..255) {
         if class == ELF_CLASS_64 {
             return Ok(());
         }
-        
+
         let mut data = create_valid_elf_header(0x400000, 64, 1);
         data[4] = class;
-        
+
         let result = parse_elf_header(&data);
         assert!(result.is_err());
     }
-    
+
     #[test]
     fn prop_invalid_architecture_rejection(machine in 0u16..0xFFFF) {
         if machine == ELF_MACHINE_X86_64 {
             return Ok(());
         }
-        
+
         let mut data = create_valid_elf_header(0x400000, 64, 1);
         unsafe {
             let machine_ptr = data.as_mut_ptr().add(18) as *mut u16;
             *machine_ptr = machine;
         }
-        
+
         let result = parse_elf_header(&data);
         assert!(result.is_err());
     }
-    
+
     #[test]
     fn prop_invalid_type_rejection(elf_type in 0u16..0xFFFF) {
         if elf_type == ELF_TYPE_EXEC {
             return Ok(());
         }
-        
+
         let mut data = create_valid_elf_header(0x400000, 64, 1);
         unsafe {
             let type_ptr = data.as_mut_ptr().add(16) as *mut u16;
             *type_ptr = elf_type;
         }
-        
+
         let result = parse_elf_header(&data);
         assert!(result.is_err());
     }

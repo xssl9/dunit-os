@@ -1,5 +1,5 @@
-use alloc::vec::Vec;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 #[derive(Debug)]
 pub struct InitrdFile {
@@ -13,9 +13,7 @@ pub struct Initrd {
 
 impl Initrd {
     pub const fn new() -> Self {
-        Self {
-            files: Vec::new(),
-        }
+        Self { files: Vec::new() }
     }
 
     pub fn add_file(&mut self, name: String, data: Vec<u8>) {

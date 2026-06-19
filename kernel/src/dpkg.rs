@@ -1,5 +1,5 @@
-use alloc::vec::Vec;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 pub struct Package {
     name: &'static str,
@@ -63,7 +63,11 @@ pub fn install(name: &'static str, version: &'static str, description: &'static 
     unsafe {
         if let Some(ref mut packages) = INSTALLED_PACKAGES {
             if !is_installed(name) {
-                packages.push(Package { name, version, description });
+                packages.push(Package {
+                    name,
+                    version,
+                    description,
+                });
                 true
             } else {
                 false

@@ -226,11 +226,14 @@ impl FileSystem for MemFs {
                 } else {
                     0
                 };
-                self.open_handles.push((handle, OpenMemHandle {
-                    path: String::from(Self::clean(path)),
-                    offset,
-                    flags,
-                }));
+                self.open_handles.push((
+                    handle,
+                    OpenMemHandle {
+                        path: String::from(Self::clean(path)),
+                        offset,
+                        flags,
+                    },
+                ));
                 Ok(handle)
             }
             FileType::Device => Err(VfsError::Unsupported),
@@ -238,7 +241,9 @@ impl FileSystem for MemFs {
     }
 
     fn read(&mut self, handle: FileHandle, buf: &mut [u8]) -> Result<usize> {
-        let hidx = self.handle_index(handle).ok_or(VfsError::InvalidDescriptor)?;
+        let hidx = self
+            .handle_index(handle)
+            .ok_or(VfsError::InvalidDescriptor)?;
         if !self.open_handles[hidx].1.flags.can_read() {
             return Err(VfsError::PermissionDenied);
         }
@@ -265,7 +270,9 @@ impl FileSystem for MemFs {
     }
 
     fn write(&mut self, handle: FileHandle, buf: &[u8]) -> Result<usize> {
-        let hidx = self.handle_index(handle).ok_or(VfsError::InvalidDescriptor)?;
+        let hidx = self
+            .handle_index(handle)
+            .ok_or(VfsError::InvalidDescriptor)?;
         if !self.open_handles[hidx].1.flags.can_write() {
             return Err(VfsError::PermissionDenied);
         }
@@ -292,7 +299,9 @@ impl FileSystem for MemFs {
     }
 
     fn close(&mut self, handle: FileHandle) -> Result<()> {
-        let idx = self.handle_index(handle).ok_or(VfsError::InvalidDescriptor)?;
+        let idx = self
+            .handle_index(handle)
+            .ok_or(VfsError::InvalidDescriptor)?;
         self.open_handles.remove(idx);
         Ok(())
     }

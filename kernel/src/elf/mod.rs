@@ -143,18 +143,17 @@ impl<'a> Iterator for ProgramHeaderIterator<'a> {
             return None;
         }
 
-        let ph = unsafe {
-            core::ptr::read(self.data.as_ptr().add(ph_offset) as *const ProgramHeader)
-        };
+        let ph =
+            unsafe { core::ptr::read(self.data.as_ptr().add(ph_offset) as *const ProgramHeader) };
 
         self.index += 1;
         Some(ph)
     }
 }
 
-use crate::memory::pmm::PhysicalMemoryManager;
 use crate::memory::pmm::PhysicalAddress;
-use crate::memory::vmm::{AddressSpace, VirtualAddress, VirtualMemoryManager, PageFlags};
+use crate::memory::pmm::PhysicalMemoryManager;
+use crate::memory::vmm::{AddressSpace, PageFlags, VirtualAddress, VirtualMemoryManager};
 use crate::process::{Process, ProcessExit, ProcessId};
 
 pub const USER_STACK_SIZE: usize = 0x10000;
@@ -233,17 +232,14 @@ impl<'a> ElfLoader<'a> {
                 };
 
                 let file_offset = ph.p_offset as usize + offset_in_segment;
-                let bytes_to_copy = core::cmp::min(
-                    4096,
-                    ph.p_filesz as usize - offset_in_segment
-                );
+                let bytes_to_copy = core::cmp::min(4096, ph.p_filesz as usize - offset_in_segment);
 
                 if bytes_to_copy > 0 && file_offset < self.parser.data.len() {
                     let src = &self.parser.data[file_offset..file_offset + bytes_to_copy];
                     let dst = unsafe {
                         core::slice::from_raw_parts_mut(
                             phys_addr.as_usize() as *mut u8,
-                            bytes_to_copy
+                            bytes_to_copy,
                         )
                     };
                     dst.copy_from_slice(src);
@@ -320,10 +316,7 @@ pub fn run_process_elf(data: &[u8], argv: &[String]) -> Result<ProcessExit, ElfE
         }
     }
 
-    let path = argv
-        .first()
-        .cloned()
-        .unwrap_or_else(|| String::from("elf"));
+    let path = argv.first().cloned().unwrap_or_else(|| String::from("elf"));
     let pid = match crate::process::create_user_process_record(path, true) {
         Ok(pid) => pid,
         Err(_) => {
@@ -348,11 +341,7 @@ pub fn run_process_elf(data: &[u8], argv: &[String]) -> Result<ProcessExit, ElfE
     }
 }
 
-pub fn prepare_process_elf(
-    pid: ProcessId,
-    data: &[u8],
-    argv: &[String],
-) -> Result<(), ElfError> {
+pub fn prepare_process_elf(pid: ProcessId, data: &[u8], argv: &[String]) -> Result<(), ElfError> {
     let parser = ElfParser::new(data)?;
     let prepared = crate::process::with_process_mut(pid, |process| {
         if load_into_process_address_space(&parser, process).is_err() {
@@ -489,7 +478,9 @@ fn write_stack_string(
     }
 
     let total = value.len() + 1;
-    *sp = sp.checked_sub(total).ok_or(ElfError::InvalidProgramHeader)?;
+    *sp = sp
+        .checked_sub(total)
+        .ok_or(ElfError::InvalidProgramHeader)?;
     write_user_bytes(process, *sp, value.as_bytes())?;
     write_user_bytes(process, *sp + value.len(), &[0])?;
     Ok(*sp)
@@ -803,7 +794,10 @@ unsafe fn map_current_user_page(virt: usize, phys: usize) -> Result<(), ElfError
     let pdpt = ensure_next_table(pml4.add(p4), hhdm)?;
     let pd = ensure_next_table(pdpt.add(p3), hhdm)?;
     let pt = ensure_next_table(pd.add(p2), hhdm)?;
-    core::ptr::write_volatile(pt.add(p1), (phys as u64) | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+    core::ptr::write_volatile(
+        pt.add(p1),
+        (phys as u64) | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER,
+    );
     flush_user_mapping(virt);
     Ok(())
 }
@@ -828,7 +822,10 @@ unsafe fn ensure_next_table(entry: *mut u64, hhdm: usize) -> Result<*mut u64, El
         .as_usize();
     let table = (frame + hhdm) as *mut u64;
     core::ptr::write_bytes(table as *mut u8, 0, PAGE_SIZE);
-    core::ptr::write_volatile(entry, (frame as u64) | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+    core::ptr::write_volatile(
+        entry,
+        (frame as u64) | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER,
+    );
     Ok(table)
 }
 

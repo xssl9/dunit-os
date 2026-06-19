@@ -29,7 +29,7 @@ impl PhysicalMemoryManager {
     fn new(memory_start: usize, memory_size: usize) -> Self {
         let total_frames = memory_size / PAGE_SIZE;
         let bitmap_size = (total_frames + 7) / 8;
-        
+
         Self {
             bitmap: vec![0u8; bitmap_size],
             total_frames,
@@ -37,7 +37,7 @@ impl PhysicalMemoryManager {
             base_addr: memory_start,
         }
     }
-    
+
     fn alloc_frame(&mut self) -> Option<PhysicalAddress> {
         for byte_idx in 0..self.bitmap.len() {
             let byte = self.bitmap[byte_idx];
@@ -46,7 +46,7 @@ impl PhysicalMemoryManager {
                     let mask = 1u8 << bit_idx;
                     if (byte & mask) == 0 {
                         self.bitmap[byte_idx] |= mask;
-                        
+
                         let frame_idx = byte_idx * 8 + bit_idx;
                         if frame_idx < self.total_frames {
                             self.free_frames -= 1;
@@ -102,7 +102,7 @@ impl IpcManager {
 
     fn create_shared_memory(&mut self, size: usize) -> Option<SharedMemoryId> {
         let num_pages = (size + 4095) / 4096;
-        
+
         let mut physical_frames = Vec::new();
         for _ in 0..num_pages {
             match self.pmm.alloc_frame() {
@@ -156,7 +156,7 @@ impl SimulatedMemory {
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
-    
+
     #[test]
     fn prop_shared_memory_visibility(
         size in 1usize..1024,
@@ -167,24 +167,24 @@ proptest! {
         let pmm = PhysicalMemoryManager::new(0x100000, 1024 * PAGE_SIZE);
         let mut ipc = IpcManager::new(pmm);
         let mut sim_mem = SimulatedMemory::new();
-        
+
         let size = size * 64;
-        
+
         if let Some(shm_id) = ipc.create_shared_memory(size) {
             let proc1 = ProcessId(pid1);
             let proc2 = ProcessId(pid2);
-            
+
             if let Some(phys_addr1) = ipc.attach_shared_memory(shm_id, proc1) {
                 if let Some(phys_addr2) = ipc.attach_shared_memory(shm_id, proc2) {
                     assert_eq!(phys_addr1, phys_addr2);
-                    
+
                     let data = vec![data_byte; 64];
                     sim_mem.write(phys_addr1, &data);
-                    
+
                     if let Some(read_data) = sim_mem.read(phys_addr2) {
                         assert_eq!(read_data, &data[..]);
                     }
-                    
+
                     if let Some(region) = ipc.get_shared_region(shm_id) {
                         assert!(region.owners.contains(&proc1));
                         assert!(region.owners.contains(&proc2));

@@ -87,7 +87,13 @@ pub fn run(console: &mut terminal::FbConsole, cwd: &str) {
             10 => {
                 write_label(console, "PID: ");
                 console.set_fg_color(COLOR_SOFT_WHITE);
-                let _ = write!(ConsoleWriter { console: &mut *console }, "{}", pid);
+                let _ = write!(
+                    ConsoleWriter {
+                        console: &mut *console
+                    },
+                    "{}",
+                    pid
+                );
                 console.reset_fg_color();
             }
             11 => {
@@ -100,7 +106,9 @@ pub fn run(console: &mut terminal::FbConsole, cwd: &str) {
                     write_label(console, "Memory: ");
                     console.set_fg_color(COLOR_SOFT_WHITE);
                     let _ = write!(
-                        ConsoleWriter { console: &mut *console },
+                        ConsoleWriter {
+                            console: &mut *console
+                        },
                         "{} KiB / {} KiB",
                         used_kib,
                         memory_total_kib

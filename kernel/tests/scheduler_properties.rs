@@ -123,21 +123,21 @@ fn simulate_timer_interrupt(scheduler: &mut Scheduler) -> bool {
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
-    
+
     #[test]
     fn prop_timer_interrupt_triggers_scheduling(num_processes in 1usize..20) {
         let mut scheduler = Scheduler::new();
-        
+
         for i in 0..num_processes {
             let process = Process::new(ProcessId(i as u64));
             scheduler.add_process(process);
         }
-        
+
         let scheduled = simulate_timer_interrupt(&mut scheduler);
-        
+
         assert!(scheduled, "Timer interrupt should trigger scheduling when processes are ready");
     }
-    
+
     #[test]
     fn prop_context_switch_preservation(
         rax in any::<u64>(),
@@ -164,11 +164,11 @@ proptest! {
             r8, r9, r10, r11, r12, r13, r14, r15,
             rip, rflags,
         };
-        
+
         let saved_context = context;
-        
+
         let restored_context = context;
-        
+
         assert_eq!(restored_context.rax, saved_context.rax);
         assert_eq!(restored_context.rbx, saved_context.rbx);
         assert_eq!(restored_context.rcx, saved_context.rcx);

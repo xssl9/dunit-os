@@ -1,6 +1,6 @@
+use crate::process::ProcessId;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use crate::process::ProcessId;
 
 pub const MAX_MESSAGE_SIZE: usize = 256;
 pub const MAX_QUEUE_MESSAGES: usize = 128;
@@ -110,7 +110,7 @@ impl IpcManager {
 
         let pmm = get_pmm()?;
         let num_pages = (size + 4095) / 4096;
-        
+
         let mut physical_frames = Vec::new();
         for _ in 0..num_pages {
             match pmm.alloc_frame() {
@@ -143,7 +143,7 @@ impl IpcManager {
     pub fn detach_shared_memory(&mut self, id: SharedMemoryId, pid: ProcessId) {
         if let Some(region) = self.shared_regions.get_mut(&id) {
             region.remove_owner(pid);
-            
+
             if region.owners.is_empty() {
                 self.shared_regions.remove(&id);
             }
@@ -230,9 +230,15 @@ pub fn recv_bytes(pid: ProcessId, out: &mut [u8]) -> Result<usize, IpcError> {
     recv_bytes_with_sender(pid, out).map(|(_, len)| len)
 }
 
-pub fn recv_bytes_with_sender(pid: ProcessId, out: &mut [u8]) -> Result<(ProcessId, usize), IpcError> {
+pub fn recv_bytes_with_sender(
+    pid: ProcessId,
+    out: &mut [u8],
+) -> Result<(ProcessId, usize), IpcError> {
     let manager = get_ipc_manager().ok_or(IpcError::Unavailable)?;
-    let queue = manager.message_queues.get_mut(&pid).ok_or(IpcError::NoMessage)?;
+    let queue = manager
+        .message_queues
+        .get_mut(&pid)
+        .ok_or(IpcError::NoMessage)?;
     if queue.is_empty() {
         return Err(IpcError::NoMessage);
     }

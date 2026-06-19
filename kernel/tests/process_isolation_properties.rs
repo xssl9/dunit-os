@@ -76,27 +76,29 @@ impl Kernel {
     }
 
     fn other_processes_running(&self, crashed_pid: ProcessId) -> bool {
-        self.processes.iter().any(|p| p.pid != crashed_pid && p.state != ProcessState::Dead)
+        self.processes
+            .iter()
+            .any(|p| p.pid != crashed_pid && p.state != ProcessState::Dead)
     }
 }
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
-    
+
     #[test]
     fn prop_process_isolation_on_crash(num_processes in 2usize..10, crash_index in 0usize..9) {
         let mut kernel = Kernel::new();
-        
+
         for i in 0..num_processes {
             let process = Process::new(ProcessId(i as u64));
             kernel.add_process(process);
         }
-        
+
         let crash_index = crash_index % num_processes;
         let crashed_pid = ProcessId(crash_index as u64);
-        
+
         kernel.simulate_process_crash(crashed_pid);
-        
+
         assert!(kernel.is_stable(), "Kernel should remain stable when userspace process crashes");
         assert!(kernel.other_processes_running(crashed_pid), "Other processes should continue running after one crashes");
     }

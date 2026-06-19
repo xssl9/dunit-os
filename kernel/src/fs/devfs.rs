@@ -1,5 +1,5 @@
 use super::vfs::{
-    DirEntry, FileSystem, FileHandle, FileStat, FileType, OpenFlags, Result, VfsError,
+    DirEntry, FileHandle, FileStat, FileSystem, FileType, OpenFlags, Result, VfsError,
 };
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -36,11 +36,11 @@ pub struct DevFs {
 impl DevFs {
     pub fn new() -> Self {
         let mut devices = BTreeMap::new();
-        
+
         devices.insert(String::from("fb0"), DeviceFile::new("fb0"));
         devices.insert(String::from("kbd"), DeviceFile::new("kbd"));
         devices.insert(String::from("mouse"), DeviceFile::new("mouse"));
-        
+
         Self {
             devices,
             next_handle: AtomicUsize::new(1),

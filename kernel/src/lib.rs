@@ -17,6 +17,7 @@ pub mod fs;
 pub mod gui;
 pub mod hal;
 pub mod initrd;
+pub mod input;
 pub mod interrupts;
 pub mod ipc;
 pub mod kthreads;
@@ -267,20 +268,27 @@ fn terminal_exec(console: &mut terminal::FbConsole, cwd: &str, command_line: &st
             });
             console.write_str("\n");
         }
-        Err(command::ExecRunError::ProcessCreate) => console.write_str("exec: process create failed\n"),
+        Err(command::ExecRunError::ProcessCreate) => {
+            console.write_str("exec: process create failed\n")
+        }
         Err(command::ExecRunError::Interrupted) => console.write_str("exec: interrupted\n"),
-        Err(command::ExecRunError::StdinUnsupported) => console.write_str("exec: stdin unsupported\n"),
+        Err(command::ExecRunError::StdinUnsupported) => {
+            console.write_str("exec: stdin unsupported\n")
+        }
         Err(command::ExecRunError::ElfLaunch) => console.write_str("exec: ELF launch failed\n"),
     }
 }
 
-fn terminal_collect_foreground_input(console: &mut terminal::FbConsole, pid: process::ProcessId) -> bool {
+fn terminal_collect_foreground_input(
+    console: &mut terminal::FbConsole,
+    pid: process::ProcessId,
+) -> bool {
     let mut input = [0u8; 256];
     let mut len = 0usize;
     let mut ctrl_down = false;
 
     loop {
-        let wheel_delta = drivers::mouse::take_scroll_delta();
+        let wheel_delta = input::take_mouse_scroll_delta();
         if wheel_delta != 0 {
             console.scroll_view(-wheel_delta * 3);
         }
@@ -530,7 +538,9 @@ fn terminal_handle_system_command(console: &mut terminal::FbConsole, cmd_str: &s
             true
         }
         "uptime" => {
-            console.write_str("uptime unavailable: timer tick source is not active in terminal mode\n");
+            console.write_str(
+                "uptime unavailable: timer tick source is not active in terminal mode\n",
+            );
             true
         }
         "free" => {
@@ -796,16 +806,22 @@ const BOOT_BACKGROUND_OFFSET: usize = 54;
 const BOOT_BACKGROUND_STRIDE: usize = BOOT_BACKGROUND_WIDTH * 3;
 
 fn draw_boot_background(fb_addr: *mut u32, width: usize, height: usize) {
-    if BOOT_BACKGROUND_BMP.len() < BOOT_BACKGROUND_OFFSET + BOOT_BACKGROUND_STRIDE * BOOT_BACKGROUND_HEIGHT {
+    if BOOT_BACKGROUND_BMP.len()
+        < BOOT_BACKGROUND_OFFSET + BOOT_BACKGROUND_STRIDE * BOOT_BACKGROUND_HEIGHT
+    {
         return;
     }
 
     for y in 0..height {
         let src_y = y.saturating_mul(BOOT_BACKGROUND_HEIGHT) / height.max(1);
-        let bmp_y = BOOT_BACKGROUND_HEIGHT.saturating_sub(1).saturating_sub(src_y.min(BOOT_BACKGROUND_HEIGHT - 1));
+        let bmp_y = BOOT_BACKGROUND_HEIGHT
+            .saturating_sub(1)
+            .saturating_sub(src_y.min(BOOT_BACKGROUND_HEIGHT - 1));
         for x in 0..width {
             let src_x = x.saturating_mul(BOOT_BACKGROUND_WIDTH) / width.max(1);
-            let offset = BOOT_BACKGROUND_OFFSET + bmp_y * BOOT_BACKGROUND_STRIDE + src_x.min(BOOT_BACKGROUND_WIDTH - 1) * 3;
+            let offset = BOOT_BACKGROUND_OFFSET
+                + bmp_y * BOOT_BACKGROUND_STRIDE
+                + src_x.min(BOOT_BACKGROUND_WIDTH - 1) * 3;
             if offset + 2 >= BOOT_BACKGROUND_BMP.len() {
                 continue;
             }
@@ -884,7 +900,7 @@ fn draw_text_direct(fb_addr: *mut u32, width: usize, x: usize, y: usize, text: &
             _ => &[0x00, 0x00, 0x00, 0x00, 0x00],
         }
     };
-    
+
     unsafe {
         let mut current_x = x;
         for ch in text.bytes() {
@@ -911,14 +927,16 @@ fn screen_log_early(fb_addr: *mut u32, width: usize, y: usize, text: &str) {
     serial_write("\r\n");
     draw_text_direct(fb_addr, width, 10, y, text, 0x00ff00);
     for _ in 0..500000 {
-        unsafe { core::arch::asm!("pause"); }
+        unsafe {
+            core::arch::asm!("pause");
+        }
     }
 }
 
 fn screen_log_internal(text: &str, is_error: bool) {
     serial_write(text);
     serial_write("\r\n");
-    
+
     unsafe {
         if let Some((fb_addr, width)) = SCREEN_LOG_FB {
             if SCREEN_LOG_Y < 700 {
@@ -931,9 +949,11 @@ fn screen_log_internal(text: &str, is_error: bool) {
             }
         }
     }
-    
+
     for _ in 0..200000 {
-        unsafe { core::arch::asm!("pause"); }
+        unsafe {
+            core::arch::asm!("pause");
+        }
     }
 }
 
@@ -1004,20 +1024,20 @@ pub extern "C" fn kernel_main(
     let screen_log = |text: &str, is_error: bool| {
         screen_log_internal(text, is_error);
     };
-    
+
     serial_write("\r\n\r\n");
     serial_write("=== Dunit OS Boot Sequence ===\r\n\r\n");
-    
+
     screen_log("[ .. ] Starting Dunit OS (Green Tea)", false);
     screen_log("[ .. ] Boot protocol: Limine v5.0", false);
     screen_log("[ OK ] Bootloader handoff complete", false);
-    
+
     screen_log("[ .. ] Detecting hardware configuration", false);
     screen_log("[ OK ] CPU: x86_64 architecture detected", false);
     screen_log("[ OK ] CPU features: SSE, SSE2, AVX available", false);
     screen_log("[ OK ] Memory: 512MB RAM detected", false);
     screen_log("[ OK ] Framebuffer: 1024x768x32 initialized", false);
-    
+
     screen_log("[ .. ] Initializing Hardware Abstraction Layer", false);
     screen_log("[ .. ] Setting up Global Descriptor Table", false);
     unsafe {
@@ -1043,18 +1063,21 @@ pub extern "C" fn kernel_main(
 
     process::init_current_kernel_process();
     process::run_process_address_space_smoke();
-    
+
     if terminal_mode == 0 {
         screen_log("[ .. ] Initializing process management", false);
         screen_log("[ .. ] Creating process scheduler", false);
         serial_write("[PROC] Calling scheduler::init()...\r\n");
         process::scheduler::init();
         serial_write("[PROC] scheduler::init() returned\r\n");
-        screen_log("[ OK ] Scheduler: cooperative foundation initialized", false);
+        screen_log(
+            "[ OK ] Scheduler: cooperative foundation initialized",
+            false,
+        );
         screen_log("[ OK ] Scheduler: PID ready queue initialized", false);
         screen_log("[ .. ] Scheduler: context switching unavailable", false);
         screen_log("[ OK ] Process management ready", false);
-        
+
         screen_log("[ .. ] Initializing Inter-Process Communication", false);
         screen_log("[ .. ] Setting up message passing", false);
         serial_write("[IPC] Calling ipc::init()...\r\n");
@@ -1063,7 +1086,7 @@ pub extern "C" fn kernel_main(
         screen_log("[ OK ] IPC: Message queues created", false);
         screen_log("[ OK ] IPC: Shared memory manager ready", false);
         screen_log("[ OK ] IPC subsystem operational", false);
-        
+
         screen_log("[ .. ] Initializing Virtual File System", false);
         screen_log("[ .. ] Mounting root filesystem", false);
         serial_write("[VFS] Calling vfs::init()...\r\n");
@@ -1078,14 +1101,14 @@ pub extern "C" fn kernel_main(
                 screen_log("[FAIL] Virtual filesystem initialization failed", true);
             }
         }
-        
+
         screen_log("[ .. ] Loading initial ramdisk", false);
         serial_write("[INITRD] Calling initrd::init()...\r\n");
         initrd::init();
         serial_write("[INITRD] initrd::init() returned\r\n");
         screen_log("[ OK ] Initrd: Archive located", false);
         screen_log("[ OK ] Initrd: Files extracted to /", false);
-        
+
         screen_log("[ .. ] Initializing input drivers", false);
         screen_log("[ .. ] Initializing PS/2 controller", false);
         serial_write("[DRV] Calling drivers::init()...\r\n");
@@ -1095,7 +1118,7 @@ pub extern "C" fn kernel_main(
         screen_log("[ OK ] PS/2: Keyboard detected on port 1", false);
         screen_log("[ OK ] PS/2: Mouse detected on port 2", false);
         screen_log("[ OK ] Input drivers loaded", false);
-        
+
         screen_log("[ .. ] Starting window manager", false);
         serial_write("[WM] Calling window_manager::init()...\r\n");
         window_manager::init();
@@ -1106,36 +1129,31 @@ pub extern "C" fn kernel_main(
         screen_log("[ OK ] Window manager ready", false);
     } else {
         screen_log("[ .. ] Terminal mode: Minimal initialization", false);
-        
+
         screen_log("[ .. ] Initializing scheduler foundation", false);
         process::scheduler::init();
         screen_log("[ OK ] Scheduler foundation ready (not active)", false);
-        
+
         screen_log("[ .. ] Initializing IPC", false);
         ipc::init();
         screen_log("[ OK ] IPC ready", false);
-        
+
         screen_log("[ .. ] Initializing VFS", false);
         match fs::vfs::init() {
             Ok(()) => screen_log("[ OK ] VFS ready", false),
             Err(_) => screen_log("[FAIL] VFS initialization failed", true),
         }
-        
+
         screen_log("[ .. ] Loading initial ramdisk", false);
         initrd::init();
         screen_log("[ OK ] Initrd ready", false);
-        
-        screen_log("[ .. ] Initializing PS/2 keyboard and mouse", false);
-        serial_write("[DRV] Calling keyboard::init()...\r\n");
-        screen_log("[ .. ] [DRV] Calling keyboard::init()", false);
-        drivers::keyboard::init();
-        serial_write("[DRV] keyboard::init() returned\r\n");
-        screen_log("[ OK ] [DRV] keyboard::init() returned", false);
-        serial_write("[DRV] Calling mouse::init() for terminal wheel support...\r\n");
-        drivers::mouse::init();
-        serial_write("[DRV] mouse::init() returned\r\n");
+
+        screen_log("[ .. ] Initializing input drivers", false);
+        serial_write("[DRV] Calling drivers::init()...\r\n");
+        drivers::init();
+        serial_write("[DRV] drivers::init() returned\r\n");
         screen_log("[ OK ] Keyboard driver ready", false);
-        screen_log("[ OK ] Mouse wheel driver ready", false);
+        screen_log("[ OK ] Mouse input driver ready", false);
     }
 
     screen_log("[ .. ] Running process kernel stack smoke test", false);
@@ -1172,29 +1190,29 @@ pub extern "C" fn kernel_main(
         screen_log("[ OK ] IRQ 0 masked for terminal mode", false);
     }
     screen_log("[ OK ] Hardware interrupts configured", false);
-    
+
     screen_log("[ OK ] System initialization complete", false);
     screen_log("[ OK ] Dunit OS (Green Tea) ready", false);
 
     serial_write("[KERNEL] OK\r\n");
     serial_write("[KERNEL] mode select START\r\n");
-    
+
     if terminal_mode != 0 {
         serial_write("[BOOT-003] Starting terminal mode\r\n");
         screen_log("[ .. ] Starting terminal mode", false);
         serial_write("[BOOT] Starting terminal mode...\r\n");
         serial_write("[BOOT-TERM-DEBUG-001] Before TERM-001\r\n");
-        
+
         serial_write("\r\n\r\n");
         serial_write("[TERM-001] Initializing framebuffer console\r\n");
         screen_log("[ .. ] Initializing framebuffer console", false);
         serial_write("[TERM-001b] About to call fb_ptr.as_ref()\r\n");
-        
+
         let fb_for_terminal = unsafe { fb_ptr.as_ref() };
-        
+
         serial_write("[TERM-001c] fb_ptr.as_ref() returned\r\n");
         screen_log("[ OK ] Framebuffer reference obtained", false);
-        
+
         if let Some(fb) = fb_for_terminal {
             serial_write("[TERM-001d] fb is Some, extracting fields\r\n");
             screen_log("[ .. ] Extracting framebuffer parameters", false);
@@ -1208,7 +1226,7 @@ pub extern "C" fn kernel_main(
             let pitch = fb.pitch as usize;
             serial_write("[TERM-001i] All fields extracted\r\n");
             screen_log("[ OK ] Framebuffer parameters extracted", false);
-            
+
             serial_write("[TERM-002] Initializing terminal with framebuffer\r\n");
             screen_log("[ .. ] Creating terminal console instance", false);
             serial_write("[TERM-002a] fb_addr: ");
@@ -1217,16 +1235,16 @@ pub extern "C" fn kernel_main(
             terminal::init(fb_addr, width, height, pitch);
             serial_write("[TERM-002c] terminal::init() returned\r\n");
             screen_log("[ OK ] terminal::init() returned", false);
-            
+
             screen_log("[ .. ] Getting console instance", false);
             if let Some(console) = terminal::get_console() {
                 serial_write("[TERM-003] Console initialized\r\n");
                 screen_log("[ OK ] Console instance obtained", false);
-                
+
                 serial_write("[TERM-004] Clearing entire screen\r\n");
                 console.clear_top_area(48);
                 serial_write("[TERM-004b] Screen cleared\r\n");
-                
+
                 serial_write("[TERM-005] Writing header\r\n");
                 console.write_str("Dunit OS 1.0.0 (Green Tea) tty1\n");
                 console.write_str("\n");
@@ -1235,12 +1253,12 @@ pub extern "C" fn kernel_main(
                 terminal_set_cwd("/");
                 console.write_str("root@dunit:~# ");
                 console.draw_cursor(true);
-                
+
                 serial_write("[TERM-006] Header written, entering keyboard loop\r\n");
-                
+
                 unsafe {
                     INPUT_LEN = 0;
-                    
+
                     for _ in 0..16 {
                         let status: u8;
                         core::arch::asm!("in al, dx", out("al") status, in("dx") 0x64u16, options(nomem, nostack));
@@ -1250,11 +1268,11 @@ pub extern "C" fn kernel_main(
                         }
                     }
                 }
-                
+
                 serial_write("[TERM-007] Starting main loop\r\n");
-                
+
                 loop {
-                    let wheel_delta = drivers::mouse::take_scroll_delta();
+                    let wheel_delta = input::take_mouse_scroll_delta();
                     if wheel_delta != 0 {
                         console.scroll_view(-wheel_delta * 3);
                     }
@@ -1263,7 +1281,9 @@ pub extern "C" fn kernel_main(
                         unsafe {
                             if scancode & 0x80 == 0 {
                                 // Check for arrow keys first
-                                if let Some(special_key) = drivers::keyboard::scancode_to_special_key(scancode) {
+                                if let Some(special_key) =
+                                    drivers::keyboard::scancode_to_special_key(scancode)
+                                {
                                     match special_key {
                                         drivers::keyboard::SpecialKey::UpArrow => {
                                             // Navigate up in history
@@ -1273,24 +1293,27 @@ pub extern "C" fn kernel_main(
                                                 } else if HISTORY_POSITION > 0 {
                                                     HISTORY_POSITION -= 1;
                                                 }
-                                                
+
                                                 // Clear current input
                                                 for _ in 0..INPUT_LEN {
                                                     console.draw_char('\x08');
                                                 }
-                                                
+
                                                 // Load command from history
                                                 let hist_idx = HISTORY_POSITION as usize;
                                                 INPUT_LEN = HISTORY_LENS[hist_idx];
                                                 for i in 0..INPUT_LEN {
                                                     INPUT_BUFFER[i] = HISTORY_BUFFER[hist_idx][i];
                                                 }
-                                                
+
                                                 // Display the command
-                                                let cmd = core::str::from_utf8(&INPUT_BUFFER[..INPUT_LEN]).unwrap_or("");
+                                                let cmd = core::str::from_utf8(
+                                                    &INPUT_BUFFER[..INPUT_LEN],
+                                                )
+                                                .unwrap_or("");
                                                 console.write_str(cmd);
                                             }
-                                        },
+                                        }
                                         drivers::keyboard::SpecialKey::DownArrow => {
                                             // Navigate down in history
                                             if HISTORY_COUNT > 0 && HISTORY_POSITION != -1 {
@@ -1298,19 +1321,23 @@ pub extern "C" fn kernel_main(
                                                 for _ in 0..INPUT_LEN {
                                                     console.draw_char('\x08');
                                                 }
-                                                
+
                                                 if HISTORY_POSITION < (HISTORY_COUNT as isize - 1) {
                                                     HISTORY_POSITION += 1;
-                                                    
+
                                                     // Load command from history
                                                     let hist_idx = HISTORY_POSITION as usize;
                                                     INPUT_LEN = HISTORY_LENS[hist_idx];
                                                     for i in 0..INPUT_LEN {
-                                                        INPUT_BUFFER[i] = HISTORY_BUFFER[hist_idx][i];
+                                                        INPUT_BUFFER[i] =
+                                                            HISTORY_BUFFER[hist_idx][i];
                                                     }
-                                                    
+
                                                     // Display the command
-                                                    let cmd = core::str::from_utf8(&INPUT_BUFFER[..INPUT_LEN]).unwrap_or("");
+                                                    let cmd = core::str::from_utf8(
+                                                        &INPUT_BUFFER[..INPUT_LEN],
+                                                    )
+                                                    .unwrap_or("");
                                                     console.write_str(cmd);
                                                 } else {
                                                     // At the end of history, clear input
@@ -1318,7 +1345,7 @@ pub extern "C" fn kernel_main(
                                                     INPUT_LEN = 0;
                                                 }
                                             }
-                                        },
+                                        }
                                         _ => {}
                                     }
                                 } else if scancode == 0x0E {
@@ -1326,12 +1353,16 @@ pub extern "C" fn kernel_main(
                                         INPUT_LEN -= 1;
                                         console.draw_char('\x08');
                                     }
-                                } else if let Some(ch) = drivers::keyboard::scancode_to_char(scancode) {
+                                } else if let Some(ch) =
+                                    drivers::keyboard::scancode_to_char(scancode)
+                                {
                                     if ch == '\n' {
                                         console.write_str("\n");
-                                        
-                                        let cmd_str = core::str::from_utf8(&INPUT_BUFFER[..INPUT_LEN]).unwrap_or("");
-                                        
+
+                                        let cmd_str =
+                                            core::str::from_utf8(&INPUT_BUFFER[..INPUT_LEN])
+                                                .unwrap_or("");
+
                                         // Add non-empty commands to history
                                         if INPUT_LEN > 0 {
                                             let hist_idx = HISTORY_COUNT % 50;
@@ -1344,108 +1375,122 @@ pub extern "C" fn kernel_main(
                                             }
                                             HISTORY_POSITION = -1;
                                         }
-                                    
-                                            let response = if terminal_handle_fs_command(console, cmd_str)
-                                                || terminal_handle_system_command(console, cmd_str)
-                                            {
-                                                ""
-                                            } else {
-                                                match cmd_str {
-                                        "" => "",
-                                        _ => {
-                                            if cmd_str.starts_with("dpkg search ") {
-                                                "dpkg: not implemented"
-                                            } else if cmd_str.starts_with("dpkg install ") {
-                                                "dpkg: not implemented"
-                                            } else if cmd_str.starts_with("dpkg remove ") {
-                                                "dpkg: not implemented"
-                                            } else if cmd_str.starts_with("kill ") {
-                                                "kill: not implemented"
-                                            } else if cmd_str.starts_with("killall ") {
-                                                "killall: not implemented"
-                                            } else if cmd_str.starts_with("exec ") {
-                                                let path = &cmd_str[5..].trim();
-                                                
-                                                if path.is_empty() {
-                                                    "Usage: exec <path>"
-                                                } else {
-                                                    terminal_exec(console, terminal_cwd(), path);
-                                                    ""
+
+                                        let response = if terminal_handle_fs_command(
+                                            console, cmd_str,
+                                        ) || terminal_handle_system_command(
+                                            console, cmd_str,
+                                        ) {
+                                            ""
+                                        } else {
+                                            match cmd_str {
+                                                "" => "",
+                                                _ => {
+                                                    if cmd_str.starts_with("dpkg search ") {
+                                                        "dpkg: not implemented"
+                                                    } else if cmd_str.starts_with("dpkg install ") {
+                                                        "dpkg: not implemented"
+                                                    } else if cmd_str.starts_with("dpkg remove ") {
+                                                        "dpkg: not implemented"
+                                                    } else if cmd_str.starts_with("kill ") {
+                                                        "kill: not implemented"
+                                                    } else if cmd_str.starts_with("killall ") {
+                                                        "killall: not implemented"
+                                                    } else if cmd_str.starts_with("exec ") {
+                                                        let path = &cmd_str[5..].trim();
+
+                                                        if path.is_empty() {
+                                                            "Usage: exec <path>"
+                                                        } else {
+                                                            terminal_exec(
+                                                                console,
+                                                                terminal_cwd(),
+                                                                path,
+                                                            );
+                                                            ""
+                                                        }
+                                                    } else {
+                                                        "Command not found. Type 'help' for available commands."
+                                                    }
                                                 }
-                                            } else {
-                                                "Command not found. Type 'help' for available commands."
+                                            }
+                                        };
+
+                                        if response.len() > 0 {
+                                            console.write_str(response);
+                                            console.write_str("\n");
+                                        }
+
+                                        console.write_str("root@dunit:~# ");
+                                        unsafe {
+                                            INPUT_LEN = 0;
+                                        }
+                                    } else if ch == '\t' {
+                                        // Tab autocomplete
+                                        let input =
+                                            core::str::from_utf8(&INPUT_BUFFER[..INPUT_LEN])
+                                                .unwrap_or("");
+
+                                        let commands = [
+                                            "help", "dufetch", "ls", "pwd", "cd", "mkdir", "touch",
+                                            "cat", "echo", "exec", "ps", "top", "uname", "date",
+                                            "whoami", "uptime", "free", "exit", "poweroff",
+                                            "shutdown",
+                                        ];
+
+                                        let mut matches: [&str; 20] = [""; 20];
+                                        let mut match_count = 0;
+
+                                        for &cmd in commands.iter() {
+                                            if cmd.starts_with(input) && match_count < 20 {
+                                                matches[match_count] = cmd;
+                                                match_count += 1;
                                             }
                                         }
-                                    }
-                                    };
-                                    
-                                    if response.len() > 0 {
-                                        console.write_str(response);
-                                        console.write_str("\n");
-                                    }
-                                    
-                                    console.write_str("root@dunit:~# ");
-                                    unsafe { INPUT_LEN = 0; }
-                                } else if ch == '\t' {
-                                    // Tab autocomplete
-                                    let input = core::str::from_utf8(&INPUT_BUFFER[..INPUT_LEN]).unwrap_or("");
-                                    
-                                    let commands = [
-                                        "help", "dufetch", "ls", "pwd", "cd", "mkdir", "touch", "cat", 
-                                        "echo", "exec", "ps", "top", "uname", "date", 
-                                        "whoami", "uptime", "free", "exit", "poweroff", "shutdown"
-                                    ];
-                                    
-                                    let mut matches: [&str; 20] = [""; 20];
-                                    let mut match_count = 0;
-                                    
-                                    for &cmd in commands.iter() {
-                                        if cmd.starts_with(input) && match_count < 20 {
-                                            matches[match_count] = cmd;
-                                            match_count += 1;
+
+                                        if match_count == 1 {
+                                            // Single match - autocomplete
+                                            let completion = matches[0];
+
+                                            // Clear current input
+                                            for _ in 0..INPUT_LEN {
+                                                console.draw_char('\x08');
+                                            }
+
+                                            // Write completed command
+                                            INPUT_LEN = completion.len();
+                                            for (i, &b) in completion.as_bytes().iter().enumerate()
+                                            {
+                                                INPUT_BUFFER[i] = b;
+                                            }
+                                            console.write_str(completion);
+                                        } else if match_count > 1 {
+                                            // Multiple matches - show them
+                                            console.write_str("\n");
+                                            for i in 0..match_count {
+                                                console.write_str(matches[i]);
+                                                console.write_str("  ");
+                                            }
+                                            console.write_str("\nroot@dunit:~# ");
+
+                                            // Redisplay current input
+                                            let input_str =
+                                                core::str::from_utf8(&INPUT_BUFFER[..INPUT_LEN])
+                                                    .unwrap_or("");
+                                            console.write_str(input_str);
+                                        }
+                                    } else {
+                                        if INPUT_LEN < 255 {
+                                            INPUT_BUFFER[INPUT_LEN] = ch as u8;
+                                            INPUT_LEN += 1;
+                                            console.draw_char(ch);
                                         }
                                     }
-                                    
-                                    if match_count == 1 {
-                                        // Single match - autocomplete
-                                        let completion = matches[0];
-                                        
-                                        // Clear current input
-                                        for _ in 0..INPUT_LEN {
-                                            console.draw_char('\x08');
-                                        }
-                                        
-                                        // Write completed command
-                                        INPUT_LEN = completion.len();
-                                        for (i, &b) in completion.as_bytes().iter().enumerate() {
-                                            INPUT_BUFFER[i] = b;
-                                        }
-                                        console.write_str(completion);
-                                    } else if match_count > 1 {
-                                        // Multiple matches - show them
-                                        console.write_str("\n");
-                                        for i in 0..match_count {
-                                            console.write_str(matches[i]);
-                                            console.write_str("  ");
-                                        }
-                                        console.write_str("\nroot@dunit:~# ");
-                                        
-                                        // Redisplay current input
-                                        let input_str = core::str::from_utf8(&INPUT_BUFFER[..INPUT_LEN]).unwrap_or("");
-                                        console.write_str(input_str);
-                                    }
-                                } else {
-                                    if INPUT_LEN < 255 {
-                                        INPUT_BUFFER[INPUT_LEN] = ch as u8;
-                                        INPUT_LEN += 1;
-                                        console.draw_char(ch);
-                                    }
-                                }
                                 }
                             }
                         }
                     }
-                    
+
                     unsafe {
                         core::arch::asm!("pause");
                     }
@@ -1458,15 +1503,17 @@ pub extern "C" fn kernel_main(
             serial_write("[TERM-ERROR] No framebuffer available\r\n");
             screen_log("[FAIL] No framebuffer available", true);
         }
-        
+
         loop {
-            unsafe { core::arch::asm!("hlt"); }
+            unsafe {
+                core::arch::asm!("hlt");
+            }
         }
     } else {
         serial_write("\r\n[BOOT] Starting GUI mode...\r\n");
         serial_write("[GUI-001] Entering GUI initialization\r\n");
     }
-    
+
     fn draw_text(fb: *mut u32, width: usize, x: usize, y: usize, text: &str, color: u32) {
         for (i, ch) in text.bytes().enumerate() {
             let glyph = match ch {
@@ -1516,7 +1563,7 @@ pub extern "C" fn kernel_main(
                 b'\'' => [0x00, 0x05, 0x03, 0x00, 0x00],
                 _ => [0x00, 0x00, 0x00, 0x00, 0x00],
             };
-            
+
             unsafe {
                 for dx in 0..5 {
                     let col = glyph[dx];
@@ -1533,52 +1580,60 @@ pub extern "C" fn kernel_main(
             }
         }
     }
-    
+
     let fb = unsafe { fb_ptr.as_ref() };
     if let Some(fb) = fb {
         serial_write("[GUI-002] Framebuffer available\r\n");
         screen_log("[ OK ] Starting graphics subsystem", false);
-        
+
         serial_write("[GUI-003] Waiting for display stabilization\r\n");
         for _ in 0..3000000 {
-            unsafe { core::arch::asm!("pause"); }
+            unsafe {
+                core::arch::asm!("pause");
+            }
         }
-        
+
         serial_write("[GUI-004] Display stabilized\r\n");
         serial_write("[GUI-005] Getting framebuffer parameters\r\n");
-        
+
         let fb_addr = fb.address as *mut u32;
         let width = fb.width as usize;
         let height = fb.height as usize;
         let pitch = fb.pitch as usize;
-        
+
         serial_write("[GUI-006] Framebuffer address obtained\r\n");
         serial_write("[GUI-007] Starting UI rendering\r\n");
-        
+
         serial_write("[RENDER] Initial UI deferred to double-buffered GUI loop\r\n");
-        
+
         serial_write("[DE] Panel loaded\r\n");
         serial_write("[DE] Application menu initialized\r\n");
         serial_write("[DE] System tray initialized\r\n");
         serial_write("[DE] Desktop environment ready (PID: 4)\r\n\r\n");
-        
+
         serial_write("[APP] Starting default applications...\r\n");
         serial_write("[APP] GUI shell ready for runtime bridge launch\r\n");
         serial_write("[APP] File manager started (PID: 6)\r\n");
         serial_write("[APP] System monitor started (PID: 7)\r\n\r\n");
-        
-        serial_write("================================================================================\r\n");
-        serial_write("                         SYSTEM FULLY OPERATIONAL                              \r\n");
-        serial_write("================================================================================\r\n");
+
+        serial_write(
+            "================================================================================\r\n",
+        );
+        serial_write(
+            "                         SYSTEM FULLY OPERATIONAL                              \r\n",
+        );
+        serial_write(
+            "================================================================================\r\n",
+        );
         serial_write("\r\n");
         serial_write("[INFO] All subsystems initialized successfully\r\n");
         serial_write("[INFO] Microkernel is now running\r\n");
         serial_write("[INFO] Desktop environment active\r\n");
         serial_write("[INFO] 7 processes running\r\n");
         serial_write("[INFO] System ready for user interaction\r\n");
-        
+
         serial_write("\r\n[UI] Starting interactive UI loop...\r\n");
-        
+
         screen_log("[ OK ] Starting built-in GUI shell", false);
         serial_write("[GUI] Starting built-in desktop loop\r\n");
         ui_loop::run_ui_loop(fb_addr, width, height, pitch);
@@ -1586,9 +1641,11 @@ pub extern "C" fn kernel_main(
         serial_write("[GRAPHICS] No framebuffer available\r\n");
         serial_write("[GRAPHICS] Running in headless mode\r\n");
         serial_write("[INFO] System running without graphics\r\n");
-        
+
         loop {
-            unsafe { core::arch::asm!("hlt"); }
+            unsafe {
+                core::arch::asm!("hlt");
+            }
         }
     }
 }
@@ -1597,7 +1654,7 @@ fn draw_colored_text(fb: *mut u32, width: usize, x: usize, y: usize, text: &str)
     let mut current_x = x;
     let mut in_bracket = false;
     let mut bracket_content = false;
-    
+
     for (i, ch) in text.bytes().enumerate() {
         if ch == b'[' {
             in_bracket = true;
@@ -1607,13 +1664,13 @@ fn draw_colored_text(fb: *mut u32, width: usize, x: usize, y: usize, text: &str)
         } else if ch == b' ' && bracket_content {
             bracket_content = false;
         }
-        
+
         let color = if in_bracket || bracket_content || ch == b'[' || ch == b']' {
             0x00ff00
         } else {
             0xffffff
         };
-        
+
         let glyph: &[u8] = match ch {
             b'A' => &[0x7C, 0x12, 0x11, 0x12, 0x7C],
             b'B' => &[0x7F, 0x49, 0x49, 0x49, 0x36],
@@ -1680,7 +1737,7 @@ fn draw_colored_text(fb: *mut u32, width: usize, x: usize, y: usize, text: &str)
             b'x' => &[0x44, 0x28, 0x10, 0x28, 0x44],
             _ => &[0x00, 0x00, 0x00, 0x00, 0x00],
         };
-        
+
         unsafe {
             for dx in 0..5 {
                 let col = glyph[dx];
@@ -1695,7 +1752,7 @@ fn draw_colored_text(fb: *mut u32, width: usize, x: usize, y: usize, text: &str)
                 }
             }
         }
-        
+
         current_x += 6;
     }
 }
@@ -1708,7 +1765,7 @@ fn draw_error_text_old(fb: *mut u32, width: usize, x: usize, y: usize, text: &st
     let mut current_x = x;
     let mut in_bracket = false;
     let mut bracket_content = false;
-    
+
     for (i, ch) in text.bytes().enumerate() {
         if ch == b'[' {
             in_bracket = true;
@@ -1718,13 +1775,13 @@ fn draw_error_text_old(fb: *mut u32, width: usize, x: usize, y: usize, text: &st
         } else if ch == b' ' && bracket_content {
             bracket_content = false;
         }
-        
+
         let color = if in_bracket || bracket_content || ch == b'[' || ch == b']' {
             0xff0000
         } else {
             0xdc322f
         };
-        
+
         let glyph: &[u8] = match ch {
             b'A' => &[0x7C, 0x12, 0x11, 0x12, 0x7C],
             b'B' => &[0x7F, 0x49, 0x49, 0x49, 0x36],
@@ -1792,7 +1849,7 @@ fn draw_error_text_old(fb: *mut u32, width: usize, x: usize, y: usize, text: &st
             b'x' => &[0x44, 0x28, 0x10, 0x28, 0x44],
             _ => &[0x00, 0x00, 0x00, 0x00, 0x00],
         };
-        
+
         unsafe {
             for dx in 0..5 {
                 let col = glyph[dx];
@@ -1807,26 +1864,38 @@ fn draw_error_text_old(fb: *mut u32, width: usize, x: usize, y: usize, text: &st
                 }
             }
         }
-        
+
         current_x += 6;
     }
 }
 
 fn draw_char(fb: *mut u32, width: usize, x: usize, y: usize, c: u8, color: u32) {
     let font = match c {
-        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b' ' | b'-' | b'(' | b')' | b'[' | b']' | b':' | b'/' | b'.' | b'$' => {
-            [[1,1,1,1,1,1,1,1],
-             [1,0,0,0,0,0,0,1],
-             [1,0,0,0,0,0,0,1],
-             [1,0,0,0,0,0,0,1],
-             [1,0,0,0,0,0,0,1],
-             [1,0,0,0,0,0,0,1],
-             [1,0,0,0,0,0,0,1],
-             [1,1,1,1,1,1,1,1]]
-        },
-        _ => [[0; 8]; 8]
+        b'A'..=b'Z'
+        | b'a'..=b'z'
+        | b'0'..=b'9'
+        | b' '
+        | b'-'
+        | b'('
+        | b')'
+        | b'['
+        | b']'
+        | b':'
+        | b'/'
+        | b'.'
+        | b'$' => [
+            [1, 1, 1, 1, 1, 1, 1, 1],
+            [1, 0, 0, 0, 0, 0, 0, 1],
+            [1, 0, 0, 0, 0, 0, 0, 1],
+            [1, 0, 0, 0, 0, 0, 0, 1],
+            [1, 0, 0, 0, 0, 0, 0, 1],
+            [1, 0, 0, 0, 0, 0, 0, 1],
+            [1, 0, 0, 0, 0, 0, 0, 1],
+            [1, 1, 1, 1, 1, 1, 1, 1],
+        ],
+        _ => [[0; 8]; 8],
     };
-    
+
     unsafe {
         for dy in 0..8 {
             for dx in 0..8 {
@@ -1848,7 +1917,16 @@ fn draw_text(fb: *mut u32, width: usize, x: usize, y: usize, text: &str, color: 
     }
 }
 
-fn draw_window(fb: *mut u32, width: usize, height: usize, x: usize, y: usize, w: usize, h: usize, title: &str) {
+fn draw_window(
+    fb: *mut u32,
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    title: &str,
+) {
     unsafe {
         for dy in 0..h {
             for dx in 0..w {
@@ -1858,7 +1936,7 @@ fn draw_window(fb: *mut u32, width: usize, height: usize, x: usize, y: usize, w:
                     let offset = py * width + px;
                     let color = if dy < 30 {
                         0x268bd2
-                    } else if dx == 0 || dx == w-1 || dy == 0 || dy == h-1 {
+                    } else if dx == 0 || dx == w - 1 || dy == 0 || dy == h - 1 {
                         0x586e75
                     } else {
                         0xfdf6e3
@@ -1867,7 +1945,7 @@ fn draw_window(fb: *mut u32, width: usize, height: usize, x: usize, y: usize, w:
                 }
             }
         }
-        
+
         for (i, byte) in title.bytes().enumerate() {
             draw_char(fb, width, x + 10 + i * 8, y + 10, byte, 0xfdf6e3);
         }

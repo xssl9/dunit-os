@@ -43,7 +43,7 @@ impl FbConsole {
         unsafe {
             serial_write(b"[FBCON-001] FbConsole::new() entered\r\n\0".as_ptr());
             screen_log_c(b"[FBCON-001] FbConsole::new() entered\0".as_ptr(), false);
-            
+
             serial_write(b"[FBCON-002] Calculating stride\r\n\0".as_ptr());
             screen_log_c(b"[FBCON-002] Calculating stride\0".as_ptr(), false);
         }
@@ -52,7 +52,7 @@ impl FbConsole {
             serial_write(b"[FBCON-003] Creating Framebuffer struct\r\n\0".as_ptr());
             screen_log_c(b"[FBCON-003] Creating Framebuffer struct\0".as_ptr(), false);
         }
-        
+
         let fb = Framebuffer {
             address: fb_addr,
             width,
@@ -63,7 +63,7 @@ impl FbConsole {
             serial_write(b"[FBCON-004] Creating FbConsole struct\r\n\0".as_ptr());
             screen_log_c(b"[FBCON-004] Creating FbConsole struct\0".as_ptr(), false);
         }
-        
+
         let console = Self {
             fb,
             cursor_x: 0,
@@ -78,7 +78,7 @@ impl FbConsole {
             serial_write(b"[FBCON-005] FbConsole::new() returning\r\n\0".as_ptr());
             screen_log_c(b"[FBCON-005] FbConsole::new() returning\0".as_ptr(), false);
         }
-        
+
         console
     }
 
@@ -240,20 +240,20 @@ impl FbConsole {
             self.draw_cursor(VIEW_AT_BOTTOM);
         }
     }
-    
+
     pub fn clear_screen(&mut self) {
         self.clear_pixels();
         self.reset_scrollback();
         self.cursor_x = 0;
         self.cursor_y = 0;
     }
-    
+
     pub fn clear_top_area(&mut self, lines: usize) {
         unsafe {
             let ptr = self.fb.address;
             let color = self.bg_color;
             let count = lines * self.char_height * self.stride;
-            
+
             for i in 0..count {
                 ptr.add(i).write_volatile(color);
             }
@@ -339,7 +339,7 @@ impl FbConsole {
                 }
                 let glyph_row = if row < 8 { glyph[row] } else { 0 };
                 let offset = (px_y + row) * self.stride + px_x;
-                
+
                 for col in 0..self.char_width {
                     if px_x + col >= self.fb.width {
                         break;
@@ -364,12 +364,16 @@ impl FbConsole {
             self.draw_char(c);
         }
     }
-    
+
     pub fn draw_cursor(&mut self, visible: bool) {
         let px_x = self.cursor_x * self.char_width;
         let px_y = self.cursor_y * self.char_height;
-        let color = if visible { self.fg_color } else { self.bg_color };
-        
+        let color = if visible {
+            self.fg_color
+        } else {
+            self.bg_color
+        };
+
         unsafe {
             for row in (self.char_height - 2)..self.char_height {
                 if px_y + row >= self.fb.height {
@@ -532,64 +536,64 @@ pub fn init(fb_addr: *mut u32, width: usize, height: usize, pitch: usize) {
     unsafe {
         serial_write(b"[TERM-INIT-001] terminal::init() called\r\n\0".as_ptr());
         screen_log_c(b"[TERM-INIT-001] terminal::init() called\0".as_ptr(), false);
-        
+
         serial_write(b"[TERM-INIT-002] Getting pointer to storage\r\n\0".as_ptr());
         screen_log_c(b"[TERM-INIT-002] Getting storage pointer\0".as_ptr(), false);
-        
+
         let ptr = CONSOLE_STORAGE.as_mut_ptr();
-        
+
         serial_write(b"[TERM-INIT-003] Writing fields directly\r\n\0".as_ptr());
         screen_log_c(b"[TERM-INIT-003] Writing fields\0".as_ptr(), false);
-        
+
         let stride = pitch / 4;
-        
+
         core::ptr::write(&mut (*ptr).fb.address, fb_addr);
         serial_write(b"[TERM-INIT-004] address written\r\n\0".as_ptr());
-        
+
         core::ptr::write(&mut (*ptr).fb.width, width);
         serial_write(b"[TERM-INIT-005] width written\r\n\0".as_ptr());
-        
+
         core::ptr::write(&mut (*ptr).fb.height, height);
         serial_write(b"[TERM-INIT-006] height written\r\n\0".as_ptr());
-        
+
         core::ptr::write(&mut (*ptr).fb.pitch, pitch);
         serial_write(b"[TERM-INIT-007] pitch written\r\n\0".as_ptr());
         screen_log_c(b"[TERM-INIT-007] pitch written\0".as_ptr(), false);
-        
+
         serial_write(b"[TERM-INIT-008] Writing cursor_x\r\n\0".as_ptr());
         core::ptr::write(&mut (*ptr).cursor_x, 0);
         serial_write(b"[TERM-INIT-009] cursor_x written\r\n\0".as_ptr());
-        
+
         core::ptr::write(&mut (*ptr).cursor_y, 0);
         serial_write(b"[TERM-INIT-010] cursor_y written\r\n\0".as_ptr());
-        
+
         core::ptr::write(&mut (*ptr).char_width, 8);
         serial_write(b"[TERM-INIT-011] char_width written\r\n\0".as_ptr());
-        
+
         core::ptr::write(&mut (*ptr).char_height, 16);
         serial_write(b"[TERM-INIT-012] char_height written\r\n\0".as_ptr());
-        
+
         core::ptr::write(&mut (*ptr).fg_color, 0xFFFFFF);
         serial_write(b"[TERM-INIT-013] fg_color written\r\n\0".as_ptr());
-        
+
         core::ptr::write(&mut (*ptr).bg_color, 0x000000);
         serial_write(b"[TERM-INIT-014] bg_color written\r\n\0".as_ptr());
-        
+
         core::ptr::write(&mut (*ptr).stride, stride);
         serial_write(b"[TERM-INIT-015] stride written\r\n\0".as_ptr());
-        
+
         serial_write(b"[TERM-INIT-016] All fields written\r\n\0".as_ptr());
         screen_log_c(b"[TERM-INIT-016] All fields written\0".as_ptr(), false);
-        
+
         CONSOLE_INITIALIZED = true;
-        
+
         serial_write(b"[TERM-INIT-017] CONSOLE_INITIALIZED = true\r\n\0".as_ptr());
         screen_log_c(b"[TERM-INIT-017] Initialization complete\0".as_ptr(), false);
     }
 }
 
 pub fn get_console() -> Option<&'static mut FbConsole> {
-    unsafe { 
+    unsafe {
         if CONSOLE_INITIALIZED {
             Some(CONSOLE_STORAGE.assume_init_mut())
         } else {

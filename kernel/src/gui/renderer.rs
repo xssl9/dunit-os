@@ -8,7 +8,12 @@ pub struct Rect {
 
 impl Rect {
     pub const fn new(x: usize, y: usize, width: usize, height: usize) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     pub fn right(self) -> usize {
@@ -73,6 +78,11 @@ impl Framebuffer {
         }
     }
 
+    #[inline(always)]
+    pub unsafe fn put_pixel_unchecked(self, x: usize, y: usize, color: u32) {
+        core::ptr::write_volatile(self.addr.add(y * self.pitch_pixels + x), color);
+    }
+
     pub fn read_pixel(self, x: usize, y: usize) -> u32 {
         if x < self.width && y < self.height {
             unsafe { core::ptr::read_volatile(self.addr.add(y * self.pitch_pixels + x)) }
@@ -86,8 +96,11 @@ impl Framebuffer {
             return;
         };
         for y in rect.y..rect.bottom() {
+            let row = unsafe { self.addr.add(y * self.pitch_pixels + rect.x) };
             for x in rect.x..rect.right() {
-                self.put_pixel(x, y, color);
+                unsafe {
+                    core::ptr::write_volatile(row.add(x - rect.x), color);
+                }
             }
         }
     }
@@ -97,9 +110,15 @@ impl Framebuffer {
             return;
         }
         self.fill_rect(Rect::new(rect.x, rect.y, rect.width, 1), color);
-        self.fill_rect(Rect::new(rect.x, rect.bottom().saturating_sub(1), rect.width, 1), color);
+        self.fill_rect(
+            Rect::new(rect.x, rect.bottom().saturating_sub(1), rect.width, 1),
+            color,
+        );
         self.fill_rect(Rect::new(rect.x, rect.y, 1, rect.height), color);
-        self.fill_rect(Rect::new(rect.right().saturating_sub(1), rect.y, 1, rect.height), color);
+        self.fill_rect(
+            Rect::new(rect.right().saturating_sub(1), rect.y, 1, rect.height),
+            color,
+        );
     }
 
     pub fn draw_text(self, x: usize, y: usize, text: &str, color: u32) {
@@ -133,12 +152,21 @@ pub struct BackBuffer {
 
 impl BackBuffer {
     pub fn init(width: usize, height: usize) -> Option<Self> {
-        if width == 0 || height == 0 || width > MAX_BACKBUFFER_WIDTH || height > MAX_BACKBUFFER_HEIGHT {
+        if width == 0
+            || height == 0
+            || width > MAX_BACKBUFFER_WIDTH
+            || height > MAX_BACKBUFFER_HEIGHT
+        {
             return None;
         }
 
         Some(Self {
-            canvas: Framebuffer::new(core::ptr::addr_of_mut!(GUI_BACK_BUFFER).cast::<u32>(), width, height, width * 4),
+            canvas: Framebuffer::new(
+                core::ptr::addr_of_mut!(GUI_BACK_BUFFER).cast::<u32>(),
+                width,
+                height,
+                width * 4,
+            ),
         })
     }
 
@@ -147,7 +175,10 @@ impl BackBuffer {
     }
 
     pub fn present_full(&self, front: Framebuffer) {
-        self.present_rect(front, Rect::new(0, 0, self.canvas.width(), self.canvas.height()));
+        self.present_rect(
+            front,
+            Rect::new(0, 0, self.canvas.width(), self.canvas.height()),
+        );
     }
 
     pub fn present_rect(&self, front: Framebuffer, rect: Rect) {
@@ -156,8 +187,15 @@ impl BackBuffer {
         };
 
         for y in rect.y..rect.bottom() {
-            for x in rect.x..rect.right() {
-                front.put_pixel(x, y, self.canvas.read_pixel(x, y));
+            let src = unsafe { self.canvas.addr.add(y * self.canvas.pitch_pixels + rect.x) };
+            let dst = unsafe { front.addr.add(y * front.pitch_pixels + rect.x) };
+            for offset in 0..rect.width {
+                unsafe {
+                    core::ptr::write_volatile(
+                        dst.add(offset),
+                        core::ptr::read_volatile(src.add(offset)),
+                    );
+                }
             }
         }
     }

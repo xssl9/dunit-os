@@ -34,13 +34,13 @@ pub fn handle_keyboard(_frame: &InterruptFrame) {
     unsafe {
         let status: u8;
         core::arch::asm!("in al, dx", out("al") status, in("dx") 0x64u16, options(nomem, nostack));
-        
+
         if (status & 0x01) != 0 && (status & 0x20) == 0 {
             let scancode: u8;
             core::arch::asm!("in al, dx", out("al") scancode, in("dx") 0x60u16, options(nomem, nostack));
             crate::drivers::keyboard::push_scancode(scancode);
         }
-        
+
         core::arch::asm!("out dx, al", in("dx") 0x20u16, in("al") 0x20u8, options(nomem, nostack));
     }
 }
@@ -71,31 +71,37 @@ pub fn handle_mouse(_frame: &InterruptFrame) {
 
 pub fn handle_divide_by_zero(frame: &InterruptFrame) {
     let is_user_mode = (frame.cs & 0x3) == 3;
-    
+
     if is_user_mode {
-        terminate_current_process("divide-by-zero", frame, 0, crate::process::ProcessFault::DivideByZero);
+        terminate_current_process(
+            "divide-by-zero",
+            frame,
+            0,
+            crate::process::ProcessFault::DivideByZero,
+        );
     } else {
         panic!("Kernel divide by zero at RIP: {:#x}", frame.rip);
     }
 }
 
-pub fn handle_debug(_frame: &InterruptFrame) {
-}
+pub fn handle_debug(_frame: &InterruptFrame) {}
 
-pub fn handle_breakpoint(_frame: &InterruptFrame) {
-}
+pub fn handle_breakpoint(_frame: &InterruptFrame) {}
 
-pub fn handle_overflow(_frame: &InterruptFrame) {
-}
+pub fn handle_overflow(_frame: &InterruptFrame) {}
 
-pub fn handle_bound_range(_frame: &InterruptFrame) {
-}
+pub fn handle_bound_range(_frame: &InterruptFrame) {}
 
 pub fn handle_invalid_opcode(frame: &InterruptFrame) {
     let is_user_mode = (frame.cs & 0x3) == 3;
-    
+
     if is_user_mode {
-        terminate_current_process("invalid-opcode", frame, 0, crate::process::ProcessFault::InvalidOpcode);
+        terminate_current_process(
+            "invalid-opcode",
+            frame,
+            0,
+            crate::process::ProcessFault::InvalidOpcode,
+        );
     } else {
         panic!("Kernel invalid opcode at RIP: {:#x}", frame.rip);
     }
@@ -113,28 +119,48 @@ pub fn handle_device_not_available(_frame: &InterruptFrame) {
 }
 
 pub fn handle_double_fault(frame: &InterruptFrame) {
-    panic!("Double fault at RIP: {:#x}, error code: {:#x}", frame.rip, frame.err_code);
+    panic!(
+        "Double fault at RIP: {:#x}, error code: {:#x}",
+        frame.rip, frame.err_code
+    );
 }
 
 pub fn handle_invalid_tss(frame: &InterruptFrame) {
-    panic!("Invalid TSS at RIP: {:#x}, error code: {:#x}", frame.rip, frame.err_code);
+    panic!(
+        "Invalid TSS at RIP: {:#x}, error code: {:#x}",
+        frame.rip, frame.err_code
+    );
 }
 
 pub fn handle_segment_not_present(frame: &InterruptFrame) {
-    panic!("Segment not present at RIP: {:#x}, error code: {:#x}", frame.rip, frame.err_code);
+    panic!(
+        "Segment not present at RIP: {:#x}, error code: {:#x}",
+        frame.rip, frame.err_code
+    );
 }
 
 pub fn handle_stack_segment_fault(frame: &InterruptFrame) {
-    panic!("Stack segment fault at RIP: {:#x}, error code: {:#x}", frame.rip, frame.err_code);
+    panic!(
+        "Stack segment fault at RIP: {:#x}, error code: {:#x}",
+        frame.rip, frame.err_code
+    );
 }
 
 pub fn handle_general_protection_fault(frame: &InterruptFrame) {
     let is_user_mode = (frame.cs & 0x3) == 3;
-    
+
     if is_user_mode {
-        terminate_current_process("general-protection", frame, 0, crate::process::ProcessFault::GeneralProtection);
+        terminate_current_process(
+            "general-protection",
+            frame,
+            0,
+            crate::process::ProcessFault::GeneralProtection,
+        );
     } else {
-        panic!("Kernel general protection fault at RIP: {:#x}, error code: {:#x}", frame.rip, frame.err_code);
+        panic!(
+            "Kernel general protection fault at RIP: {:#x}, error code: {:#x}",
+            frame.rip, frame.err_code
+        );
     }
 }
 
@@ -143,35 +169,46 @@ pub fn handle_page_fault(frame: &InterruptFrame) {
     unsafe {
         core::arch::asm!("mov {}, cr2", out(reg) cr2);
     }
-    
+
     let is_user_mode = (frame.cs & 0x3) == 3;
-    
+
     if is_user_mode {
-        terminate_current_process("page-fault", frame, cr2, crate::process::ProcessFault::PageFault);
+        terminate_current_process(
+            "page-fault",
+            frame,
+            cr2,
+            crate::process::ProcessFault::PageFault,
+        );
     } else {
-        panic!("Kernel page fault at RIP: {:#x}, address: {:#x}, error code: {:#x}", frame.rip, cr2, frame.err_code);
+        panic!(
+            "Kernel page fault at RIP: {:#x}, address: {:#x}, error code: {:#x}",
+            frame.rip, cr2, frame.err_code
+        );
     }
 }
 
-pub fn handle_x87_floating_point(_frame: &InterruptFrame) {
-}
+pub fn handle_x87_floating_point(_frame: &InterruptFrame) {}
 
 pub fn handle_alignment_check(frame: &InterruptFrame) {
-    panic!("Alignment check at RIP: {:#x}, error code: {:#x}", frame.rip, frame.err_code);
+    panic!(
+        "Alignment check at RIP: {:#x}, error code: {:#x}",
+        frame.rip, frame.err_code
+    );
 }
 
 pub fn handle_machine_check(frame: &InterruptFrame) {
     panic!("Machine check at RIP: {:#x}", frame.rip);
 }
 
-pub fn handle_simd_floating_point(_frame: &InterruptFrame) {
-}
+pub fn handle_simd_floating_point(_frame: &InterruptFrame) {}
 
-pub fn handle_virtualization(_frame: &InterruptFrame) {
-}
+pub fn handle_virtualization(_frame: &InterruptFrame) {}
 
 pub fn handle_security_exception(frame: &InterruptFrame) {
-    panic!("Security exception at RIP: {:#x}, error code: {:#x}", frame.rip, frame.err_code);
+    panic!(
+        "Security exception at RIP: {:#x}, error code: {:#x}",
+        frame.rip, frame.err_code
+    );
 }
 
 pub fn handle_unknown_interrupt(frame: &InterruptFrame) {
@@ -245,7 +282,11 @@ fn serial_write_hex(value: u64) {
         let nibble = ((value >> shift) & 0xF) as u8;
         if nibble != 0 || started || shift == 0 {
             started = true;
-            let byte = if nibble < 10 { b'0' + nibble } else { b'a' + (nibble - 10) };
+            let byte = if nibble < 10 {
+                b'0' + nibble
+            } else {
+                b'a' + (nibble - 10)
+            };
             let ch = [byte];
             let s = unsafe { core::str::from_utf8_unchecked(&ch) };
             crate::memory::serial_write(s);
