@@ -1,4 +1,5 @@
 use crate::drivers::pci::{self, PciBar, PciDevice};
+use crate::memory::pmm::{get_pmm, PhysicalAddress};
 use crate::memory::vmm;
 use crate::serial_write;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -8,6 +9,7 @@ const XHCI_PROG_IF: u8 = 0x30;
 const CAP_CAPLENGTH: usize = 0x00;
 const CAP_HCIVERSION: usize = 0x02;
 const CAP_HCSPARAMS1: usize = 0x04;
+const CAP_HCSPARAMS2: usize = 0x08;
 const CAP_HCCPARAMS1: usize = 0x10;
 const CAP_DBOFF: usize = 0x14;
 const CAP_RTSOFF: usize = 0x18;
@@ -15,6 +17,8 @@ const CAP_RTSOFF: usize = 0x18;
 const OP_USBCMD: usize = 0x00;
 const OP_USBSTS: usize = 0x04;
 const OP_PAGESIZE: usize = 0x08;
+const OP_CRCR: usize = 0x18;
+const OP_DCBAAP: usize = 0x30;
 const OP_CONFIG: usize = 0x38;
 const OP_PORTS_BASE: usize = 0x400;
 const OP_PORT_STRIDE: usize = 0x10;
@@ -32,6 +36,18 @@ const PORTSC_CHANGE_BITS: u32 = (1 << 17) | (1 << 18) | (1 << 20) | (1 << 21) | 
 const MAX_CONTROLLERS: usize = 4;
 const TIMEOUT_SPINS: usize = 1_000_000;
 const XHCI_MMIO_MAP_SIZE: usize = 0x10000;
+const PAGE_SIZE: usize = 4096;
+const TRB_SIZE: usize = 16;
+const TRBS_PER_PAGE: usize = PAGE_SIZE / TRB_SIZE;
+const COMMAND_RING_TRBS: usize = TRBS_PER_PAGE;
+const EVENT_RING_TRBS: usize = TRBS_PER_PAGE;
+
+const TRB_TYPE_LINK: u32 = 6;
+const TRB_TYPE_ENABLE_SLOT_COMMAND: u32 = 9;
+const TRB_TYPE_COMMAND_COMPLETION_EVENT: u32 = 33;
+
+const TRB_CYCLE: u32 = 1 << 0;
+const TRB_LINK_TOGGLE_CYCLE: u32 = 1 << 1;
 
 static XHCI_FOUND: AtomicUsize = AtomicUsize::new(0);
 static XHCI_INITIALIZED: AtomicUsize = AtomicUsize::new(0);
@@ -56,6 +72,28 @@ struct XhciController {
     max_ports: u8,
     doorbell_offset: u32,
     runtime_offset: u32,
+}
+
+#[derive(Clone, Copy)]
+struct DmaPage {
+    phys: u64,
+    virt: usize,
+}
+
+#[derive(Clone, Copy)]
+struct XhciRings {
+    dcbaa: DmaPage,
+    command_ring: DmaPage,
+    event_ring: DmaPage,
+    event_ring_segment_table: DmaPage,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct Trb {
+    parameter: u64,
+    status: u32,
+    control: u32,
 }
 
 pub fn init() {
@@ -87,6 +125,18 @@ pub fn init() {
                 initialized += 1;
                 log_controller(controller);
                 connected_ports += log_ports(controller);
+                match setup_rings_and_enable_slot(controller) {
+                    Ok(slot_id) => {
+                        serial_write("[USB:xHCI] Enable Slot completed slot=");
+                        write_dec(slot_id as usize);
+                        serial_write("\r\n");
+                    }
+                    Err(error) => {
+                        serial_write("[USB:xHCI] command path failed: ");
+                        serial_write(error.as_str());
+                        serial_write("\r\n");
+                    }
+                }
             }
             Err(error) => {
                 XHCI_LAST_ERROR.store(error.code(), Ordering::Relaxed);
@@ -132,6 +182,7 @@ fn bring_up_controller(dev: PciDevice) -> Result<XhciController, XhciError> {
     let raw_version = read16(mmio_virt, CAP_HCIVERSION);
     let version = normalize_hci_version(raw_version);
     let hcsparams1 = read32(mmio_virt, CAP_HCSPARAMS1);
+    let hcsparams2 = read32(mmio_virt, CAP_HCSPARAMS2);
     let hccparams1 = read32(mmio_virt, CAP_HCCPARAMS1);
     let max_slots = (hcsparams1 & 0xFF) as u8;
     let max_ports = ((hcsparams1 >> 24) & 0xFF) as u8;
@@ -160,6 +211,8 @@ fn bring_up_controller(dev: PciDevice) -> Result<XhciController, XhciError> {
     }
     serial_write(" hcs1=");
     write_hex(hcsparams1 as u64, 8);
+    serial_write(" hcs2=");
+    write_hex(hcsparams2 as u64, 8);
     serial_write(" hcc1=");
     write_hex(hccparams1 as u64, 8);
     serial_write("\r\n");
@@ -363,6 +416,149 @@ fn log_ports(controller: XhciController) -> usize {
     connected
 }
 
+fn setup_rings_and_enable_slot(controller: XhciController) -> Result<u8, XhciError> {
+    let rings = allocate_rings()?;
+    initialize_rings(rings);
+
+    let op = controller.mmio_virt + controller.cap_length;
+    let runtime = controller.mmio_virt + controller.runtime_offset as usize;
+    let doorbells = controller.mmio_virt + controller.doorbell_offset as usize;
+
+    write64(op, OP_DCBAAP, rings.dcbaa.phys);
+    write64(op, OP_CRCR, rings.command_ring.phys | 1);
+
+    let interrupter = runtime + 0x20;
+    write32(interrupter, 0x00, read32(interrupter, 0x00) | 0x3);
+    write32(interrupter, 0x08, 1);
+    write64(interrupter, 0x10, rings.event_ring_segment_table.phys);
+    write64(interrupter, 0x18, rings.event_ring.phys | (1 << 3));
+
+    let command = read32(op, OP_USBCMD);
+    write32(op, OP_USBCMD, command | USBCMD_RUN_STOP);
+    wait_until(
+        || (read32(op, OP_USBSTS) & USBSTS_HOST_CONTROLLER_HALTED) == 0,
+        XhciError::RunTimeout,
+    )?;
+
+    write_command_trb(
+        rings.command_ring,
+        0,
+        Trb {
+            parameter: 0,
+            status: 0,
+            control: trb_type(TRB_TYPE_ENABLE_SLOT_COMMAND) | TRB_CYCLE,
+        },
+    );
+    ring_doorbell(doorbells, 0, 0);
+
+    poll_enable_slot_completion(rings.event_ring)
+}
+
+fn allocate_rings() -> Result<XhciRings, XhciError> {
+    Ok(XhciRings {
+        dcbaa: alloc_dma_page()?,
+        command_ring: alloc_dma_page()?,
+        event_ring: alloc_dma_page()?,
+        event_ring_segment_table: alloc_dma_page()?,
+    })
+}
+
+fn initialize_rings(rings: XhciRings) {
+    zero_page(rings.dcbaa);
+    zero_page(rings.command_ring);
+    zero_page(rings.event_ring);
+    zero_page(rings.event_ring_segment_table);
+
+    write_command_trb(
+        rings.command_ring,
+        COMMAND_RING_TRBS - 1,
+        Trb {
+            parameter: rings.command_ring.phys,
+            status: 0,
+            control: trb_type(TRB_TYPE_LINK) | TRB_CYCLE | TRB_LINK_TOGGLE_CYCLE,
+        },
+    );
+
+    write64(
+        rings.event_ring_segment_table.virt,
+        0,
+        rings.event_ring.phys,
+    );
+    write32(
+        rings.event_ring_segment_table.virt,
+        8,
+        EVENT_RING_TRBS as u32,
+    );
+    write32(rings.event_ring_segment_table.virt, 12, 0);
+}
+
+fn alloc_dma_page() -> Result<DmaPage, XhciError> {
+    let pmm = get_pmm().ok_or(XhciError::DmaAlloc)?;
+    let PhysicalAddress(phys) = pmm.alloc_frame().ok_or(XhciError::DmaAlloc)?;
+    let virt = vmm::phys_to_virt(phys);
+    let page = DmaPage {
+        phys: phys as u64,
+        virt,
+    };
+    zero_page(page);
+    Ok(page)
+}
+
+fn zero_page(page: DmaPage) {
+    unsafe {
+        core::ptr::write_bytes(page.virt as *mut u8, 0, PAGE_SIZE);
+    }
+}
+
+fn write_command_trb(page: DmaPage, index: usize, trb: Trb) {
+    let ptr = (page.virt + index * TRB_SIZE) as *mut Trb;
+    unsafe {
+        core::ptr::write_volatile(ptr, trb);
+    }
+}
+
+fn read_event_trb(page: DmaPage, index: usize) -> Trb {
+    let ptr = (page.virt + index * TRB_SIZE) as *const Trb;
+    unsafe { core::ptr::read_volatile(ptr) }
+}
+
+fn poll_enable_slot_completion(event_ring: DmaPage) -> Result<u8, XhciError> {
+    let mut spins = 0usize;
+    while spins < TIMEOUT_SPINS {
+        let event = read_event_trb(event_ring, 0);
+        if (event.control & TRB_CYCLE) != 0 {
+            let event_type = (event.control >> 10) & 0x3F;
+            let completion_code = ((event.status >> 24) & 0xFF) as u8;
+            let slot_id = ((event.control >> 24) & 0xFF) as u8;
+            serial_write("[USB:xHCI] event type=");
+            write_dec(event_type as usize);
+            serial_write(" code=");
+            write_dec(completion_code as usize);
+            serial_write(" slot=");
+            write_dec(slot_id as usize);
+            serial_write("\r\n");
+
+            if event_type == TRB_TYPE_COMMAND_COMPLETION_EVENT && completion_code == 1 {
+                return Ok(slot_id);
+            }
+            return Err(XhciError::CommandFailed);
+        }
+        unsafe {
+            core::arch::asm!("pause", options(nomem, nostack, preserves_flags));
+        }
+        spins += 1;
+    }
+    Err(XhciError::CommandTimeout)
+}
+
+fn trb_type(trb_type: u32) -> u32 {
+    trb_type << 10
+}
+
+fn ring_doorbell(doorbells: usize, target: usize, value: u32) {
+    write32(doorbells, target * 4, value);
+}
+
 fn wait_until<F: Fn() -> bool>(condition: F, timeout_error: XhciError) -> Result<(), XhciError> {
     let mut spins = 0usize;
     while spins < TIMEOUT_SPINS {
@@ -392,6 +588,12 @@ fn read32(base: usize, offset: usize) -> u32 {
 fn write32(base: usize, offset: usize, value: u32) {
     unsafe {
         core::ptr::write_volatile((base + offset) as *mut u32, value);
+    }
+}
+
+fn write64(base: usize, offset: usize, value: u64) {
+    unsafe {
+        core::ptr::write_volatile((base + offset) as *mut u64, value);
     }
 }
 
@@ -444,9 +646,13 @@ pub enum XhciError {
     MmioMap,
     BadCapabilityLength,
     UnsupportedVersion,
+    DmaAlloc,
     HaltTimeout,
     ResetTimeout,
     NotReadyTimeout,
+    RunTimeout,
+    CommandTimeout,
+    CommandFailed,
 }
 
 impl XhciError {
@@ -456,9 +662,13 @@ impl XhciError {
             XhciError::MmioMap => "MMIO map failed",
             XhciError::BadCapabilityLength => "bad capability length",
             XhciError::UnsupportedVersion => "unsupported xHCI version",
+            XhciError::DmaAlloc => "DMA allocation failed",
             XhciError::HaltTimeout => "halt timeout",
             XhciError::ResetTimeout => "reset timeout",
             XhciError::NotReadyTimeout => "controller not ready timeout",
+            XhciError::RunTimeout => "run timeout",
+            XhciError::CommandTimeout => "command timeout",
+            XhciError::CommandFailed => "command failed",
         }
     }
 
@@ -471,6 +681,10 @@ impl XhciError {
             XhciError::HaltTimeout => 5,
             XhciError::ResetTimeout => 6,
             XhciError::NotReadyTimeout => 7,
+            XhciError::DmaAlloc => 8,
+            XhciError::RunTimeout => 9,
+            XhciError::CommandTimeout => 10,
+            XhciError::CommandFailed => 11,
         }
     }
 
@@ -483,6 +697,10 @@ impl XhciError {
             5 => Some(XhciError::HaltTimeout),
             6 => Some(XhciError::ResetTimeout),
             7 => Some(XhciError::NotReadyTimeout),
+            8 => Some(XhciError::DmaAlloc),
+            9 => Some(XhciError::RunTimeout),
+            10 => Some(XhciError::CommandTimeout),
+            11 => Some(XhciError::CommandFailed),
             _ => None,
         }
     }

@@ -26,10 +26,12 @@ What is still missing is a general driver model and real hardware/storage/networ
   detection.
 - xHCI host-controller bring-up: MMIO capability probe, controller halt/reset,
   slot configuration, port power/status logging.
+- xHCI command/event ring foundation with DMA pages, DCBAA/CRCR/ERST setup,
+  doorbell ringing, and successful `Enable Slot` command completion.
 - Terminal `usb` diagnostics for xHCI controller count, initialized controller
   count, connected port count, and last init error.
 - QEMU `qemu-xhci` + `usb-mouse` boot verified: controller initializes and logs
-  the connected USB mouse port.
+  the connected USB mouse port, then completes `Enable Slot` with slot 1.
 - Serial output used by logs and userspace stdout/stderr smoke checks.
 - Basic port IO support through the HAL layer.
 - Timer/PIC initialization paths used by the boot flow.
@@ -42,8 +44,8 @@ What is still missing is a general driver model and real hardware/storage/networ
 - ACPI support.
 - Disk driver, initially ATA/AHCI or a simpler QEMU-friendly target.
 - Network driver, likely E1000 or RTL8139 first.
-- USB stack beyond host-controller bring-up: xHCI command ring, event ring,
-  device contexts, enumeration, and real HID polling/interrupt transfers.
+- USB stack beyond first command path: device contexts, address-device,
+  descriptor enumeration, and real HID polling/interrupt transfers.
 - Sound driver.
 - A cleaner device registration layer for future DevFS integration.
 
@@ -56,7 +58,7 @@ PCI enumeration hardening
     -> block device abstraction
     -> disk driver
     -> network driver -> [[../Future/Network-Stack|Network Stack]]
-    -> USB xHCI command/event rings
+    -> USB xHCI device contexts and enumeration
     -> USB HID mouse path
     -> sound later
 
@@ -72,9 +74,9 @@ ACPI
 - Persistent dunitFS needs a block device abstraction before it can leave MemFS/RAM.
 - Networking needs a real NIC driver before a TCP/IP stack is useful.
 - DevFS is still a skeleton, so devices are not exposed through VFS yet.
-- USB devices are not enumerated yet: xHCI command ring, event ring, device
-  contexts, and HID interrupt polling are still required after host-controller
-  bring-up.
+- USB devices are not enumerated yet: xHCI input/device contexts, address-device,
+  descriptor reads, and HID interrupt polling are still required after the first
+  command-ring path.
 
 ---
 
