@@ -1135,29 +1135,15 @@ fn sys_yield() -> i64 {
     let current_pid = crate::process::current_process()
         .map(|process| process.pid)
         .unwrap_or(crate::process::ProcessId(0));
-    let current = current_pid.0;
-    let queued = crate::process::scheduler::ready_len();
     match crate::process::scheduler::pick_next_candidate_excluding(current_pid) {
-        Some(pid) => {
-            syscall_log(format_args!(
-                "[YIELD] current={} candidate={} queue={} switch=resumable\n",
-                current, pid.0, queued
-            ));
-            match crate::process::save_current_user_context_for_yield(pid) {
-                Ok(_) => SMOKE_RETURN_MAGIC,
-                Err(error) => process_error_to_errno(error),
-            }
-        }
-        None => {
-            syscall_log(format_args!(
-                "[YIELD] current={} candidate=kernel queue={} switch=cooperative-return\n",
-                current, queued
-            ));
-            match crate::process::save_current_user_context_for_yield(current_pid) {
-                Ok(_) => SMOKE_RETURN_MAGIC,
-                Err(error) => process_error_to_errno(error),
-            }
-        }
+        Some(pid) => match crate::process::save_current_user_context_for_yield(pid) {
+            Ok(_) => SMOKE_RETURN_MAGIC,
+            Err(error) => process_error_to_errno(error),
+        },
+        None => match crate::process::save_current_user_context_for_yield(current_pid) {
+            Ok(_) => SMOKE_RETURN_MAGIC,
+            Err(error) => process_error_to_errno(error),
+        },
     }
 }
 

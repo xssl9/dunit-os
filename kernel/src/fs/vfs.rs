@@ -430,6 +430,7 @@ fn pop_path_component(out: &[u8; 256], len: &mut usize) {
 static mut VFS_INSTANCE: Option<VirtualFileSystem> = None;
 static mut ROOT_MEMFS: MemFs = MemFs::empty();
 static mut VFS_PATH_BUFFER: [u8; 256] = [0; 256];
+const GUI_SHORTCUTS_CONFIG: &[u8] = b"super+q=close_window\nsuper+enter=open_terminal\n";
 
 extern "C" {
     fn serial_write(s: *const u8);
@@ -489,6 +490,10 @@ pub fn init() -> Result<()> {
         ROOT_MEMFS.add_file("/app/bmp_viewer", bmp_viewer);
 
         register_assets();
+        let _ = ROOT_MEMFS.mkdir("/cfg/gui");
+        let mut gui_shortcuts = Vec::new();
+        gui_shortcuts.extend_from_slice(GUI_SHORTCUTS_CONFIG);
+        ROOT_MEMFS.add_file("/cfg/gui/shortcuts.conf", gui_shortcuts);
 
         let mut scheduler_test = Vec::new();
         scheduler_test.extend_from_slice(SCHEDULER_TEST_BYTES);

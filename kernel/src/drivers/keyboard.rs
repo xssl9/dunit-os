@@ -1,4 +1,5 @@
-static mut SCANCODE_BUFFER: [u8; 16] = [0; 16];
+static mut SCANCODE_BUFFER: [u8; 64] = [0; 64];
+const SCANCODE_BUFFER_LEN: usize = 64;
 static mut BUFFER_READ: usize = 0;
 static mut BUFFER_WRITE: usize = 0;
 static mut SHIFT_DOWN: bool = false;
@@ -9,7 +10,7 @@ pub fn read_scancode() -> Option<u8> {
     unsafe {
         if BUFFER_READ != BUFFER_WRITE {
             let scancode = SCANCODE_BUFFER[BUFFER_READ];
-            BUFFER_READ = (BUFFER_READ + 1) % 16;
+            BUFFER_READ = (BUFFER_READ + 1) % SCANCODE_BUFFER_LEN;
             Some(scancode)
         } else {
             None
@@ -29,7 +30,7 @@ pub fn push_scancode(scancode: u8) {
             _ => {}
         }
 
-        let next_write = (BUFFER_WRITE + 1) % 16;
+        let next_write = (BUFFER_WRITE + 1) % SCANCODE_BUFFER_LEN;
         if next_write != BUFFER_READ {
             SCANCODE_BUFFER[BUFFER_WRITE] = scancode;
             BUFFER_WRITE = next_write;

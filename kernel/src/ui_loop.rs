@@ -32,6 +32,7 @@ const WALLPAPER_HEIGHT: usize = 900;
 const WALLPAPER_OFFSET: usize = 54;
 const WALLPAPER_STRIDE: usize = WALLPAPER_WIDTH * 3;
 const WALLPAPER_PATH: &str = "/assets/wallpapers/wallpaper.bmp";
+const GUI_SHORTCUTS_PATH: &str = "/cfg/gui/shortcuts.conf";
 const GUI_PING_PATH: &str = "/app/gui_ping";
 const GUI_PING_MESSAGE: &[u8] = b"gui_ping: hello from userspace";
 const GUI_BRIDGE_MESSAGE_CAP: usize = 96;
@@ -94,6 +95,7 @@ struct UiState {
     notifications_open: bool,
     brightness: u8,
     keyboard_extended: bool,
+    keyboard_super_down: bool,
     gui_app_needs_run: [bool; MAX_GUI_APPS],
     focused_gui_app: usize,
     terminal_bridge: GuiRuntimeBridge,
@@ -381,6 +383,7 @@ impl UiState {
             notifications_open: true,
             brightness: 100,
             keyboard_extended: false,
+            keyboard_super_down: false,
             gui_app_needs_run: [false; MAX_GUI_APPS],
             focused_gui_app: NO_GUI_FOCUS,
             terminal_bridge: GuiRuntimeBridge::new(),
@@ -393,14 +396,17 @@ fn rects_intersect(a: Rect, b: Rect) -> bool {
     a.x < b.right() && a.right() > b.x && a.y < b.bottom() && a.bottom() > b.y
 }
 
-fn focus_gui_app(state: &mut UiState, index: usize) {
+fn focus_gui_app(state: &mut UiState, index: usize) -> bool {
     if index < MAX_GUI_APPS
         && state.gui_apps[index].pid != 0
         && state.gui_apps[index].window_id != 0
         && state.gui_apps[index].running
     {
+        let changed = state.focused_gui_app != index;
         state.focused_gui_app = index;
+        return changed;
     }
+    false
 }
 
 fn mark_gui_app_needs_run(state: &mut UiState, index: usize) {
@@ -618,6 +624,79 @@ fn read_vfs_file(path: &str) -> Option<Vec<u8>> {
 
     let _ = vfs.close(fd);
     Some(data)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GuiShortcutAction {
+    CloseWindow,
+    OpenTerminal,
+}
+
+fn trim_ascii(value: &str) -> &str {
+    value.trim_matches(|ch| ch == ' ' || ch == '\t' || ch == '\r')
+}
+
+fn shortcut_key_name(scancode: u8) -> Option<&'static str> {
+    match scancode {
+        0x10 => Some("q"),
+        0x1C => Some("enter"),
+        _ => None,
+    }
+}
+
+fn shortcut_action_name(value: &str) -> Option<GuiShortcutAction> {
+    if value.eq_ignore_ascii_case("close_window") {
+        Some(GuiShortcutAction::CloseWindow)
+    } else if value.eq_ignore_ascii_case("open_terminal") {
+        Some(GuiShortcutAction::OpenTerminal)
+    } else {
+        None
+    }
+}
+
+fn shortcut_lhs_matches(lhs: &str, key_name: &str) -> bool {
+    let mut has_super = false;
+    let mut has_key = false;
+    for part in lhs.split('+') {
+        let part = trim_ascii(part);
+        if part.eq_ignore_ascii_case("super") {
+            has_super = true;
+        } else if part.eq_ignore_ascii_case(key_name) {
+            has_key = true;
+        }
+    }
+    has_super && has_key
+}
+
+fn configured_super_shortcut(scancode: u8) -> Option<GuiShortcutAction> {
+    let key_name = shortcut_key_name(scancode)?;
+    let data = read_vfs_file(GUI_SHORTCUTS_PATH)?;
+    let text = core::str::from_utf8(&data).ok()?;
+    for raw_line in text.lines() {
+        let line = trim_ascii(raw_line);
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some(eq) = line.find('=') else {
+            continue;
+        };
+        let lhs = trim_ascii(&line[..eq]);
+        let rhs = trim_ascii(&line[eq + 1..]);
+        if shortcut_lhs_matches(lhs, key_name) {
+            return shortcut_action_name(rhs);
+        }
+    }
+    None
+}
+
+fn apply_gui_shortcut(state: &mut UiState, action: GuiShortcutAction) -> bool {
+    match action {
+        GuiShortcutAction::CloseWindow => close_focused_gui_app(state),
+        GuiShortcutAction::OpenTerminal => {
+            launch_gui_terminal_app(state);
+            true
+        }
+    }
 }
 
 fn launch_terminal_bridge(state: &mut UiState) {
@@ -970,6 +1049,18 @@ fn close_gui_app_window(state: &mut UiState, index: usize) -> bool {
         state.gui_apps[index].reset_window();
         true
     }
+}
+
+fn close_focused_gui_app(state: &mut UiState) -> bool {
+    let index = state.focused_gui_app;
+    if index >= MAX_GUI_APPS {
+        return false;
+    }
+    if close_gui_app_window(state, index) {
+        mark_gui_app_needs_run(state, index);
+        return true;
+    }
+    false
 }
 
 fn begin_gui_app_drag(
@@ -1411,6 +1502,9 @@ fn process_gui_messages(state: &mut UiState) {
                 let text = gui_message_text(&message);
                 if text.starts_with("root@dunit:#") {
                     gui_terminal_update_prompt(app, text);
+                    if text.trim_end() == "root@dunit:# latency" {
+                        serial_write("[GUI-TERM-LATENCY] prompt=latency\r\n");
+                    }
                 } else {
                     app.push_line(message.a, message.b, gui_message_data(&message));
                 }
@@ -2694,7 +2788,13 @@ fn draw_window(
     }
 }
 
-fn draw_gui_app_window(fb: Framebuffer, width: usize, height: usize, app: &GuiAppRuntime) {
+fn draw_gui_app_window(
+    fb: Framebuffer,
+    width: usize,
+    height: usize,
+    app: &GuiAppRuntime,
+    active: bool,
+) {
     let Some(rect) = gui_app_window_rect(width, height, app) else {
         return;
     };
@@ -2736,8 +2836,21 @@ fn draw_gui_app_window(fb: Framebuffer, width: usize, height: usize, app: &GuiAp
         window_width,
         window_height,
         14,
-        GLASS_EDGE,
+        if active { ACCENT } else { GLASS_EDGE },
     );
+    if active {
+        draw_round_rect_border(
+            fb,
+            width,
+            height,
+            x + 2,
+            y + 2,
+            window_width.saturating_sub(4),
+            window_height.saturating_sub(4),
+            12,
+            0x275f3c,
+        );
+    }
     draw_traffic_button(fb, width, height, x + 12, y + 11, RED);
     draw_traffic_button(fb, width, height, x + 32, y + 11, YELLOW);
     draw_traffic_button(fb, width, height, x + 52, y + 11, GREEN);
@@ -2815,12 +2928,18 @@ fn draw_windows(fb: Framebuffer, width: usize, height: usize, state: &UiState) {
     let mut index = 0usize;
     while index < MAX_GUI_APPS {
         if index != state.focused_gui_app {
-            draw_gui_app_window(fb, width, height, &state.gui_apps[index]);
+            draw_gui_app_window(fb, width, height, &state.gui_apps[index], false);
         }
         index += 1;
     }
     if state.focused_gui_app < MAX_GUI_APPS {
-        draw_gui_app_window(fb, width, height, &state.gui_apps[state.focused_gui_app]);
+        draw_gui_app_window(
+            fb,
+            width,
+            height,
+            &state.gui_apps[state.focused_gui_app],
+            true,
+        );
     }
 }
 
@@ -3230,7 +3349,13 @@ fn redraw_region(fb: Framebuffer, width: usize, height: usize, rect: Rect, state
                         gui_rect.height + 14,
                     ),
                 ) {
-                    draw_gui_app_window(fb, width, height, &state.gui_apps[app_index]);
+                    draw_gui_app_window(
+                        fb,
+                        width,
+                        height,
+                        &state.gui_apps[app_index],
+                        false,
+                    );
                 }
             }
         }
@@ -3249,7 +3374,13 @@ fn redraw_region(fb: Framebuffer, width: usize, height: usize, rect: Rect, state
                     gui_rect.height + 14,
                 ),
             ) {
-                draw_gui_app_window(fb, width, height, &state.gui_apps[state.focused_gui_app]);
+                draw_gui_app_window(
+                    fb,
+                    width,
+                    height,
+                    &state.gui_apps[state.focused_gui_app],
+                    true,
+                );
             }
         }
     }
@@ -3480,19 +3611,34 @@ fn handle_keyboard_shortcuts(state: &mut UiState) -> bool {
             state.keyboard_extended = true;
             continue;
         }
-        if (scancode & 0x80) != 0 {
-            continue;
-        }
+        let released = (scancode & 0x80) != 0;
+        let key_code = scancode & 0x7F;
 
         if state.keyboard_extended {
             state.keyboard_extended = false;
-            match scancode {
+            match key_code {
                 0x5B | 0x5C => {
-                    state.launcher_open = !state.launcher_open;
-                    redraw = true;
+                    state.keyboard_super_down = !released;
                 }
                 _ => {}
             }
+            continue;
+        }
+
+        if released {
+            continue;
+        }
+
+        if state.keyboard_super_down {
+            if let Some(action) = configured_super_shortcut(key_code) {
+                redraw |= apply_gui_shortcut(state, action);
+            }
+            continue;
+        }
+
+        if key_code == 0x3B {
+            state.launcher_open = !state.launcher_open;
+            redraw = true;
             continue;
         }
 
@@ -3501,10 +3647,10 @@ fn handle_keyboard_shortcuts(state: &mut UiState) -> bool {
             && state.gui_apps[app_index].running
             && state.gui_apps[app_index].window_id != 0
         {
-            let key = match scancode {
+            let key = match key_code {
                 0x0E => Some(8),
                 0x1C => Some(b'\n'),
-                _ => keyboard::scancode_to_char(scancode).map(|ch| ch as u8),
+                _ => keyboard::scancode_to_char(key_code).map(|ch| ch as u8),
             };
             if let Some(key) = key {
                 if send_gui_key_event(&state.gui_apps[app_index], key) {
@@ -3690,7 +3836,7 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
             let mut handled_click = false;
 
             if let Some((app_index, rect)) = topmost_gui_app_at(&state, mx, my, width, height) {
-                focus_gui_app(&mut state, app_index);
+                full_redraw |= focus_gui_app(&mut state, app_index);
                 if inside(mx, my, rect.x + 12, rect.y + 11, 12, 12) {
                     pointer_op = None;
                     if close_gui_app_window(&mut state, app_index) {
@@ -3703,7 +3849,7 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
 
             if !handled_click {
                 if let Some((app_index, _)) = topmost_gui_app_at(&state, mx, my, width, height) {
-                    focus_gui_app(&mut state, app_index);
+                    full_redraw |= focus_gui_app(&mut state, app_index);
                     let hit =
                         gui_app_content_hit(&state.gui_apps[app_index], mx, my, width, height);
                     if let Some((local_x, local_y)) = hit {
@@ -3838,7 +3984,7 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
             } else {
                 pointer_op = topmost_gui_app_at(&state, mx, my, width, height)
                     .and_then(|(app_index, _)| {
-                        focus_gui_app(&mut state, app_index);
+                        full_redraw |= focus_gui_app(&mut state, app_index);
                         begin_gui_app_drag(&state, app_index, mx, my, width, height)
                     })
                     .or_else(|| {

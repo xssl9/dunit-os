@@ -484,6 +484,9 @@ fn process_record_index(table: &[ProcessRecord], pid: ProcessId) -> Option<usize
 }
 
 fn log_process_transition(pid: ProcessId, from: ProcessState, to: ProcessState, reason: &str) {
+    if reason == "yield" || reason == "enter-user" {
+        return;
+    }
     crate::memory::serial_write("[PROCESS] pid=");
     serial_write_u64(pid.0);
     crate::memory::serial_write(" state=");
@@ -1133,9 +1136,6 @@ pub fn enter_user_process(pid: ProcessId) -> Result<ProcessExit, ProcessError> {
             Ok(process.context)
         })?;
 
-        crate::memory::serial_write("[PROCESS-RUN] starting pid=");
-        serial_write_u64(next_pid.0);
-        crate::memory::serial_write("\r\n");
         mark_process_started(next_pid);
         CURRENT_PID.store(next_pid.0, Ordering::SeqCst);
 
@@ -1144,7 +1144,6 @@ pub fn enter_user_process(pid: ProcessId) -> Result<ProcessExit, ProcessError> {
                 Some(current) => match current.install_syscall_stack() {
                     Ok(()) => match current.switch_to_address_space() {
                         Ok(()) => {
-                            crate::memory::serial_write("[PROCESS-RUN] entered user mode\r\n");
                             crate::hal::run_user_context(&context as *const CpuContext);
                             Ok(())
                         }
@@ -1161,9 +1160,6 @@ pub fn enter_user_process(pid: ProcessId) -> Result<ProcessExit, ProcessError> {
         }
 
         if take_process_yield_request() {
-            crate::memory::serial_write("[YIELD] pid=");
-            serial_write_u64(next_pid.0);
-            crate::memory::serial_write(" saved-context\r\n");
         } else {
             let mut status = ProcessExitStatus::Fault(ProcessFault::Unknown);
             let closed = with_process_mut(next_pid, |finished| {
@@ -1228,11 +1224,6 @@ pub fn enter_user_process(pid: ProcessId) -> Result<ProcessExit, ProcessError> {
             .or_else(|| crate::process::scheduler::pick_next_candidate_excluding(next_pid))
         {
             Some(candidate) => {
-                crate::memory::serial_write("[SCHED] switch current=");
-                serial_write_u64(next_pid.0);
-                crate::memory::serial_write(" next=");
-                serial_write_u64(candidate.0);
-                crate::memory::serial_write("\r\n");
                 next_pid = candidate;
             }
             None => {
