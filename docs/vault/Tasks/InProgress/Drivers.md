@@ -36,6 +36,11 @@ What is still missing is a general driver model and real hardware/storage/networ
   count, connected port count, and last init error.
 - Minimal device registry with `/dev` MemFS device nodes for framebuffer, input,
   PCI, and detected xHCI controllers.
+- Minimal block device layer with registered block devices, block geometry,
+  sector read/write dispatch, and a RAM-backed `ramblk0` smoke device exposed
+  at `/dev/ramblk0`.
+- Terminal `blk` and `blkread` diagnostics for block inventory and sector-read
+  smoke testing.
 - QEMU `qemu-xhci` + `usb-mouse` boot verified: controller initializes and logs
   the connected USB mouse port, then completes `Enable Slot` with slot 1.
 - Tracked terminal QEMU path uses the same USB devices:
@@ -63,7 +68,7 @@ What is still missing is a general driver model and real hardware/storage/networ
 
 ```text
 PCI enumeration hardening
-    -> block device abstraction
+    -> block device abstraction (minimal ramblk0 smoke path done)
     -> disk driver
     -> network driver -> [[../Future/Network-Stack|Network Stack]]
     -> USB xHCI device contexts and enumeration
@@ -79,7 +84,8 @@ ACPI
 
 ## Blockers
 
-- Persistent dunitFS needs a block device abstraction before it can leave MemFS/RAM.
+- Persistent dunitFS needs a real disk-backed block driver before it can leave
+  MemFS/RAM. The block abstraction exists, but `ramblk0` is volatile smoke media.
 - Networking needs a real NIC driver before a TCP/IP stack is useful.
 - DevFS is still a skeleton, but the first registered device nodes are exposed
   through `/dev` via MemFS.
@@ -104,6 +110,8 @@ lspci
 usb
 ls /dev
 devs
+blk
+blkread ramblk0 0
 ps
 ```
 

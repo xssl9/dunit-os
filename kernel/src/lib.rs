@@ -548,6 +548,119 @@ fn terminal_devs(console: &mut terminal::FbConsole) {
     }
 }
 
+fn terminal_blk(console: &mut terminal::FbConsole) {
+    let mut devices: [Option<drivers::block::BlockDeviceInfo>; 8] = [None; 8];
+    let count = drivers::block::snapshot(&mut devices);
+
+    console.write_str("DEVICE  DRIVER     BLOCKS  BLOCK_SIZE  BYTES  MODE\n");
+    for entry in devices.iter().take(count) {
+        let Some(device) = entry else {
+            continue;
+        };
+        console.write_str(device.name);
+        console.write_str("  ");
+        console.write_str(device.driver);
+        console.write_str("  ");
+        terminal_write_u64(console, device.blocks);
+        console.write_str("  ");
+        terminal_write_usize(console, device.block_size);
+        console.write_str("  ");
+        terminal_write_u64(console, device.bytes());
+        console.write_str("  ");
+        console.write_str(if device.readonly { "ro" } else { "rw" });
+        console.write_str("\n");
+    }
+}
+
+fn terminal_parse_u64(text: &str) -> Option<u64> {
+    let mut value = 0u64;
+    if text.is_empty() {
+        return None;
+    }
+
+    for byte in text.bytes() {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value.checked_mul(10)?;
+        value = value.checked_add((byte - b'0') as u64)?;
+    }
+
+    Some(value)
+}
+
+fn terminal_blkread(console: &mut terminal::FbConsole, args: &str) {
+    let mut parts = args.split_whitespace();
+    let Some(device) = parts.next() else {
+        console.write_str("blkread: missing device\n");
+        return;
+    };
+    let Some(lba_text) = parts.next() else {
+        console.write_str("blkread: missing lba\n");
+        return;
+    };
+    let Some(lba) = terminal_parse_u64(lba_text) else {
+        console.write_str("blkread: invalid lba\n");
+        return;
+    };
+
+    let mut block = [0u8; 512];
+    match drivers::block::read_block(device, lba, &mut block) {
+        Ok(bytes) => {
+            console.write_str(device);
+            console.write_str(" lba=");
+            terminal_write_u64(console, lba);
+            console.write_str(" bytes=");
+            terminal_write_usize(console, bytes);
+            console.write_str("\n");
+            terminal_hex_dump(console, &block[..64]);
+        }
+        Err(error) => {
+            console.write_str("blkread: ");
+            console.write_str(match error {
+                drivers::block::BlockError::NotFound => "device not found",
+                drivers::block::BlockError::OutOfRange => "lba out of range",
+                drivers::block::BlockError::BufferTooSmall => "buffer too small",
+                drivers::block::BlockError::Io => "I/O error",
+            });
+            console.write_str("\n");
+        }
+    }
+}
+
+fn terminal_hex_dump(console: &mut terminal::FbConsole, data: &[u8]) {
+    let mut offset = 0usize;
+    while offset < data.len() {
+        terminal_write_hex_digits(console, offset as u64, 4);
+        console.write_str(": ");
+
+        let mut index = 0usize;
+        while index < 16 && offset + index < data.len() {
+            terminal_write_hex_digits(console, data[offset + index] as u64, 2);
+            console.write_str(" ");
+            index += 1;
+        }
+
+        console.write_str(" ");
+        index = 0;
+        while index < 16 && offset + index < data.len() {
+            let byte = data[offset + index];
+            if byte.is_ascii_graphic() || byte == b' ' {
+                let ch = [byte];
+                if let Ok(text) = core::str::from_utf8(&ch) {
+                    console.write_str(text);
+                }
+            } else {
+                console.write_str(".");
+            }
+            index += 1;
+        }
+
+        console.write_str("\n");
+        offset += 16;
+    }
+}
+
 fn terminal_write_process_state(console: &mut terminal::FbConsole, state: process::ProcessState) {
     console.write_str(match state {
         process::ProcessState::Prepared => "Prepared",
@@ -648,6 +761,8 @@ fn terminal_handle_system_command(console: &mut terminal::FbConsole, cmd_str: &s
             console.write_str("  tree       - Show directory tree\n");
             console.write_str("  exec       - Execute userspace program\n");
             console.write_str("  devs       - Show registered devices\n");
+            console.write_str("  blk        - Show block devices\n");
+            console.write_str("  blkread    - Read a block device sector\n");
             console.write_str("  lspci      - Show PCI devices\n");
             console.write_str("  usb        - Show USB/xHCI driver status\n");
             console.write_str("  ps         - Show process table records\n");
@@ -705,6 +820,10 @@ fn terminal_handle_system_command(console: &mut terminal::FbConsole, cmd_str: &s
             terminal_devs(console);
             true
         }
+        "blk" => {
+            terminal_blk(console);
+            true
+        }
         "usb" => {
             terminal_usb(console);
             true
@@ -719,6 +838,14 @@ fn terminal_handle_system_command(console: &mut terminal::FbConsole, cmd_str: &s
         }
         "poweroff" | "shutdown" => {
             console.write_str("shutdown not implemented: ACPI/QEMU shutdown device unavailable\n");
+            true
+        }
+        _ if cmd_str.starts_with("blkread ") => {
+            terminal_blkread(console, &cmd_str["blkread ".len()..]);
+            true
+        }
+        "blkread" => {
+            terminal_blkread(console, "");
             true
         }
         _ => false,
@@ -1589,10 +1716,10 @@ pub extern "C" fn kernel_main(
                                             "help", "dufetch", "ls", "pwd", "cd", "mkdir", "touch",
                                             "cat", "echo", "exec", "ps", "top", "uname", "date",
                                             "whoami", "uptime", "free", "exit", "poweroff",
-                                            "shutdown", "devs", "lspci", "usb",
+                                            "shutdown", "devs", "blk", "blkread", "lspci", "usb",
                                         ];
 
-                                        let mut matches: [&str; 20] = [""; 20];
+                                        let mut matches: [&str; 22] = [""; 22];
                                         let mut match_count = 0;
 
                                         for &cmd in commands.iter() {

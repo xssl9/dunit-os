@@ -1,3 +1,4 @@
+pub mod block;
 pub mod keyboard;
 pub mod mouse;
 pub mod pci;
@@ -10,6 +11,7 @@ pub fn init() {
     registry::register("mouse", registry::DeviceClass::Input, "ps2-mouse");
     pci::init();
     usb::init();
+    block::init();
     keyboard::init();
     mouse::init();
 }
