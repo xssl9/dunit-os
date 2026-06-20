@@ -112,6 +112,13 @@ pub fn init() {
         }
 
         found += 1;
+        if found == 1 {
+            crate::drivers::registry::register(
+                "xhci0",
+                crate::drivers::registry::DeviceClass::UsbController,
+                "xhci",
+            );
+        }
         serial_write("[USB:xHCI] controller ");
         write_pci_addr(dev);
         serial_write(" vendor=");

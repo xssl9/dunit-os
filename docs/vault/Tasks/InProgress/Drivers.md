@@ -22,6 +22,10 @@ What is still missing is a general driver model and real hardware/storage/networ
   mouse parser path.
 - PCI config-space scan that detects and logs USB controllers.
 - PCI BAR decoding plus MMIO/bus-master enable path for device drivers.
+- Cached PCI inventory populated during driver init, so diagnostics and drivers
+  can reuse discovered devices without rescanning config space every time.
+- PCI capability walking for MSI/MSI-X discovery plus IRQ line/pin diagnostics.
+- PCI BAR sizing helper for future block/network/MMIO drivers.
 - Terminal `lspci` diagnostics for PCI device inventory and USB controller
   detection.
 - xHCI host-controller bring-up: MMIO capability probe, controller halt/reset,
@@ -30,6 +34,8 @@ What is still missing is a general driver model and real hardware/storage/networ
   doorbell ringing, and successful `Enable Slot` command completion.
 - Terminal `usb` diagnostics for xHCI controller count, initialized controller
   count, connected port count, and last init error.
+- Minimal device registry with `/dev` MemFS device nodes for framebuffer, input,
+  PCI, and detected xHCI controllers.
 - QEMU `qemu-xhci` + `usb-mouse` boot verified: controller initializes and logs
   the connected USB mouse port, then completes `Enable Slot` with slot 1.
 - Tracked terminal QEMU path uses the same USB devices:
@@ -42,7 +48,7 @@ What is still missing is a general driver model and real hardware/storage/networ
 
 ## Skeleton / Planned
 
-- PCI enumeration beyond discovery logs: capabilities, MSI/MSI-X, IRQ routing.
+- PCI IRQ routing beyond diagnostics and MSI/MSI-X enable/configuration.
 - ACPI support.
 - Disk driver, initially ATA/AHCI or a simpler QEMU-friendly target.
 - Network driver, likely E1000 or RTL8139 first.
@@ -75,7 +81,8 @@ ACPI
 
 - Persistent dunitFS needs a block device abstraction before it can leave MemFS/RAM.
 - Networking needs a real NIC driver before a TCP/IP stack is useful.
-- DevFS is still a skeleton, so devices are not exposed through VFS yet.
+- DevFS is still a skeleton, but the first registered device nodes are exposed
+  through `/dev` via MemFS.
 - USB devices are not enumerated yet: xHCI input/device contexts, address-device,
   descriptor reads, and HID interrupt polling are still required after the first
   command-ring path.
@@ -95,6 +102,8 @@ Then verify:
 ```text
 lspci
 usb
+ls /dev
+devs
 ps
 ```
 

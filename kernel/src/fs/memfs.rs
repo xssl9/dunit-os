@@ -5,7 +5,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-const BASE_DIRS: [&str; 7] = ["kernel", "proc", "app", "assets", "cfg", "usr", "tmp"];
+const BASE_DIRS: [&str; 8] = ["kernel", "proc", "app", "assets", "dev", "cfg", "usr", "tmp"];
 
 struct MemNode {
     path: String,
@@ -111,6 +111,25 @@ impl MemFs {
         if let Some(idx) = self.node_index(name) {
             self.nodes[idx].data = MemData::Static(data);
         }
+    }
+
+    pub fn add_device(&mut self, name: &str) {
+        let clean = Self::clean(name);
+        if clean.is_empty() || !self.parent_exists(clean) {
+            return;
+        }
+
+        if let Some(idx) = self.node_index(clean) {
+            self.nodes[idx].file_type = FileType::Device;
+            self.nodes[idx].data = MemData::Owned(Vec::new());
+            return;
+        }
+
+        self.nodes.push(MemNode {
+            path: String::from(clean),
+            file_type: FileType::Device,
+            data: MemData::Owned(Vec::new()),
+        });
     }
 
     pub fn static_file(&self, name: &str) -> Option<&'static [u8]> {

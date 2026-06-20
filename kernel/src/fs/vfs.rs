@@ -596,6 +596,12 @@ pub fn static_file(path: &str) -> Option<&'static [u8]> {
     unsafe { ROOT_MEMFS.static_file(path) }
 }
 
+pub fn register_device_node(path: &str) {
+    unsafe {
+        ROOT_MEMFS.add_device(path);
+    }
+}
+
 pub fn root_memfs_stats() -> crate::fs::memfs::MemFsStats {
     unsafe { ROOT_MEMFS.stats() }
 }

@@ -468,6 +468,10 @@ fn terminal_lspci(console: &mut terminal::FbConsole) {
     terminal_write_usize(console, snapshot.stored_devices);
     console.write_str(" usb_controllers=");
     terminal_write_usize(console, snapshot.usb_controllers);
+    console.write_str(" msi=");
+    terminal_write_usize(console, snapshot.msi_devices);
+    console.write_str(" msix=");
+    terminal_write_usize(console, snapshot.msix_devices);
     console.write_str("\n");
 
     for entry in snapshot.devices.iter().take(snapshot.stored_devices) {
@@ -485,6 +489,22 @@ fn terminal_lspci(console: &mut terminal::FbConsole) {
         terminal_write_hex_fixed(console, dev.subclass as u64, 2);
         console.write_str(" prog_if=");
         terminal_write_hex_fixed(console, dev.prog_if as u64, 2);
+        console.write_str(" irq=");
+        if dev.interrupt_line == 0xFF {
+            console.write_str("none");
+        } else {
+            terminal_write_usize(console, dev.interrupt_line as usize);
+        }
+        console.write_str("/");
+        terminal_write_usize(console, dev.interrupt_pin as usize);
+        console.write_str(" caps=");
+        terminal_write_usize(console, dev.capabilities.count as usize);
+        if dev.capabilities.has_msi {
+            console.write_str(" MSI");
+        }
+        if dev.capabilities.has_msix {
+            console.write_str(" MSI-X");
+        }
         if dev.class_code == 0x0C && dev.subclass == 0x03 {
             console.write_str(" USB");
         }
@@ -508,6 +528,24 @@ fn terminal_usb(console: &mut terminal::FbConsole) {
     }
     console.write_str("\n");
     console.write_str("USB HID mouse parser: boot-protocol reports supported; enumeration/polling not implemented\n");
+}
+
+fn terminal_devs(console: &mut terminal::FbConsole) {
+    let mut devices: [Option<drivers::registry::DeviceRegistration>; 32] = [None; 32];
+    let count = drivers::registry::snapshot(&mut devices);
+
+    console.write_str("DEVICE  CLASS           DRIVER\n");
+    for entry in devices.iter().take(count) {
+        let Some(device) = entry else {
+            continue;
+        };
+        console.write_str(device.name);
+        console.write_str("  ");
+        console.write_str(drivers::registry::class_name(device.class));
+        console.write_str("  ");
+        console.write_str(device.driver);
+        console.write_str("\n");
+    }
 }
 
 fn terminal_write_process_state(console: &mut terminal::FbConsole, state: process::ProcessState) {
@@ -609,6 +647,7 @@ fn terminal_handle_system_command(console: &mut terminal::FbConsole, cmd_str: &s
             console.write_str("  rm         - Remove file\n");
             console.write_str("  tree       - Show directory tree\n");
             console.write_str("  exec       - Execute userspace program\n");
+            console.write_str("  devs       - Show registered devices\n");
             console.write_str("  lspci      - Show PCI devices\n");
             console.write_str("  usb        - Show USB/xHCI driver status\n");
             console.write_str("  ps         - Show process table records\n");
@@ -660,6 +699,10 @@ fn terminal_handle_system_command(console: &mut terminal::FbConsole, cmd_str: &s
         }
         "lspci" => {
             terminal_lspci(console);
+            true
+        }
+        "devs" => {
+            terminal_devs(console);
             true
         }
         "usb" => {
@@ -1546,7 +1589,7 @@ pub extern "C" fn kernel_main(
                                             "help", "dufetch", "ls", "pwd", "cd", "mkdir", "touch",
                                             "cat", "echo", "exec", "ps", "top", "uname", "date",
                                             "whoami", "uptime", "free", "exit", "poweroff",
-                                            "shutdown", "lspci", "usb",
+                                            "shutdown", "devs", "lspci", "usb",
                                         ];
 
                                         let mut matches: [&str; 20] = [""; 20];
