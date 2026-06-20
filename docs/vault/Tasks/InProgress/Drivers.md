@@ -32,6 +32,8 @@ What is still missing is a general driver model and real hardware/storage/networ
   count, connected port count, and last init error.
 - QEMU `qemu-xhci` + `usb-mouse` boot verified: controller initializes and logs
   the connected USB mouse port, then completes `Enable Slot` with slot 1.
+- Tracked terminal QEMU path uses the same USB devices:
+  `make run-terminal QEMU_USB_INPUT="-device qemu-xhci -device usb-mouse"`.
 - Serial output used by logs and userspace stdout/stderr smoke checks.
 - Basic port IO support through the HAL layer.
 - Timer/PIC initialization paths used by the boot flow.
@@ -77,6 +79,24 @@ ACPI
 - USB devices are not enumerated yet: xHCI input/device contexts, address-device,
   descriptor reads, and HID interrupt polling are still required after the first
   command-ring path.
+
+---
+
+## Regression
+
+Use terminal mode with USB devices attached:
+
+```text
+make run-terminal
+```
+
+Then verify:
+
+```text
+lspci
+usb
+ps
+```
 
 ---
 

@@ -193,7 +193,7 @@ run-gui: iso-test-gui
 	$(QEMU) -boot d -cdrom $(BUILD_DIR)/microkernel.iso -m 512M -serial stdio -display $(QEMU_DISPLAY) $(QEMU_USB_INPUT) -boot menu=on
 
 run-terminal: iso
-	$(QEMU) -boot d -cdrom $(BUILD_DIR)/microkernel.iso -m 512M -serial stdio -nographic -boot menu=on
+	$(QEMU) -boot d -cdrom $(BUILD_DIR)/microkernel.iso -m 512M -serial stdio -nographic $(QEMU_USB_INPUT) -boot menu=on
 
 clean:
 	rm -rf $(BUILD_DIR)
