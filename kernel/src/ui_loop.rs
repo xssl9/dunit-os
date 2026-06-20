@@ -691,8 +691,12 @@ fn configured_super_shortcut(scancode: u8) -> Option<GuiShortcutAction> {
 
 fn apply_gui_shortcut(state: &mut UiState, action: GuiShortcutAction) -> bool {
     match action {
-        GuiShortcutAction::CloseWindow => close_focused_gui_app(state),
+        GuiShortcutAction::CloseWindow => {
+            serial_write("[GUI-SHORTCUT] close_window\r\n");
+            close_focused_gui_app(state)
+        }
         GuiShortcutAction::OpenTerminal => {
+            serial_write("[GUI-SHORTCUT] open_terminal\r\n");
             launch_gui_terminal_app(state);
             true
         }
@@ -909,6 +913,20 @@ fn send_gui_key_event(app: &GuiAppRuntime, key: u8) -> bool {
     send_gui_event(app, GUI_MSG_KEY_EVENT, key)
 }
 
+fn send_gui_key_event_and_flush(state: &mut UiState, app_index: usize, key: u8) -> bool {
+    if app_index >= MAX_GUI_APPS {
+        return false;
+    }
+    if !send_gui_key_event(&state.gui_apps[app_index], key) {
+        return false;
+    }
+    mark_gui_app_needs_run(state, app_index);
+    run_gui_app_once(state, app_index);
+    state.gui_app_needs_run[app_index] = false;
+    process_gui_messages(state);
+    true
+}
+
 fn send_gui_close_event(app: &GuiAppRuntime) -> bool {
     send_gui_event(app, GUI_MSG_CLOSE_EVENT, 0)
 }
@@ -1061,6 +1079,24 @@ fn close_focused_gui_app(state: &mut UiState) -> bool {
         return true;
     }
     false
+}
+
+fn keyboard_target_gui_app(state: &UiState) -> Option<usize> {
+    let focused = state.focused_gui_app;
+    if focused < MAX_GUI_APPS
+        && state.gui_apps[focused].running
+        && state.gui_apps[focused].window_id != 0
+    {
+        return Some(focused);
+    }
+    gui_app_slot_by_kind(state, GuiAppKind::Terminal).filter(|index| {
+        state.gui_apps[*index].running && state.gui_apps[*index].window_id != 0
+    })
+}
+
+fn reset_sticky_modifiers(state: &mut UiState) {
+    state.keyboard_super_down = false;
+    state.keyboard_extended = false;
 }
 
 fn begin_gui_app_drag(
@@ -3631,9 +3667,11 @@ fn handle_keyboard_shortcuts(state: &mut UiState) -> bool {
 
         if state.keyboard_super_down {
             if let Some(action) = configured_super_shortcut(key_code) {
+                reset_sticky_modifiers(state);
                 redraw |= apply_gui_shortcut(state, action);
+                continue;
             }
-            continue;
+            reset_sticky_modifiers(state);
         }
 
         if key_code == 0x3B {
@@ -3642,20 +3680,14 @@ fn handle_keyboard_shortcuts(state: &mut UiState) -> bool {
             continue;
         }
 
-        let app_index = state.focused_gui_app;
-        if app_index < MAX_GUI_APPS
-            && state.gui_apps[app_index].running
-            && state.gui_apps[app_index].window_id != 0
-        {
+        if let Some(app_index) = keyboard_target_gui_app(state) {
             let key = match key_code {
                 0x0E => Some(8),
                 0x1C => Some(b'\n'),
                 _ => keyboard::scancode_to_char(key_code).map(|ch| ch as u8),
             };
             if let Some(key) = key {
-                if send_gui_key_event(&state.gui_apps[app_index], key) {
-                    mark_gui_app_needs_run(state, app_index);
-                }
+                redraw |= send_gui_key_event_and_flush(state, app_index, key);
             }
         }
     }
