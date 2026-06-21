@@ -1,0 +1,28 @@
+name: Update LOC Badge
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Update LOC badge
+        run: python3 .github/scripts/update_loc_badge.py
+
+      - name: Commit badge update
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Update LOC badge"
+          file_pattern: ".github/loc-badge.json"

@@ -198,4 +198,6 @@ limine_test_gui.conf         Automated GUI test boot config
 
 MIT License.
 
+![Lines of code](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fsusopki%2Fdunit-os%2Fmain%2F.github%2Floc-badge.json)
+
 ## made with rust
