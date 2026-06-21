@@ -60,6 +60,12 @@ pub fn update() {
             let status = inb(0x64);
             let byte = inb(0x60);
             if (status & 0x20) == 0 {
+                // This byte came from the keyboard, not the mouse (status bit
+                // 0x20 is clear). The PS/2 controller multiplexes both devices
+                // onto port 0x60, so route it to the keyboard buffer instead of
+                // dropping it — otherwise polling here races IRQ1 and eats keys
+                // whenever the mouse is idle.
+                crate::drivers::keyboard::push_scancode(byte);
                 continue;
             }
 

@@ -61,6 +61,11 @@ const GUI_APP_TITLE_CAP: usize = 32;
 const GUI_APP_CWD_CAP: usize = 128;
 const MAX_GUI_APPS: usize = 4;
 const NO_GUI_FOCUS: usize = usize::MAX;
+// Control bytes used to forward arrow keys to GUI apps over GUI_MSG_KEY_EVENT.
+const GUI_KEY_UP: u8 = 0x11;
+const GUI_KEY_DOWN: u8 = 0x12;
+const GUI_KEY_LEFT: u8 = 0x13;
+const GUI_KEY_RIGHT: u8 = 0x14;
 const ICON_SIZE: usize = 44;
 const TERMINAL_ICON: &[u8] = include_bytes!("../../assets/icons/terminal.rgba");
 const CALCULATOR_ICON: &[u8] = include_bytes!("../../assets/icons/calculator.rgba");
@@ -1197,6 +1202,7 @@ fn gui_terminal_update_prompt(app: &mut GuiAppRuntime, text: &str) {
     }
     let y = app.lines[app.line_count - 1].y;
     app.lines[app.line_count - 1].set(0, y, text.as_bytes());
+    app.mark_dirty();
 }
 
 fn gui_terminal_append_bytes(app: &mut GuiAppRuntime, bytes: &[u8]) {
@@ -1268,215 +1274,228 @@ fn gui_terminal_append_process_state(
     );
 }
 
+
+/// Line-buffering sink that routes shared-shell output into a GUI terminal
+/// window. Bytes accumulate until a newline, then flush as one terminal line.
+struct GuiLineSink<'a> {
+    app: &'a mut GuiAppRuntime,
+    buf: [u8; GUI_APP_TEXT_CAP],
+    len: usize,
+}
+
+impl<'a> GuiLineSink<'a> {
+    fn new(app: &'a mut GuiAppRuntime) -> Self {
+        Self {
+            app,
+            buf: [0; GUI_APP_TEXT_CAP],
+            len: 0,
+        }
+    }
+
+    fn flush(&mut self) {
+        let mut tmp = [0u8; GUI_APP_TEXT_CAP];
+        tmp[..self.len].copy_from_slice(&self.buf[..self.len]);
+        let text = core::str::from_utf8(&tmp[..self.len]).unwrap_or("<invalid utf8>");
+        gui_terminal_append_line(self.app, text);
+        self.len = 0;
+    }
+
+    fn finish(&mut self) {
+        if self.len > 0 {
+            self.flush();
+        }
+    }
+}
+
+impl crate::shell::ShellSink for GuiLineSink<'_> {
+    fn write_str(&mut self, s: &str) {
+        for &byte in s.as_bytes() {
+            match byte {
+                b'\n' => self.flush(),
+                b'\r' => {}
+                _ => {
+                    if self.len >= self.buf.len() {
+                        self.flush();
+                    }
+                    self.buf[self.len] = byte;
+                    self.len += 1;
+                }
+            }
+        }
+    }
+}
+
+/// Resolve a GUI-app alias (or `/app/...` path) typed at `exec` to its window
+/// launcher. Console programs return `None` and run as foreground processes.
+fn gui_terminal_exec_app(first: &str) -> Option<&'static str> {
+    match first {
+        "filemanager" | "files" | "gui_file_manager" | "/app/gui_file_manager" => {
+            Some("gui_file_manager")
+        }
+        "calc" | "calculator" | "gui_calculator" | "/app/gui_calculator" => Some("gui_calculator"),
+        "stats" | "monitor" | "gui_stats" | "/app/gui_stats" => Some("gui_stats"),
+        "term" | "terminal" | "gui_terminal_stub" | "/app/gui_terminal_stub" => {
+            Some("gui_terminal_stub")
+        }
+        _ => None,
+    }
+}
+
+fn handle_gui_terminal_exec(state: &mut UiState, app_index: usize, cwd: &str, args: &str) {
+    if args.is_empty() {
+        gui_terminal_append_line(&mut state.gui_apps[app_index], "exec: missing path");
+        return;
+    }
+
+    let first = args.split_whitespace().next().unwrap_or("");
+    if let Some(name) = gui_terminal_exec_app(first) {
+        let mut line = [0u8; GUI_APP_TEXT_CAP];
+        let mut len = 0usize;
+        append_str(&mut line, &mut len, "exec: launching ");
+        append_str(&mut line, &mut len, name);
+        gui_terminal_append_line(&mut state.gui_apps[app_index], line_str(&line, len));
+        match name {
+            "gui_file_manager" => launch_gui_file_manager_app(state),
+            "gui_calculator" => launch_gui_calculator_app(state),
+            "gui_stats" => launch_gui_stats_app(state),
+            "gui_terminal_stub" => launch_gui_terminal_app(state),
+            _ => {}
+        }
+        return;
+    }
+
+    serial_write("[GUI-TERM-EXEC] start command=");
+    serial_write(args);
+    serial_write("\r\n");
+    unsafe {
+        GUI_TERMINAL_EXEC_OUTPUT = &mut state.gui_apps[app_index] as *mut GuiAppRuntime;
+    }
+    let result = {
+        let mut input = crate::command::NoExecInput;
+        crate::command::run_foreground_exec(
+            cwd,
+            args,
+            crate::process::ProcessOutputSink::GuiTerminal,
+            &mut input,
+        )
+    };
+    unsafe {
+        GUI_TERMINAL_EXEC_OUTPUT = core::ptr::null_mut();
+    }
+
+    let app = &mut state.gui_apps[app_index];
+    match result {
+        Ok((normalized, exit)) => {
+            let mut line = [0u8; GUI_APP_TEXT_CAP];
+            let mut len = 0usize;
+            append_str(&mut line, &mut len, "exec: ");
+            append_str(&mut line, &mut len, &normalized);
+            match exit.status {
+                crate::process::ProcessExitStatus::Exited(code) => {
+                    append_str(&mut line, &mut len, " returned code=");
+                    append_i32(&mut line, &mut len, code);
+                }
+                crate::process::ProcessExitStatus::Fault(fault) => {
+                    append_str(&mut line, &mut len, " killed by ");
+                    append_str(&mut line, &mut len, fault.reason());
+                }
+            }
+            gui_terminal_append_bytes(app, &line[..len]);
+            let _ = crate::process::autoreap_process(exit.pid, "gui-terminal-exec");
+        }
+        Err(crate::command::ExecRunError::MissingPath) => {
+            gui_terminal_append_line(app, "exec: missing path");
+        }
+        Err(crate::command::ExecRunError::Vfs(path, error)) => {
+            let mut line = [0u8; GUI_APP_TEXT_CAP];
+            let mut len = 0usize;
+            append_str(&mut line, &mut len, "exec: ");
+            append_str(&mut line, &mut len, &path);
+            append_str(&mut line, &mut len, " ");
+            append_str(
+                &mut line,
+                &mut len,
+                match error {
+                    vfs::VfsError::NotFound => "not found",
+                    vfs::VfsError::PermissionDenied => "permission denied",
+                    vfs::VfsError::InvalidDescriptor => "invalid descriptor",
+                    vfs::VfsError::AlreadyExists => "already exists",
+                    vfs::VfsError::NotADirectory => "not a directory",
+                    vfs::VfsError::IsADirectory => "is a directory",
+                    vfs::VfsError::InvalidPath => "invalid path",
+                    vfs::VfsError::Unsupported => "unsupported",
+                    vfs::VfsError::IoError => "I/O error",
+                },
+            );
+            gui_terminal_append_bytes(app, &line[..len]);
+        }
+        Err(crate::command::ExecRunError::ProcessCreate) => {
+            gui_terminal_append_line(app, "exec: process create failed");
+        }
+        Err(crate::command::ExecRunError::Interrupted) => {
+            gui_terminal_append_line(app, "exec: interrupted");
+        }
+        Err(crate::command::ExecRunError::StdinUnsupported) => {
+            gui_terminal_append_line(app, "exec: stdin unsupported in GUI terminal");
+        }
+        Err(crate::command::ExecRunError::ElfLaunch) => {
+            gui_terminal_append_line(app, "exec: ELF launch failed");
+        }
+    }
+    serial_write("[GUI-TERM-EXEC] done\r\n");
+}
+
 fn execute_gui_terminal_command(state: &mut UiState, app_index: usize, command: &str) {
     if app_index >= MAX_GUI_APPS {
         return;
     }
-    let app = &mut state.gui_apps[app_index];
     let trimmed = command.trim();
     serial_write("[GUI-TERM] command: ");
     serial_write(trimmed);
     serial_write("\r\n");
-    if app.line_count > 0 {
-        app.line_count -= 1;
-    }
-    gui_terminal_commit_command(app, trimmed);
 
-    if trimmed.is_empty() {
-        gui_terminal_new_prompt(app);
-        return;
-    }
-
-    if trimmed == "clear" {
-        gui_terminal_clear(app);
-        gui_terminal_new_prompt(app);
-        return;
-    }
-
-    if trimmed == "help" {
-        gui_terminal_append_line(app, "Available commands:");
-        gui_terminal_append_line(app, "help dufetch ls pwd cd ps clear exit exec");
-        gui_terminal_new_prompt(app);
-        return;
-    }
-
-    if trimmed == "dufetch" {
-        gui_terminal_append_line(app, "Dunit OS 1.0.0 Green Tea");
-        gui_terminal_append_line(app, "Mode: GUI userspace terminal MVP");
-        gui_terminal_append_line(app, "Shell: kernel-backed GUI command bridge");
-        gui_terminal_new_prompt(app);
-        return;
-    }
-
-    if trimmed == "pwd" {
-        let cwd = String::from(app.cwd());
-        gui_terminal_append_line(app, &cwd);
-        gui_terminal_new_prompt(app);
-        return;
-    }
-
-    if trimmed == "ps" || trimmed == "ps aux" {
-        let mut records = Vec::new();
-        crate::process::snapshot_processes(&mut records);
-        gui_terminal_append_line(app, "PID  PPID  STATE  PATH");
-        for record in records.iter().take(6) {
-            let mut line = [0u8; GUI_APP_TEXT_CAP];
-            let mut len = 0usize;
-            append_u64(&mut line, &mut len, record.pid.0);
-            append_str(&mut line, &mut len, "  ");
-            match record.parent {
-                Some(parent) => append_u64(&mut line, &mut len, parent.0),
-                None => append_str(&mut line, &mut len, "-"),
-            }
-            append_str(&mut line, &mut len, "  ");
-            gui_terminal_append_process_state(&mut line, &mut len, record.state);
-            append_str(&mut line, &mut len, "  ");
-            append_str(&mut line, &mut len, &record.path);
-            gui_terminal_append_bytes(app, &line[..len]);
+    {
+        let app = &mut state.gui_apps[app_index];
+        if app.line_count > 0 {
+            app.line_count -= 1;
         }
-        gui_terminal_new_prompt(app);
-        return;
+        gui_terminal_commit_command(app, trimmed);
     }
 
-    if trimmed == "ls" || trimmed.starts_with("ls ") {
-        let arg = trimmed.strip_prefix("ls").unwrap_or("").trim();
-        let path = if arg.is_empty() { "." } else { arg };
-        let cwd_string = String::from(app.cwd());
-        if let Some(vfs) = vfs::get_vfs() {
-            let mut entries = [vfs::DirEntry::empty(); 32];
-            match vfs.readdir_into_at(&cwd_string, path, &mut entries) {
-                Ok(count) => {
-                    let mut line = [0u8; GUI_APP_TEXT_CAP];
-                    let mut len = 0usize;
-                    for (idx, entry) in entries.iter().take(count).enumerate() {
-                        if idx > 0 {
-                            append_str(&mut line, &mut len, "  ");
-                        }
-                        append_str(&mut line, &mut len, entry.name());
-                    }
-                    gui_terminal_append_bytes(app, &line[..len]);
-                }
-                Err(error) => gui_terminal_vfs_error(app, "ls", error),
-            }
-        } else {
-            gui_terminal_append_line(app, "ls: VFS not initialized");
+    let mut cwd = String::from(state.gui_apps[app_index].cwd());
+    let outcome = {
+        let app = &mut state.gui_apps[app_index];
+        let mut sink = GuiLineSink::new(app);
+        let outcome = crate::shell::run_command(&mut sink, &mut cwd, trimmed);
+        sink.finish();
+        outcome
+    };
+    state.gui_apps[app_index].set_cwd(&cwd);
+
+    match outcome {
+        crate::shell::ShellOutcome::Handled => {
+            gui_terminal_new_prompt(&mut state.gui_apps[app_index]);
         }
-        gui_terminal_new_prompt(app);
-        return;
+        crate::shell::ShellOutcome::Clear => {
+            gui_terminal_clear(&mut state.gui_apps[app_index]);
+            gui_terminal_new_prompt(&mut state.gui_apps[app_index]);
+        }
+        crate::shell::ShellOutcome::NotFound => {
+            gui_terminal_append_line(
+                &mut state.gui_apps[app_index],
+                "Command not found. Type 'help'.",
+            );
+            gui_terminal_new_prompt(&mut state.gui_apps[app_index]);
+        }
+        crate::shell::ShellOutcome::Exit => {
+            // The userspace terminal app sends its own EXIT message to close the
+            // window, so there is nothing to do kernel-side here.
+        }
+        crate::shell::ShellOutcome::Exec(args) => {
+            handle_gui_terminal_exec(state, app_index, &cwd, &args);
+            gui_terminal_new_prompt(&mut state.gui_apps[app_index]);
+        }
     }
-
-    if trimmed == "cd" || trimmed.starts_with("cd ") {
-        let arg = trimmed.strip_prefix("cd").unwrap_or("").trim();
-        let path = if arg.is_empty() { "/" } else { arg };
-        let cwd_string = String::from(app.cwd());
-        if let Some(vfs) = vfs::get_vfs() {
-            match vfs.stat_at(&cwd_string, path) {
-                Ok(stat) if stat.file_type == vfs::FileType::Directory => {
-                    match vfs.normalize_at(&cwd_string, path) {
-                        Ok(new_cwd) => app.set_cwd(&new_cwd),
-                        Err(error) => gui_terminal_vfs_error(app, "cd", error),
-                    }
-                }
-                Ok(_) => gui_terminal_append_line(app, "cd: not a directory"),
-                Err(error) => gui_terminal_vfs_error(app, "cd", error),
-            }
-        } else {
-            gui_terminal_append_line(app, "cd: VFS not initialized");
-        }
-        gui_terminal_new_prompt(app);
-        return;
-    }
-
-    if trimmed == "exec" || trimmed.starts_with("exec ") {
-        let path = trimmed.strip_prefix("exec").unwrap_or("").trim();
-        serial_write("[GUI-TERM-EXEC] start command=");
-        serial_write(path);
-        serial_write("\r\n");
-        unsafe {
-            GUI_TERMINAL_EXEC_OUTPUT = app as *mut GuiAppRuntime;
-        }
-        let result = {
-            let mut input = crate::command::NoExecInput;
-            crate::command::run_foreground_exec(
-                app.cwd(),
-                path,
-                crate::process::ProcessOutputSink::GuiTerminal,
-                &mut input,
-            )
-        };
-        unsafe {
-            GUI_TERMINAL_EXEC_OUTPUT = core::ptr::null_mut();
-        }
-
-        match result {
-            Ok((normalized, exit)) => {
-                let mut line = [0u8; GUI_APP_TEXT_CAP];
-                let mut len = 0usize;
-                append_str(&mut line, &mut len, "exec: ");
-                append_str(&mut line, &mut len, &normalized);
-                match exit.status {
-                    crate::process::ProcessExitStatus::Exited(code) => {
-                        append_str(&mut line, &mut len, " returned code=");
-                        append_i32(&mut line, &mut len, code);
-                    }
-                    crate::process::ProcessExitStatus::Fault(fault) => {
-                        append_str(&mut line, &mut len, " killed by ");
-                        append_str(&mut line, &mut len, fault.reason());
-                    }
-                }
-                gui_terminal_append_bytes(app, &line[..len]);
-                let _ = crate::process::autoreap_process(exit.pid, "gui-terminal-exec");
-            }
-            Err(crate::command::ExecRunError::MissingPath) => {
-                gui_terminal_append_line(app, "exec: missing path");
-            }
-            Err(crate::command::ExecRunError::Vfs(path, error)) => {
-                let mut line = [0u8; GUI_APP_TEXT_CAP];
-                let mut len = 0usize;
-                append_str(&mut line, &mut len, "exec: ");
-                append_str(&mut line, &mut len, &path);
-                append_str(&mut line, &mut len, " ");
-                append_str(
-                    &mut line,
-                    &mut len,
-                    match error {
-                        vfs::VfsError::NotFound => "not found",
-                        vfs::VfsError::PermissionDenied => "permission denied",
-                        vfs::VfsError::InvalidDescriptor => "invalid descriptor",
-                        vfs::VfsError::AlreadyExists => "already exists",
-                        vfs::VfsError::NotADirectory => "not a directory",
-                        vfs::VfsError::IsADirectory => "is a directory",
-                        vfs::VfsError::InvalidPath => "invalid path",
-                        vfs::VfsError::Unsupported => "unsupported",
-                        vfs::VfsError::IoError => "I/O error",
-                    },
-                );
-                gui_terminal_append_bytes(app, &line[..len]);
-            }
-            Err(crate::command::ExecRunError::ProcessCreate) => {
-                gui_terminal_append_line(app, "exec: process create failed");
-            }
-            Err(crate::command::ExecRunError::Interrupted) => {
-                gui_terminal_append_line(app, "exec: interrupted");
-            }
-            Err(crate::command::ExecRunError::StdinUnsupported) => {
-                gui_terminal_append_line(app, "exec: stdin unsupported in GUI terminal");
-            }
-            Err(crate::command::ExecRunError::ElfLaunch) => {
-                gui_terminal_append_line(app, "exec: ELF launch failed");
-            }
-        }
-        serial_write("[GUI-TERM-EXEC] done\r\n");
-        gui_terminal_new_prompt(app);
-        return;
-    }
-
-    if trimmed == "exit" {
-        return;
-    }
-
-    gui_terminal_append_line(app, "Command not found. Type 'help'.");
-    gui_terminal_new_prompt(app);
 }
 
 fn process_gui_messages(state: &mut UiState) {
@@ -3649,12 +3668,25 @@ fn handle_keyboard_shortcuts(state: &mut UiState) -> bool {
         }
         let released = (scancode & 0x80) != 0;
         let key_code = scancode & 0x7F;
-
         if state.keyboard_extended {
             state.keyboard_extended = false;
             match key_code {
                 0x5B | 0x5C => {
                     state.keyboard_super_down = !released;
+                }
+                // Arrow keys: forward to the focused GUI app as control bytes
+                // (0x11 up, 0x12 down, 0x13 left, 0x14 right) so terminals can
+                // drive history and cursor movement.
+                0x48 | 0x50 | 0x4B | 0x4D if !released => {
+                    let key = match key_code {
+                        0x48 => GUI_KEY_UP,
+                        0x50 => GUI_KEY_DOWN,
+                        0x4B => GUI_KEY_LEFT,
+                        _ => GUI_KEY_RIGHT,
+                    };
+                    if let Some(app_index) = keyboard_target_gui_app(state) {
+                        redraw |= send_gui_key_event_and_flush(state, app_index, key);
+                    }
                 }
                 _ => {}
             }

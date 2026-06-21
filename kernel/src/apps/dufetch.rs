@@ -1,6 +1,7 @@
 use core::fmt::Write;
 
-use crate::{memory, process, terminal};
+use crate::shell::{ShellSink, SinkWriter};
+use crate::{memory, process};
 
 const LOGO_WIDTH: usize = 80;
 const LOGO: &str = include_str!("../../../assets/gui/dufetch_logo.txt");
@@ -9,54 +10,43 @@ const COLOR_SAGE: u32 = 0x9bb59c;
 const COLOR_SOFT_WHITE: u32 = 0xfffdf1;
 const COLOR_MUTED: u32 = 0xa9bda8;
 
-struct ConsoleWriter<'a> {
-    console: &'a mut terminal::FbConsole,
-}
-
-impl core::fmt::Write for ConsoleWriter<'_> {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        self.console.write_str(s);
-        Ok(())
-    }
-}
-
-fn write_padded(console: &mut terminal::FbConsole, text: &str, width: usize) {
+fn write_padded(out: &mut dyn ShellSink, text: &str, width: usize) {
     let mut written = text.len();
     for ch in text.chars() {
         match ch {
-            '@' | '%' => console.set_fg_color(COLOR_SOFT_WHITE),
-            '*' | '+' => console.set_fg_color(COLOR_SAGE),
-            '=' | '-' | ':' | '.' => console.set_fg_color(COLOR_DARK_GREEN),
-            _ => console.set_fg_color(COLOR_MUTED),
+            '@' | '%' => out.set_fg_color(COLOR_SOFT_WHITE),
+            '*' | '+' => out.set_fg_color(COLOR_SAGE),
+            '=' | '-' | ':' | '.' => out.set_fg_color(COLOR_DARK_GREEN),
+            _ => out.set_fg_color(COLOR_MUTED),
         }
         let mut buf = [0u8; 4];
-        console.write_str(ch.encode_utf8(&mut buf));
+        out.write_str(ch.encode_utf8(&mut buf));
     }
     while written < width {
-        console.write_str(" ");
+        out.write_str(" ");
         written += 1;
     }
-    console.reset_fg_color();
+    out.reset_fg_color();
 }
 
-fn write_label(console: &mut terminal::FbConsole, label: &str) {
-    console.set_fg_color(COLOR_DARK_GREEN);
-    console.write_str(label);
-    console.reset_fg_color();
+fn write_label(out: &mut dyn ShellSink, label: &str) {
+    out.set_fg_color(COLOR_DARK_GREEN);
+    out.write_str(label);
+    out.reset_fg_color();
 }
 
-fn write_value(console: &mut terminal::FbConsole, value: &str) {
-    console.set_fg_color(COLOR_SOFT_WHITE);
-    console.write_str(value);
-    console.reset_fg_color();
+fn write_value(out: &mut dyn ShellSink, value: &str) {
+    out.set_fg_color(COLOR_SOFT_WHITE);
+    out.write_str(value);
+    out.reset_fg_color();
 }
 
-fn write_info(console: &mut terminal::FbConsole, label: &str, value: &str) {
-    write_label(console, label);
-    write_value(console, value);
+fn write_info(out: &mut dyn ShellSink, label: &str, value: &str) {
+    write_label(out, label);
+    write_value(out, value);
 }
 
-pub fn run(console: &mut terminal::FbConsole, cwd: &str) {
+pub fn run(out: &mut dyn ShellSink, cwd: &str) {
     let pid = process::current_process()
         .map(|process| process.pid.0)
         .unwrap_or(0);
@@ -69,72 +59,64 @@ pub fn run(console: &mut terminal::FbConsole, cwd: &str) {
     }
 
     for (idx, logo_line) in LOGO.lines().enumerate() {
-        write_padded(console, logo_line, LOGO_WIDTH);
-        console.write_str("  ");
+        write_padded(out, logo_line, LOGO_WIDTH);
+        out.write_str("  ");
 
         match idx {
             3 => {
-                console.set_fg_color(COLOR_SOFT_WHITE);
-                console.write_str("Dunit OS");
-                console.reset_fg_color();
+                out.set_fg_color(COLOR_SOFT_WHITE);
+                out.write_str("Dunit OS");
+                out.reset_fg_color();
             }
-            4 => write_info(console, "OS: ", "Dunit OS"),
-            5 => write_info(console, "Kernel: ", "1.0.0 Green Tea"),
-            6 => write_info(console, "Arch: ", "x86_64"),
-            7 => write_info(console, "Mode: ", "Terminal"),
-            8 => write_info(console, "Shell: ", "Dunit Terminal"),
-            9 => write_info(console, "FS: ", "MemFS over VFS"),
+            4 => write_info(out, "OS: ", "Dunit OS"),
+            5 => write_info(out, "Kernel: ", "1.0.0 Green Tea"),
+            6 => write_info(out, "Arch: ", "x86_64"),
+            7 => write_info(out, "Mode: ", "Terminal"),
+            8 => write_info(out, "Shell: ", "Dunit Terminal"),
+            9 => write_info(out, "FS: ", "MemFS over VFS"),
             10 => {
-                write_label(console, "PID: ");
-                console.set_fg_color(COLOR_SOFT_WHITE);
-                let _ = write!(
-                    ConsoleWriter {
-                        console: &mut *console
-                    },
-                    "{}",
-                    pid
-                );
-                console.reset_fg_color();
+                write_label(out, "PID: ");
+                out.set_fg_color(COLOR_SOFT_WHITE);
+                let _ = write!(SinkWriter { sink: &mut *out }, "{}", pid);
+                out.reset_fg_color();
             }
             11 => {
-                write_label(console, "CWD: ");
-                write_value(console, cwd);
+                write_label(out, "CWD: ");
+                write_value(out, cwd);
             }
             12 => {
                 if memory_total_kib > 0 {
                     let used_kib = memory_total_kib.saturating_sub(memory_available_kib);
-                    write_label(console, "Memory: ");
-                    console.set_fg_color(COLOR_SOFT_WHITE);
+                    write_label(out, "Memory: ");
+                    out.set_fg_color(COLOR_SOFT_WHITE);
                     let _ = write!(
-                        ConsoleWriter {
-                            console: &mut *console
-                        },
+                        SinkWriter { sink: &mut *out },
                         "{} KiB / {} KiB",
                         used_kib,
                         memory_total_kib
                     );
-                    console.reset_fg_color();
+                    out.reset_fg_color();
                 } else {
-                    write_info(console, "Memory: ", "available");
+                    write_info(out, "Memory: ", "available");
                 }
             }
-            13 => write_info(console, "Display: ", "Framebuffer"),
+            13 => write_info(out, "Display: ", "Framebuffer"),
             15 => {
-                console.set_fg_color(COLOR_DARK_GREEN);
-                console.write_str("green");
-                console.reset_fg_color();
-                console.write_str("  ");
-                console.set_fg_color(COLOR_SAGE);
-                console.write_str("sage");
-                console.reset_fg_color();
-                console.write_str("  ");
-                console.set_fg_color(COLOR_SOFT_WHITE);
-                console.write_str("white");
-                console.reset_fg_color();
+                out.set_fg_color(COLOR_DARK_GREEN);
+                out.write_str("green");
+                out.reset_fg_color();
+                out.write_str("  ");
+                out.set_fg_color(COLOR_SAGE);
+                out.write_str("sage");
+                out.reset_fg_color();
+                out.write_str("  ");
+                out.set_fg_color(COLOR_SOFT_WHITE);
+                out.write_str("white");
+                out.reset_fg_color();
             }
             _ => {}
         }
 
-        console.write_str("\n");
+        out.write_str("\n");
     }
 }
