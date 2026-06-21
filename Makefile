@@ -4,8 +4,14 @@ CC = gcc
 AS = nasm
 CARGO = cargo
 QEMU = qemu-system-x86_64
-QEMU_DISPLAY ?= sdl,grab-mod=lctrl-lalt,show-cursor=off
+QEMU_DISPLAY ?= sdl
 QEMU_USB_INPUT ?= -device qemu-xhci -device usb-mouse
+# Hardware acceleration: q35 machine + KVM (CPU virtualization) + host CPU passthrough.
+QEMU_ACCEL ?= -enable-kvm -cpu host -machine q35,accel=kvm
+# std VGA with 32 MiB VRAM, plenty for the Limine linear framebuffer.
+QEMU_VGA ?= -vga std -global VGA.vgamem_mb=32
+QEMU_EXTRA ?= -no-reboot
+QEMU_MEM ?= 512M
 LIMINE_CONFIG ?= limine.conf
 
 HAL_DIR = hal
@@ -187,13 +193,13 @@ grub-iso: $(BUILD_DIR)/kernel.elf
 	@echo "GRUB ISO created at $(BUILD_DIR)/os.iso"
 
 run: iso
-	$(QEMU) -boot d -cdrom $(BUILD_DIR)/microkernel.iso -m 512M -serial stdio -display $(QEMU_DISPLAY) $(QEMU_USB_INPUT) -boot menu=on
+	$(QEMU) $(QEMU_ACCEL) $(QEMU_EXTRA) -boot d -cdrom $(BUILD_DIR)/microkernel.iso -m $(QEMU_MEM) -serial stdio -display $(QEMU_DISPLAY) $(QEMU_VGA) $(QEMU_USB_INPUT) -boot menu=on
 
 run-gui: iso-test-gui
-	$(QEMU) -boot d -cdrom $(BUILD_DIR)/microkernel.iso -m 512M -serial stdio -display $(QEMU_DISPLAY) $(QEMU_USB_INPUT) -boot menu=on
+	$(QEMU) $(QEMU_ACCEL) $(QEMU_EXTRA) -boot d -cdrom $(BUILD_DIR)/microkernel.iso -m $(QEMU_MEM) -serial stdio -display $(QEMU_DISPLAY) $(QEMU_VGA) $(QEMU_USB_INPUT) -boot menu=on
 
 run-terminal: iso
-	$(QEMU) -boot d -cdrom $(BUILD_DIR)/microkernel.iso -m 512M -serial stdio -nographic $(QEMU_USB_INPUT) -boot menu=on
+	$(QEMU) $(QEMU_ACCEL) $(QEMU_EXTRA) -boot d -cdrom $(BUILD_DIR)/microkernel.iso -m $(QEMU_MEM) -serial stdio -nographic $(QEMU_USB_INPUT) -boot menu=on
 
 clean:
 	rm -rf $(BUILD_DIR)
