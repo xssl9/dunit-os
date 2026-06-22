@@ -54,13 +54,18 @@ const GUI_MSG_KEY_EVENT: u16 = 101;
 const GUI_MSG_CLOSE_EVENT: u16 = 102;
 const GUI_MSG_POINTER_EVENT: u16 = 103;
 const GUI_MSG_DATA_CAP: usize = 160;
-const GUI_APP_LINES: usize = 40;
+const GUI_APP_LINES: usize = 128;
+const GUI_TERMINAL_ROW_H: usize = 14;
 const GUI_APP_RECTS: usize = 128;
 const GUI_APP_TEXT_CAP: usize = 96;
 const GUI_APP_TITLE_CAP: usize = 32;
 const GUI_APP_CWD_CAP: usize = 128;
 const MAX_GUI_APPS: usize = 4;
 const NO_GUI_FOCUS: usize = usize::MAX;
+// Minimum size and resize-grip footprint for resizable GUI app windows.
+const GUI_APP_MIN_W: usize = 300;
+const GUI_APP_MIN_H: usize = 180;
+const GUI_APP_RESIZE_GRIP: usize = 18;
 // Control bytes used to forward arrow keys to GUI apps over GUI_MSG_KEY_EVENT.
 const GUI_KEY_UP: u8 = 0x11;
 const GUI_KEY_DOWN: u8 = 0x12;
@@ -231,6 +236,7 @@ struct GuiAppRuntime {
     rect_count: usize,
     lines: [GuiTextLine; GUI_APP_LINES],
     line_count: usize,
+    scroll_offset: usize,
     dirty_revision: u32,
     cwd: [u8; GUI_APP_CWD_CAP],
     cwd_len: usize,
@@ -258,6 +264,7 @@ impl GuiAppRuntime {
             rect_count: 0,
             lines: [GuiTextLine::empty(); GUI_APP_LINES],
             line_count: 0,
+            scroll_offset: 0,
             dirty_revision: 0,
             cwd: [0; GUI_APP_CWD_CAP],
             cwd_len: 0,
@@ -361,6 +368,7 @@ impl GuiAppRuntime {
         self.status_len = 0;
         self.rect_count = 0;
         self.line_count = 0;
+        self.scroll_offset = 0;
         self.dirty_revision = next_revision;
         self.cwd_len = 0;
     }
@@ -472,6 +480,9 @@ enum PointerOp {
         index: usize,
         offset_x: usize,
         offset_y: usize,
+    },
+    GuiAppResize {
+        index: usize,
     },
     Drag {
         idx: usize,
@@ -1119,6 +1130,19 @@ fn begin_gui_app_drag(
     if inside(mx, my, rect.x + 12, rect.y + 11, 12, 12) {
         return None;
     }
+    // Bottom-right corner grip resizes the window.
+    let grip_x = rect.right().saturating_sub(GUI_APP_RESIZE_GRIP);
+    let grip_y = rect.bottom().saturating_sub(GUI_APP_RESIZE_GRIP);
+    if inside(
+        mx,
+        my,
+        grip_x,
+        grip_y,
+        GUI_APP_RESIZE_GRIP,
+        GUI_APP_RESIZE_GRIP,
+    ) {
+        return Some(PointerOp::GuiAppResize { index });
+    }
     if inside(mx, my, rect.x, rect.y, rect.width, 34) {
         return Some(PointerOp::GuiAppDrag {
             index,
@@ -1127,6 +1151,35 @@ fn begin_gui_app_drag(
         });
     }
     None
+}
+
+fn resize_gui_app_window(
+    state: &mut UiState,
+    index: usize,
+    mx: usize,
+    my: usize,
+    width: usize,
+    height: usize,
+) -> Option<(Rect, Rect)> {
+    if index >= MAX_GUI_APPS {
+        return None;
+    }
+    let old_rect = gui_app_window_rect(width, height, &state.gui_apps[index])?;
+    let max_w = width.saturating_sub(old_rect.x);
+    let max_h = height.saturating_sub(old_rect.y);
+    let new_w = mx
+        .saturating_sub(old_rect.x)
+        .max(GUI_APP_MIN_W)
+        .min(max_w.max(GUI_APP_MIN_W));
+    let new_h = my
+        .saturating_sub(old_rect.y)
+        .max(GUI_APP_MIN_H)
+        .min(max_h.max(GUI_APP_MIN_H));
+    state.gui_apps[index].width = new_w;
+    state.gui_apps[index].height = new_h;
+    state.gui_apps[index].mark_dirty();
+    let new_rect = gui_app_window_rect(width, height, &state.gui_apps[index])?;
+    Some((old_rect, new_rect))
 }
 
 fn drag_gui_app_window(
@@ -1154,6 +1207,7 @@ fn drag_gui_app_window(
 fn gui_terminal_clear(app: &mut GuiAppRuntime) {
     app.rect_count = 0;
     app.line_count = 0;
+    app.scroll_offset = 0;
     let mut rect_index = 0usize;
     while rect_index < app.rects.len() {
         app.rects[rect_index] = GuiRectShape::empty();
@@ -1167,6 +1221,8 @@ fn gui_terminal_clear(app: &mut GuiAppRuntime) {
 }
 
 fn gui_terminal_append_line(app: &mut GuiAppRuntime, text: &str) {
+    // New output always pins the view back to the bottom.
+    app.scroll_offset = 0;
     if app.line_count < app.lines.len() {
         let index = app.line_count;
         app.lines[index].set(0, (index as i32) * 14, text.as_bytes());
@@ -1526,8 +1582,8 @@ fn process_gui_messages(state: &mut UiState) {
                 let app = &mut state.gui_apps[app_index];
                 app.window_id = message.window_id;
                 app.owner_pid = pid;
-                app.width = (message.a.max(220) as usize).min(720);
-                app.height = (message.b.max(140) as usize).min(420);
+                app.width = (message.a.max(220) as usize).min(1100);
+                app.height = (message.b.max(140) as usize).min(760);
                 if app.x == 0 && app.y == 0 {
                     let offset = app_index.saturating_mul(34);
                     app.x = 96 + offset;
@@ -2927,6 +2983,21 @@ fn draw_gui_app_window(
     let content_w = window_width.saturating_sub(36);
     let content_h = window_height.saturating_sub(64);
 
+    // Resize grip: three diagonal dots in the bottom-right corner.
+    for i in 0..3 {
+        let d = i * 5;
+        draw_rect(
+            fb,
+            width,
+            height,
+            x + window_width.saturating_sub(7 + d),
+            y + window_height.saturating_sub(7 + d),
+            3,
+            3,
+            MUTED,
+        );
+    }
+
     for index in 0..app.rect_count {
         let shape = app.rects[index];
         if shape.x < 0 || shape.y < 0 {
@@ -2949,6 +3020,35 @@ fn draw_gui_app_window(
             draw_h,
             shape.color,
         );
+    }
+
+    if app.kind == GuiAppKind::Terminal {
+        // Terminal output is a scrollback log: render the last visible_rows
+        // lines, offset by scroll_offset, repositioned to screen rows.
+        let visible_rows = (content_h / GUI_TERMINAL_ROW_H).max(1);
+        let total = app.line_count;
+        let max_off = total.saturating_sub(visible_rows);
+        let off = app.scroll_offset.min(max_off);
+        let start = total.saturating_sub(visible_rows + off);
+        let mut row = 0usize;
+        let mut index = start;
+        while index < total && row < visible_rows {
+            let line = &app.lines[index];
+            let local_x = if line.x < 0 { 0 } else { line.x as usize };
+            if local_x < content_w {
+                let draw_x = content_x + local_x;
+                let draw_y = content_y + row * GUI_TERMINAL_ROW_H;
+                let color = if line.text().starts_with("Dunit GUI Terminal") {
+                    GREEN
+                } else {
+                    TEXT
+                };
+                draw_text(fb, width, height, draw_x, draw_y, line.text(), color);
+            }
+            index += 1;
+            row += 1;
+        }
+        return;
     }
 
     for index in 0..app.line_count {
@@ -3894,6 +3994,26 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
         let mut drag_damage: Option<Rect> = None;
         let mut update_damage: Option<Rect> = None;
 
+        // Mouse wheel scrolls the focused terminal's scrollback.
+        let scroll_delta = crate::input::take_mouse_scroll_delta();
+        if scroll_delta != 0 {
+            if let Some(idx) = keyboard_target_gui_app(&state) {
+                if state.gui_apps[idx].kind == GuiAppKind::Terminal {
+                    let app = &mut state.gui_apps[idx];
+                    let step = 3usize;
+                    if scroll_delta > 0 {
+                        let add = (scroll_delta as usize).saturating_mul(step);
+                        app.scroll_offset = app.scroll_offset.saturating_add(add).min(app.line_count);
+                    } else {
+                        let sub = ((-scroll_delta) as usize).saturating_mul(step);
+                        app.scroll_offset = app.scroll_offset.saturating_sub(sub);
+                    }
+                    app.mark_dirty();
+                    full_redraw = true;
+                }
+            }
+        }
+
         if pressed && !was_pressed {
             let mx = mouse_x as usize;
             let my = mouse_y as usize;
@@ -4096,6 +4216,16 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                             }
                         }
                     }
+                    PointerOp::GuiAppResize { index } => {
+                        if let Some((old_rect, new_rect)) =
+                            resize_gui_app_window(&mut state, index, mx, my, width, height)
+                        {
+                            // Resizing the window re-flows content, so repaint
+                            // the whole union region rather than a partial rect.
+                            let _ = old_rect.union(new_rect);
+                            full_redraw = true;
+                        }
+                    }
                     PointerOp::Drag { .. } | PointerOp::Resize { .. } => {
                         if let Some(wm) = window_manager::get_wm() {
                             let (idx, offset_x, offset_y) = match op {
@@ -4109,7 +4239,8 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                                     offset_x,
                                     offset_y,
                                 } => (idx, offset_x, offset_y),
-                                PointerOp::GuiAppDrag { .. } => unreachable!(),
+                                PointerOp::GuiAppDrag { .. }
+                                | PointerOp::GuiAppResize { .. } => unreachable!(),
                             };
                             let old_bounds = wm.window_bounds(idx);
                             match op {
@@ -4129,7 +4260,8 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                                         wm.resize_window(idx, target_w, target_h, width, height);
                                     }
                                 }
-                                PointerOp::GuiAppDrag { .. } => {}
+                                PointerOp::GuiAppDrag { .. }
+                                | PointerOp::GuiAppResize { .. } => {}
                             }
                             let new_bounds = wm.window_bounds(idx);
                             if let (Some(old_bounds), Some(new_bounds)) = (old_bounds, new_bounds) {
