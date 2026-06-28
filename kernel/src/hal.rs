@@ -58,7 +58,10 @@ pub extern "C" fn interrupt_handler(frame: *const InterruptFrame) -> u64 {
         _ => handle_unknown_interrupt(frame),
     }
 
-    if crate::process::user_fault_escape_requested() {
+    if crate::process::preempt_switch_requested() {
+        crate::process::clear_preempt_switch();
+        2
+    } else if crate::process::user_fault_escape_requested() {
         1
     } else {
         0

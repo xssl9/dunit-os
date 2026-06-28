@@ -24,10 +24,20 @@ pub struct InterruptFrame {
     pub ss: u64,
 }
 
-pub fn handle_timer(_frame: &InterruptFrame) {
+pub fn handle_timer(frame: &InterruptFrame) {
     unsafe {
         core::arch::asm!("out dx, al", in("dx") 0x20u16, in("al") 0x20u8, options(nomem, nostack));
     }
+
+    // Only attempt preemption from userspace with an active smoke context
+    if (frame.cs & 3) != 3 {
+        return;
+    }
+    if unsafe { crate::hal::syscall_get_escape_active() } == 0 {
+        return;
+    }
+
+    crate::process::timer_preempt_save_and_schedule(frame);
 }
 
 pub fn handle_keyboard(_frame: &InterruptFrame) {

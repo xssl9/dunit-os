@@ -28,6 +28,7 @@ static PROCESS_EXIT_KIND: AtomicI32 = AtomicI32::new(0);
 static TERMINAL_FOREGROUND_PID: AtomicU64 = AtomicU64::new(0);
 static FOREGROUND_OUTPUT_SINK: AtomicU64 = AtomicU64::new(ProcessOutputSink::SerialOnly as u64);
 static TERMINAL_STDIN_WAITING_PID: AtomicU64 = AtomicU64::new(0);
+static PREEMPT_SWITCH_REQUESTED: AtomicBool = AtomicBool::new(false);
 static mut TERMINAL_STDIN_BUFFER: [u8; 256] = [0; 256];
 static mut TERMINAL_STDIN_LEN: usize = 0;
 static mut TERMINAL_STDIN_READY: bool = false;
@@ -1083,6 +1084,81 @@ pub fn request_current_user_fault(fault: ProcessFault) -> Option<ProcessId> {
 
 pub fn user_fault_escape_requested() -> bool {
     PROCESS_EXIT_REQUESTED.load(Ordering::SeqCst) && PROCESS_EXIT_KIND.load(Ordering::SeqCst) != 0
+}
+
+pub fn preempt_switch_requested() -> bool {
+    PREEMPT_SWITCH_REQUESTED.load(Ordering::SeqCst)
+}
+
+pub fn clear_preempt_switch() {
+    PREEMPT_SWITCH_REQUESTED.store(false, Ordering::SeqCst);
+}
+
+pub fn timer_preempt_save_and_schedule(frame: &crate::interrupts::InterruptFrame) {
+    let current = match current_pid() {
+        Some(pid) => pid,
+        None => return,
+    };
+
+    {
+        let table = process_table_mut();
+        let Some(index) = process_record_index(table, current) else { return; };
+        let record = &table[index];
+        if record.state != ProcessState::Running {
+            return;
+        }
+        if record.process.as_ref().map(|p| p.is_kernel).unwrap_or(true) {
+            return;
+        }
+    }
+
+    let next = match crate::process::scheduler::pick_next_candidate_excluding(current) {
+        Some(pid) => pid,
+        None => return,
+    };
+
+    {
+        let table = process_table_mut();
+        let Some(index) = process_record_index(table, current) else { return; };
+        let record = &mut table[index];
+        if let Some(process) = record.process.as_mut() {
+            if !process.is_kernel {
+                let ctx = &mut process.context;
+                ctx.rax = frame.rax;
+                ctx.rbx = frame.rbx;
+                ctx.rcx = frame.rcx;
+                ctx.rdx = frame.rdx;
+                ctx.rsi = frame.rsi;
+                ctx.rdi = frame.rdi;
+                ctx.rbp = frame.rbp;
+                ctx.rsp = frame.rsp;
+                ctx.r8 = frame.r8;
+                ctx.r9 = frame.r9;
+                ctx.r10 = frame.r10;
+                ctx.r11 = frame.r11;
+                ctx.r12 = frame.r12;
+                ctx.r13 = frame.r13;
+                ctx.r14 = frame.r14;
+                ctx.r15 = frame.r15;
+                ctx.rip = frame.rip;
+                ctx.rflags = frame.rflags;
+            }
+        }
+        let from = record.state;
+        record.state = ProcessState::Ready;
+        if let Some(process) = record.process.as_mut() {
+            process.state = ProcessState::Ready;
+        }
+        if from != ProcessState::Ready {
+            log_process_transition(current, from, ProcessState::Ready, "preempt");
+        }
+    }
+
+    let _ = crate::process::scheduler::enqueue_ready(current);
+
+    PROCESS_YIELD_REQUESTED.store(true, Ordering::SeqCst);
+    PROCESS_SCHEDULE_HINT.store(next.0, Ordering::SeqCst);
+    PREEMPT_SWITCH_REQUESTED.store(true, Ordering::SeqCst);
 }
 
 fn take_process_exit_request() -> Option<(i32, ProcessExitStatus)> {

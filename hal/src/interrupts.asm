@@ -83,6 +83,8 @@ isr_common_stub:
     call interrupt_handler
     cmp rax, 1
     je .escape_user_fault
+    cmp rax, 2
+    je .escape_user_fault
     mov rsp, [rsp]
     
     pop r15

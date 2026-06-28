@@ -644,23 +644,34 @@ pub extern "C" fn kernel_main(
     }
 
     screen_log("[ .. ] Configuring interrupt handlers", false);
+
+    unsafe {
+        // Program PIT channel 0 at ~100 Hz (divisor = 1193182 / 100 = 11931)
+        hal::hal_outb(0x43, 0x36); // ch0, lo/hi byte, mode 3 square wave, binary
+        hal::hal_outb(0x40, (11931_u16 & 0xFF) as u8);
+        hal::hal_outb(0x40, (11931_u16 >> 8) as u8);
+    }
+
     if terminal_mode == 0 {
         unsafe {
-            hal::hal_outb(0x21, 0xF9);
+            // 0xF8 = 11111000: IRQ0 (PIT), IRQ1 (keyboard) enabled; rest masked
+            hal::hal_outb(0x21, 0xF8);
             hal::hal_outb(0xA1, 0xEF);
         }
-        serial_write("[IRQ] GUI input enabled: IRQ1 keyboard, IRQ12 mouse\r\n");
+        serial_write("[IRQ] GUI: IRQ0 PIT, IRQ1 keyboard, IRQ12 mouse enabled\r\n");
+        screen_log("[ OK ] IRQ 0: PIT timer enabled (~100 Hz)", false);
         screen_log("[ OK ] IRQ 1: Keyboard interrupt enabled", false);
         screen_log("[ OK ] IRQ 12: PS/2 mouse interrupt enabled", false);
     } else {
         unsafe {
-            hal::hal_outb(0x21, 0xF9);
+            // 0xF8 = 11111000: IRQ0 (PIT), IRQ1 (keyboard) enabled; rest masked
+            hal::hal_outb(0x21, 0xF8);
             hal::hal_outb(0xA1, 0xEF);
         }
-        serial_write("[IRQ] Terminal input enabled: IRQ1 keyboard, IRQ12 mouse wheel\r\n");
+        serial_write("[IRQ] Terminal: IRQ0 PIT, IRQ1 keyboard, IRQ12 mouse enabled\r\n");
+        screen_log("[ OK ] IRQ 0: PIT timer enabled (~100 Hz)", false);
         screen_log("[ OK ] IRQ 1: Keyboard interrupt enabled", false);
         screen_log("[ OK ] IRQ 12: PS/2 mouse wheel interrupt enabled", false);
-        screen_log("[ OK ] IRQ 0 masked for terminal mode", false);
     }
     screen_log("[ OK ] Hardware interrupts configured", false);
 
