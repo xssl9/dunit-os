@@ -141,6 +141,8 @@ pub struct SystemStats {
     pub fs_open_handles: u64,
     pub uptime_ticks: u64,
     pub uptime_available: u64,
+    pub net_total_nics: u64,
+    pub net_supported_nics: u64,
 }
 
 #[repr(C)]
@@ -930,6 +932,7 @@ fn sys_get_system_stats(info: *mut SystemStats) -> i64 {
     let heap = crate::allocator::heap_stats();
     let ipc = crate::ipc::ipc_stats();
     let fs = crate::fs::vfs::root_memfs_stats();
+    let net = crate::drivers::net::snapshot();
     let stats = SystemStats {
         process_total: process.total,
         process_prepared: process.prepared,
@@ -955,6 +958,8 @@ fn sys_get_system_stats(info: *mut SystemStats) -> i64 {
         fs_open_handles: fs.open_handles,
         uptime_ticks: 0,
         uptime_available: 0,
+        net_total_nics: net.total_nics as u64,
+        net_supported_nics: net.supported_nics as u64,
     };
     let bytes = unsafe {
         core::slice::from_raw_parts(

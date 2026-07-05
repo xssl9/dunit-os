@@ -169,6 +169,8 @@ pub struct SystemStats {
     pub fs_open_handles: u64,
     pub uptime_ticks: u64,
     pub uptime_available: u64,
+    pub net_total_nics: u64,
+    pub net_supported_nics: u64,
 }
 
 #[repr(C)]

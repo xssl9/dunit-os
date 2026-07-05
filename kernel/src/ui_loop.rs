@@ -60,7 +60,7 @@ const GUI_APP_RECTS: usize = 128;
 const GUI_APP_TEXT_CAP: usize = 96;
 const GUI_APP_TITLE_CAP: usize = 32;
 const GUI_APP_CWD_CAP: usize = 128;
-const MAX_GUI_APPS: usize = 4;
+const MAX_GUI_APPS: usize = 8;
 const NO_GUI_FOCUS: usize = usize::MAX;
 // Minimum size and resize-grip footprint for resizable GUI app windows.
 const GUI_APP_MIN_W: usize = 300;

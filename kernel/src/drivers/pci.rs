@@ -43,6 +43,7 @@ pub struct PciSnapshot {
     pub total_devices: usize,
     pub stored_devices: usize,
     pub usb_controllers: usize,
+    pub network_controllers: usize,
     pub msi_devices: usize,
     pub msix_devices: usize,
 }
@@ -67,6 +68,7 @@ static mut PCI_DEVICES: [Option<PciDevice>; MAX_SNAPSHOT_DEVICES] = [None; MAX_S
 static mut PCI_TOTAL_DEVICES: usize = 0;
 static mut PCI_STORED_DEVICES: usize = 0;
 static mut PCI_USB_CONTROLLERS: usize = 0;
+static mut PCI_NETWORK_CONTROLLERS: usize = 0;
 static mut PCI_MSI_DEVICES: usize = 0;
 static mut PCI_MSIX_DEVICES: usize = 0;
 
@@ -93,6 +95,8 @@ pub fn init() {
     write_dec(snapshot.total_devices);
     serial_write(" usb=");
     write_dec(snapshot.usb_controllers);
+    serial_write(" net=");
+    write_dec(snapshot.network_controllers);
     serial_write(" msi=");
     write_dec(snapshot.msi_devices);
     serial_write(" msix=");
@@ -112,6 +116,7 @@ pub fn snapshot() -> PciSnapshot {
         snapshot.total_devices = PCI_TOTAL_DEVICES;
         snapshot.stored_devices = PCI_STORED_DEVICES;
         snapshot.usb_controllers = PCI_USB_CONTROLLERS;
+        snapshot.network_controllers = PCI_NETWORK_CONTROLLERS;
         snapshot.msi_devices = PCI_MSI_DEVICES;
         snapshot.msix_devices = PCI_MSIX_DEVICES;
 
@@ -135,6 +140,7 @@ pub fn refresh_cache() {
         PCI_TOTAL_DEVICES = snapshot.total_devices;
         PCI_STORED_DEVICES = snapshot.stored_devices;
         PCI_USB_CONTROLLERS = snapshot.usb_controllers;
+        PCI_NETWORK_CONTROLLERS = snapshot.network_controllers;
         PCI_MSI_DEVICES = snapshot.msi_devices;
         PCI_MSIX_DEVICES = snapshot.msix_devices;
     }
@@ -230,6 +236,9 @@ fn scan_raw_into_snapshot() -> PciSnapshot {
         snapshot.total_devices += 1;
         if dev.class_code == 0x0C && dev.subclass == 0x03 {
             snapshot.usb_controllers += 1;
+        }
+        if dev.class_code == 0x02 {
+            snapshot.network_controllers += 1;
         }
         if dev.capabilities.has_msi {
             snapshot.msi_devices += 1;
@@ -400,6 +409,7 @@ fn empty_snapshot() -> PciSnapshot {
         total_devices: 0,
         stored_devices: 0,
         usb_controllers: 0,
+        network_controllers: 0,
         msi_devices: 0,
         msix_devices: 0,
     }

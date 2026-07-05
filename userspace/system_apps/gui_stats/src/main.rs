@@ -87,7 +87,7 @@ fn redraw() {
     draw_memory(&stats);
     draw_ipc(&stats);
     draw_fs(&stats);
-    draw_uptime(&stats);
+    draw_network(&stats);
     libdunit::gui_set_status("gui_stats: live real counters");
 }
 
@@ -154,15 +154,13 @@ fn draw_fs(stats: &libdunit::SystemStats) {
     draw_card_two(236, 142, 214, 76, ACCENT, "MemFS", line(&a, alen), line(&b, blen));
 }
 
-fn draw_uptime(stats: &libdunit::SystemStats) {
-    if stats.uptime_available == 0 {
-        draw_card(14, 232, 436, 52, MUTED, "Uptime", "unavailable: no active tick source");
-    } else {
-        let mut a = [0u8; 80];
-        let mut len = 0usize;
-        append_label_u64(&mut a, &mut len, b"ticks", stats.uptime_ticks);
-        draw_card(14, 232, 436, 52, GREEN, "Uptime", line(&a, len));
-    }
+fn draw_network(stats: &libdunit::SystemStats) {
+    let mut a = [0u8; 80];
+    let mut len = 0usize;
+    append_label_u64(&mut a, &mut len, b"nics", stats.net_total_nics);
+    append_bytes(&mut a, &mut len, b"  supported ");
+    append_u64(&mut a, &mut len, stats.net_supported_nics);
+    draw_card(14, 232, 436, 52, MUTED, "Network", line(&a, len));
 }
 
 fn draw_card(x: i32, y: i32, w: u32, h: u32, accent: u32, title: &str, body: &str) {

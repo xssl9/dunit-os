@@ -165,6 +165,8 @@ fn cmd_lspci(out: &mut dyn ShellSink) {
     write_usize(out, snapshot.stored_devices);
     out.write_str(" usb_controllers=");
     write_usize(out, snapshot.usb_controllers);
+    out.write_str(" network_controllers=");
+    write_usize(out, snapshot.network_controllers);
     out.write_str(" msi=");
     write_usize(out, snapshot.msi_devices);
     out.write_str(" msix=");
@@ -204,6 +206,9 @@ fn cmd_lspci(out: &mut dyn ShellSink) {
         }
         if dev.class_code == 0x0C && dev.subclass == 0x03 {
             out.write_str(" USB");
+        }
+        if dev.class_code == 0x02 {
+            out.write_str(" NETWORK");
         }
         out.write_str("\n");
     }
