@@ -143,6 +143,8 @@ pub struct SystemStats {
     pub uptime_available: u64,
     pub net_total_nics: u64,
     pub net_supported_nics: u64,
+    pub net_mmio_ready_nics: u64,
+    pub net_mac_ready_nics: u64,
 }
 
 #[repr(C)]
@@ -960,6 +962,8 @@ fn sys_get_system_stats(info: *mut SystemStats) -> i64 {
         uptime_available: 0,
         net_total_nics: net.total_nics as u64,
         net_supported_nics: net.supported_nics as u64,
+        net_mmio_ready_nics: net.mmio_ready_nics as u64,
+        net_mac_ready_nics: net.mac_ready_nics as u64,
     };
     let bytes = unsafe {
         core::slice::from_raw_parts(

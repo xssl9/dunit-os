@@ -171,6 +171,8 @@ pub struct SystemStats {
     pub uptime_available: u64,
     pub net_total_nics: u64,
     pub net_supported_nics: u64,
+    pub net_mmio_ready_nics: u64,
+    pub net_mac_ready_nics: u64,
 }
 
 #[repr(C)]

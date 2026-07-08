@@ -156,11 +156,16 @@ fn draw_fs(stats: &libdunit::SystemStats) {
 
 fn draw_network(stats: &libdunit::SystemStats) {
     let mut a = [0u8; 80];
+    let mut b = [0u8; 80];
     let mut len = 0usize;
+    let mut blen = 0usize;
     append_label_u64(&mut a, &mut len, b"nics", stats.net_total_nics);
     append_bytes(&mut a, &mut len, b"  supported ");
     append_u64(&mut a, &mut len, stats.net_supported_nics);
-    draw_card(14, 232, 436, 52, MUTED, "Network", line(&a, len));
+    append_label_u64(&mut b, &mut blen, b"mmio", stats.net_mmio_ready_nics);
+    append_bytes(&mut b, &mut blen, b"  mac ");
+    append_u64(&mut b, &mut blen, stats.net_mac_ready_nics);
+    draw_card_two(14, 232, 436, 60, MUTED, "Network", line(&a, len), line(&b, blen));
 }
 
 fn draw_card(x: i32, y: i32, w: u32, h: u32, accent: u32, title: &str, body: &str) {
