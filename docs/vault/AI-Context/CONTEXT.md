@@ -2,7 +2,7 @@
 
 > Read this first before changing the project. The vault replaces a flat task.md: use [[../STATUS|STATUS]], [[../ROADMAP|ROADMAP]], and task nodes as the current source of truth.
 
-Last updated: 2026-06-09
+Last updated: 2026-07-08
 
 ---
 
@@ -24,7 +24,7 @@ Repository: `https://github.com/susopki/dunit-os`
 - VFS is initialized at boot.
 - Root MemFS is mounted as `/`.
 - MemFS supports runtime directories/files and basic file operations.
-- Current process model exists: PID, cwd, fd table.
+- Process model exists: PID, parent/child, cwd, fd table, wait/reap status.
 - fd `0/1/2` are reserved for stdin/stdout/stderr.
 - Userspace syscall ABI uses:
   - `rax` syscall number
@@ -33,6 +33,10 @@ Repository: `https://github.com/susopki/dunit-os`
   - `rcx/r11` clobbered by `syscall`
 - Safe user copy helpers are bounded but still range-check-only.
 - CPL3 smoke can enter userspace, perform syscalls, and return.
+- Foreground `exec` runs embedded `/app` ELF programs with argv/envp.
+- `spawn` creates Ready child processes and `yield` can run them cooperatively.
+- `wait` reports real child exit/fault status after execution.
+- Basic IPC supports parent/child send/receive round trips.
 - Userspace `open/read/write/close` go through process fd table into VFS.
 - Userspace `write(1/2)` writes to serial as minimal stdio.
 
@@ -56,10 +60,9 @@ Repository: `https://github.com/susopki/dunit-os`
 - Block device abstraction.
 - Disk driver.
 - Real mount table beyond root MemFS.
-- Real userspace terminal using stdio.
-- Real ELF exec path with process isolation.
-- Per-process address spaces and per-process kernel stacks.
-- Full scheduler/preemption model.
+- Real userspace terminal/shell using stdio.
+- Blocking wait/input semantics.
+- Hardened timer preemption/background process model.
 - Network stack.
 - GUI display server architecture.
 
@@ -69,7 +72,7 @@ Repository: `https://github.com/susopki/dunit-os`
 
 - Do not assume persistent storage exists.
 - Do not assume `/dev` or `/proc` have real backends.
-- Do not assume userspace apps are fully executed as isolated processes.
+- Do not assume long-running background userspace processes are fully hardened.
 - Do not treat current safe-copy as page-table validation. It is bounded range checking until page-fault recovery/user address spaces exist.
 - Do not rewrite scheduler, HAL, drivers, GUI, or memory management unless the task explicitly requires it.
 
@@ -77,10 +80,16 @@ Repository: `https://github.com/susopki/dunit-os`
 
 ## Preferred Test Workflow
 
-Use `build_and_run_multipass.py` as the main autonomous verification path from Windows:
+Use `build_and_run_multipass.py` as the only autonomous launch/test path:
 
-```powershell
-python build_and_run_multipass.py --qemu-timeout 40 --qemu-log qemu_test.log --qemu-test-commands "dufetch;pwd;ls"
+```bash
+python3 build_and_run_multipass.py \
+  --mode test-terminal \
+  --qemu-timeout 60 \
+  --qemu-log qemu_runtime_stress.log \
+  --qemu-test-commands "exec runtime_stress" \
+  --expect-log "runtime_stress: OK" \
+  --expect-log "exec: /app/runtime_stress returned code=0"
 ```
 
 Expected boot evidence in serial logs:
@@ -103,6 +112,8 @@ root@dunit:~#
 3. Kernel terminal cwd is separate from process cwd.
 4. Stdio exists only as reserved fd targets and serial output for stdout/stderr.
 5. Userspace file IO is ready enough for the next stage, but stdin and real app launch are still blockers for a userspace terminal.
+6. `runtime_stress` is the canonical runtime regression app for VFS,
+   resumable child execution, IPC, repeated spawn/wait, and recoverable faults.
 
 ---
 

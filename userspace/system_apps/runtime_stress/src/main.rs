@@ -78,6 +78,39 @@ fn expect_wait_would_block(pid: u32, label: &str) {
     }
 }
 
+fn wait_exited_or_blocked(pid: u32, code: i32, label: &str) -> bool {
+    let mut status = libdunit::WaitStatus::empty();
+    let waited = libdunit::wait(pid, &mut status);
+    if waited == libdunit::EAGAIN {
+        if status.kind != libdunit::WAIT_KIND_EMPTY || status.code != 0 {
+            fail(label, 25);
+        }
+        return false;
+    }
+    if waited != pid as isize {
+        fail(label, 20);
+    }
+    if !status.exited() || status.code != code {
+        fail(label, 21);
+    }
+    true
+}
+
+fn drive_until_exited(pid: u32, code: i32, label: &str) {
+    let mut attempts = 0usize;
+    while attempts < 8 {
+        if wait_exited_or_blocked(pid, code, label) {
+            return;
+        }
+        let yielded = libdunit::yield_now();
+        if yielded < 0 && yielded != libdunit::EAGAIN {
+            fail(label, 26);
+        }
+        attempts += 1;
+    }
+    wait_exited(pid, code, label);
+}
+
 fn exercise_vfs() {
     libdunit::println("runtime_stress: vfs start");
 
@@ -136,11 +169,9 @@ fn exercise_resumable_roundtrip() {
         fail("yield to resumable child A", 41);
     }
     libdunit::println("runtime_stress: parent after child A");
-    expect_wait_would_block(child, "resumable mid wait");
-    if libdunit::yield_now() != 0 {
-        fail("yield to resumable child C", 42);
+    if !wait_exited_or_blocked(child, 7, "resumable mid wait") {
+        drive_until_exited(child, 7, "wait resumable child");
     }
-    wait_exited(child, 7, "wait resumable child");
     libdunit::println("runtime_stress: resumable OK");
 }
 

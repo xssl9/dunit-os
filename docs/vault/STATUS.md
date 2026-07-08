@@ -1,14 +1,20 @@
 # STATUS
 
-> Snapshot of Dunit OS after the VFS/MemFS, syscall, stdio, and `dufetch` work.
+> Snapshot of Dunit OS during the Userspace Runtime v1 stabilization work.
 
 ---
 
 ## Summary
 
-Dunit OS now has a usable early kernel/runtime foundation. The kernel can boot into terminal mode, initialize a runtime filesystem, run terminal filesystem commands through VFS, enter CPL3 for syscall smoke tests, and perform userspace file IO through process-local file descriptors.
+Dunit OS now has a usable early kernel/runtime foundation. The kernel can boot
+into terminal mode, initialize VFS/MemFS, execute embedded userspace ELF
+programs, run child processes cooperatively through `spawn`/`yield`, observe
+exit/fault statuses through `wait`, and perform VFS/stdin/stdout/IPC syscalls
+from userspace.
 
-The system is still not a persistent OS yet: no block device layer, no persistent dunitFS, no real userspace terminal, and no isolated process model.
+The system is still not a persistent OS yet: the block layer is a volatile
+`ramblk0` smoke device, there is no disk-backed dunitFS, no real userspace shell,
+and timer preemption/background process semantics are not hardened.
 
 ---
 
@@ -18,24 +24,24 @@ The system is still not a persistent OS yet: no block device layer, no persisten
 |---|---|---|
 | Boot | WORKING | Limine boot to terminal/GUI modes |
 | HAL | WORKING | GDT, IDT, interrupts, syscall entry foundation |
-| Interrupts | PARTIAL | Keyboard IRQ path works; full device IRQ model is not done |
-| Memory | PARTIAL | PMM/heap init works; VMM is still minimal |
+| Interrupts | PARTIAL | Keyboard, mouse, timer/PIC paths exist; full IRQ routing is not done |
+| Memory | PARTIAL | PMM/heap init works; per-process address-space objects exist |
 | Allocator | WORKING | Kernel heap works for current runtime features |
-| Scheduler | SKELETON | Current-process foundation only |
-| Processes | PARTIAL | PID/current process/cwd/fd table exist |
-| IPC | SKELETON | Basic structures exist, not a full userspace IPC layer |
-| Syscalls | PARTIAL | ABI + safe-copy + VFS/stdio syscalls work |
-| ELF Loader | SKELETON | Build artifacts exist; real exec path remains future work |
+| Scheduler | PARTIAL | Cooperative Ready queue, `yield`, context save/restore, experimental preempt hook |
+| Processes | PARTIAL | PID table, parent/child, fd table, cwd, wait/reap, exit/fault status |
+| IPC | PARTIAL | Basic message queues support parent/child round trips |
+| Syscalls | PARTIAL | ABI + safe-copy + VFS/stdio/process/input/IPС/sysinfo syscalls work |
+| ELF Loader | WORKING | Embedded `/app` ELF exec path with argv/envp and per-process context |
 | VFS | WORKING | Runtime root FS, path normalization, file ops |
 | MemFS | WORKING | Runtime directories/files and read/write semantics |
-| DevFS | SKELETON | Stub backend only |
-| ProcFS | SKELETON | Stub backend only |
+| DevFS | PARTIAL | `/dev` nodes exist; most devices are diagnostics/stubs |
+| ProcFS | PARTIAL | `/proc/processes` and `/proc/meminfo` exist |
 | Terminal Mode | WORKING | Commands, VFS integration, `dufetch` |
 | Framebuffer | WORKING | Terminal rendering and boot screen path |
 | GUI Mode | PARTIAL | Experimental window/app code |
 | Window Management | SKELETON | In-kernel experimental WM, not final architecture |
-| Userspace Runtime | PARTIAL | libdunit syscall wrappers + smoke path |
-| Drivers | PARTIAL | Keyboard path works; disk/network/USB/sound planned |
+| Userspace Runtime | PARTIAL | Foreground exec, cooperative child execution, stdin/stdout, VFS, IPC |
+| Drivers | PARTIAL | Keyboard, mouse, PCI diagnostics, xHCI bring-up, ramblk0 block smoke |
 | Networking | PLANNED | No stack yet |
 
 ---
@@ -53,6 +59,10 @@ The system is still not a persistent OS yet: no block device layer, no persisten
 
 ## Next Reasonable Work
 
-1. Userspace terminal foundation: stdin behavior, stdout/stderr path, and a real userspace shell test.
-2. ELF exec integration with process model: load one known app and return/fault cleanly.
-3. Block-device preparation for persistent dunitFS: disk abstraction before any on-disk filesystem.
+1. Finish [[Tasks/InProgress/Userspace-Runtime-v1|Userspace Runtime v1]]:
+   make `runtime_stress` the canonical automated QEMU regression and keep docs
+   aligned with code.
+2. Userspace terminal foundation: move command parsing out of the kernel after
+   stdin/wait contracts are stable enough.
+3. Persistent filesystem preparation: grow from `ramblk0` smoke media toward a
+   real disk-backed block driver and mountable dunitFS.

@@ -23,13 +23,17 @@
 - [ ] Pipes: `cmd1 | cmd2`
 - [ ] Input redirection: `<`
 - [ ] Real userspace terminal process
-- [ ] Keyboard-backed stdin for userspace
+- [x] Foreground keyboard-backed stdin for userspace exec
+- [ ] Shell-grade stdin, job control, and blocking input semantics
 
 ---
 
 ## Notes
 
-The kernel terminal is usable, but it is still not the final shell architecture. The next major step is a userspace terminal that talks through stdio and VFS syscalls.
+The kernel terminal is usable, but it is still not the final shell
+architecture. Foreground userspace programs can receive terminal stdin, but the
+next major step is a real userspace shell that talks through stdio and VFS
+syscalls.
 
 Related completed foundations:
 

@@ -10,7 +10,8 @@
 
 Dunit OS can initialize the framebuffer and has an experimental GUI path. The reliable interactive mode today is still **kernel terminal mode**, not GUI mode.
 
-The GUI should be treated as an experimental surface until process execution, IPC, input routing, and a display-server model are designed.
+The GUI should be treated as an experimental surface until Userspace Runtime v1,
+IPC, input routing, and a display-server model are hardened.
 
 ---
 
@@ -19,15 +20,16 @@ The GUI should be treated as an experimental surface until process execution, IP
 - Framebuffer is available.
 - Boot UI and terminal rendering work on top of framebuffer output.
 - GUI code exists as an experimental direction.
+- Some GUI-oriented userspace apps are built and embedded under `/app`.
 
 ---
 
 ## Not Ready Yet
 
 - Window manager is still a skeleton.
-- GUI applications are not real userspace processes.
-- No userspace display server.
-- No GUI IPC contract.
+- GUI applications are not on a stable app/runtime contract yet.
+- No persistent userspace display server.
+- GUI IPC messages exist experimentally, but the contract is not final.
 - No window/event protocol.
 - No persistent user configuration for themes/settings.
 
@@ -47,5 +49,6 @@ The GUI should be treated as an experimental surface until process execution, IP
 
 - [[../Completed/Syscall-ABI|Syscall ABI]]
 - [[../Completed/Process-FD-Model|Process + FD Model]]
+- [[Userspace-Runtime-v1|Userspace Runtime v1]]
 - [[../Future/GUI-Architecture|GUI Architecture]]
 - IPC foundation before real userspace GUI apps.

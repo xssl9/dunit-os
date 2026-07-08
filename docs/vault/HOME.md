@@ -24,10 +24,10 @@ Boot / HAL        #################### done
 Terminal Mode     ##################-- working
 VFS / MemFS       ################---- working runtime layer
 Syscall ABI       ###############----- working foundation
-Process model     ###########--------- minimal current process
-Userspace runtime ##########---------- syscall wrappers + smoke
-GUI Mode          #######------------- skeleton / experimental
-Drivers           ####---------------- keyboard + basic platform only
+Process model     ###############----- cooperative parent/child runtime
+Userspace runtime ###############----- exec/spawn/yield/wait + IPC/VFS
+GUI Mode          ########------------ experimental userspace apps + WM
+Drivers           ########------------ keyboard/mouse/PCI/xHCI/ramblk0
 Networking        -------------------- planned
 Persistent FS     -------------------- planned
 ```
@@ -46,7 +46,10 @@ Persistent FS     -------------------- planned
 - Process-local fd table with reserved stdio fds `0/1/2`.
 - Userspace syscall ABI smoke from CPL3 back to kernel.
 - Userspace `open/read/write/close` syscalls through VFS.
-- Userspace `write(1/2)` stdio smoke to serial.
+- Foreground userspace `exec` with argv/envp and exit/fault reporting.
+- Cooperative `spawn`/`yield`/`wait` child execution.
+- Userspace VFS, stdio, stdin, IPC, process, and sysinfo wrappers in `libdunit`.
+- Minimal `/proc`, `/dev`, and `ramblk0` diagnostics.
 
 ---
 
@@ -69,6 +72,7 @@ Persistent FS     -------------------- planned
 ### In Progress
 
 - [[Tasks/InProgress/Terminal-Improvements|Terminal Improvements]]
+- [[Tasks/InProgress/Userspace-Runtime-v1|Userspace Runtime v1]]
 - [[Tasks/InProgress/Drivers|Drivers]]
 - [[Tasks/InProgress/GUI-Improvements|GUI Improvements]]
 

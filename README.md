@@ -9,8 +9,8 @@ a C/NASM hardware layer, a Limine boot flow, and a growing userspace runtime.
 
 It is not a polished desktop OS yet. The current system is a terminal-first OS
 prototype with real userspace ELF execution, a memory-backed filesystem,
-syscalls, process records, recoverable userspace faults, and early cooperative
-scheduler groundwork.
+syscalls, process records, recoverable userspace faults, and cooperative
+userspace child scheduling.
 
 ## Current State
 
@@ -28,17 +28,19 @@ What works today:
 - `/assets` mirrors the repository asset tree, including images, icons, GUI files,
   wallpapers, fonts, and boot art.
 - Userspace syscall ABI for read/write/open/close, framebuffer drawing,
-  spawn/wait foundation, pid, cwd/chdir, sleep, debug log, and cooperative yield.
+  spawn/wait, pid, cwd/chdir, sleep, debug log, readdir/stat, process stats,
+  IPC, stdin, and cooperative yield.
 - Userspace exec ABI with `argc`, `argv`, and `envp`.
 - PATH lookup through `/app`, so both `exec /app/elf_demo` and `exec elf_demo`
   style commands are supported.
 - stdio fd foundation: stdin returns EOF, stdout/stderr write to the terminal log.
 - Process table with real records, parent/child relation, wait/reap behavior,
   terminal exec autoreap, exit codes, and fault statuses.
-- Runnable spawn foundation: `spawn` prepares an ELF child into Ready state, but
-  does not perform real child context switching yet.
-- Cooperative scheduler foundation: validated PID ready queue and `yield`
-  syscall that reports no real switch yet.
+- Runnable spawn/yield foundation: `spawn` prepares an ELF child into Ready
+  state, and `yield` can run Ready children and resume the parent.
+- Cooperative scheduler foundation: validated PID ready queue, userspace context
+  save/restore, and wait/reap status reporting.
+- Minimal `/proc`, `/dev`, and RAM-backed `ramblk0` block diagnostics.
 
 ## Included Userspace Apps
 
@@ -53,6 +55,9 @@ Current system apps in `/app`:
 - `stdin_test` - stdin EOF foundation test.
 - `scheduler_test` - scheduler/yield foundation test.
 - `spawn_ready_test` - runnable spawn foundation test.
+- `yield_test` / `resumable_test` - cooperative child execution tests.
+- `ipc_parent` / `ipc_child` - parent/child IPC round trip.
+- `runtime_stress` - canonical runtime regression app.
 - `image_demo` - framebuffer drawing demo.
 - `bmp_viewer` - BMP renderer; defaults to `/assets/images/logo.bmp`.
 - `gui_file_manager` - GUI File Manager MVP with real `readdir`/`stat`.
@@ -93,9 +98,9 @@ pwd
                          Limine/QEMU
 ```
 
-The project is still intentionally single-process-at-a-time for real execution.
-The process table and scheduler queue are being shaped so real cooperative
-multitasking can be added without fake success behavior.
+The project is still early, but userspace process execution is now real enough
+for foreground apps to spawn children, yield to them, resume, and wait for real
+exit or fault status.
 
 ## Boot Modes
 
@@ -124,8 +129,7 @@ the focus of the current runtime milestones.
 
 Not implemented yet:
 
-- Real cooperative context switching between userspace processes.
-- Timer preemption.
+- Hardened timer preemption.
 - SMP.
 - Disk-backed filesystem.
 - Network stack.
@@ -136,22 +140,23 @@ Not implemented yet:
 
 Current foundation behavior:
 
-- `spawn` prepares a Ready child, but execution is not scheduled yet.
-- `wait` on Ready/Running children returns `EAGAIN` instead of faking success.
-- `yield` reports a candidate process but returns "switch not implemented".
-- `stdin` is EOF-only.
+- `spawn` prepares a Ready child.
+- `yield` can switch to a Ready child and resume the parent.
+- `wait` on Ready/Running children returns `EAGAIN`; after execution it reports
+  real exit/fault status.
+- Foreground terminal `stdin` can provide line input to userspace apps.
 - `/assets` is embedded from the repository `assets/` directory with the same
   hierarchy exposed in MemFS.
 
 ## Roadmap
 
-### 1. Cooperative Multitasking
+### 1. Userspace Runtime v1
 
-- Store all runnable processes in the process table.
-- Keep scheduler queue as PID-only ownership metadata.
-- Save/restore userspace CPU context on `yield`.
-- Run Ready child processes created by `spawn`.
-- Make `wait` block or return clean nonblocking statuses by contract.
+- Stabilize `spawn/yield/wait/exit/fault/stdin/stdout/ipc` as a runtime contract.
+- Use `runtime_stress` as the canonical QEMU regression app.
+- Keep automated launch/testing behind `build_and_run_multipass.py`.
+- Fix or document host-side kernel test workflow separately from QEMU runtime
+  verification.
 
 ### 2. Runtime Contracts
 
@@ -188,7 +193,7 @@ kernel/                      Rust no_std kernel
 userspace/libdunit/          Userspace syscall/startup helper library
 userspace/system_apps/       Small Rust ELF apps embedded into /app
 docs/                        Design notes and milestone context
-build_and_run_multipass.py   Canonical build/test automation
+build_and_run_multipass.py   Canonical build/test/run automation
 limine.conf                  Normal interactive boot menu
 limine_test_terminal.conf    Automated terminal test boot config
 limine_test_gui.conf         Automated GUI test boot config

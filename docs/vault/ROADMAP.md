@@ -22,6 +22,21 @@
 
 ## In Progress
 
+### Userspace Runtime v1
+
+→ [[Tasks/InProgress/Userspace-Runtime-v1|Userspace Runtime v1]]
+
+- [x] Userspace ELF binaries embedded under `/app`
+- [x] Foreground `exec` with argv/envp and exit/fault reporting
+- [x] `spawn` prepares Ready child processes
+- [x] Cooperative `yield` can run Ready children and resume parents
+- [x] `wait` observes real child exit/fault status after execution
+- [x] Basic parent/child IPC round trip
+- [x] `runtime_stress` regression app
+- [ ] Canonical automated runtime regression through `build_and_run_multipass.py`
+- [ ] Documentation fully aligned with current runtime behavior
+- [ ] Host-side kernel test workflow fixed or documented
+
 ### Terminal Improvements
 
 → [[Tasks/InProgress/Terminal-Improvements|Terminal Improvements]]
@@ -76,10 +91,13 @@
 
 ### Userspace Execution
 
-- [ ] Real ELF exec path for applications
-- [ ] Per-process address spaces
-- [ ] Per-process kernel stacks
-- [ ] Scheduler integration beyond current-process foundation
+- [x] Real ELF exec path for embedded `/app` applications
+- [x] Per-process address-space objects for userspace records
+- [x] Per-process kernel stacks for syscall entry
+- [x] Cooperative scheduler integration through `yield`
+- [ ] Blocking wait/input semantics
+- [ ] Timer preemption hardening
+- [ ] Long-running background process model
 
 ### Network Stack
 
@@ -116,15 +134,16 @@
 
 Preferred autonomous workflow on Windows:
 
-```powershell
-python build_and_run_multipass.py --qemu-timeout 40 --qemu-log qemu_test.log --qemu-test-commands "dufetch;pwd;ls"
-```
-
-Classic Make targets inside Linux build environment:
-
 ```bash
-make clean
-make all
-make run
-make run-terminal
+python3 build_and_run_multipass.py \
+  --mode test-terminal \
+  --qemu-timeout 60 \
+  --qemu-log qemu_runtime_stress.log \
+  --qemu-test-commands "exec runtime_stress" \
+  --expect-log "runtime_stress: OK" \
+  --expect-log "exec: /app/runtime_stress returned code=0"
 ```
+
+`build_and_run_multipass.py` is the only supported autonomous launch and test
+entrypoint. It builds the ISO, starts QEMU, injects terminal commands, stops QEMU
+on timeout, and analyzes the serial log.

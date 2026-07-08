@@ -47,7 +47,7 @@ This would keep applications away from raw pixels and allow windows, focus, even
 ## Blockers
 
 - IPC is still a skeleton.
-- Userspace app execution is not a general runtime yet.
+- Userspace Runtime v1 is still being stabilized.
 - Scheduler/process model is still minimal.
 - No shared-memory API.
 - No userspace display server.

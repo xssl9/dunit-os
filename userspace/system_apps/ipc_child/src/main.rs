@@ -26,10 +26,26 @@ fn parse_parent_pid(buf: &[u8]) -> Option<u32> {
     Some(pid)
 }
 
+fn recv_ping(buf: &mut [u8]) -> isize {
+    let mut attempts = 0usize;
+    while attempts < 8 {
+        let len = libdunit::ipc_recv(buf);
+        if len != libdunit::EAGAIN {
+            return len;
+        }
+        let yielded = libdunit::yield_now();
+        if yielded < 0 && yielded != libdunit::EAGAIN {
+            return yielded;
+        }
+        attempts += 1;
+    }
+    libdunit::EAGAIN
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     let mut buf = [0u8; 32];
-    let len = libdunit::ipc_recv(&mut buf);
+    let len = recv_ping(&mut buf);
     if len < 0 {
         libdunit::println("ipc_child: recv failed");
         libdunit::exit(1);

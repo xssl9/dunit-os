@@ -23,7 +23,7 @@ See [[../Completed/VFS-MemFS|VFS + MemFS Runtime Layer]] and [[../Completed/User
 
 This node is no longer "filesystem from zero". It now tracks persistent storage work:
 
-- block device abstraction
+- block device abstraction beyond the current volatile `ramblk0` smoke device
 - disk driver integration
 - persistent dunitFS design
 - on-disk inode/node format
@@ -36,7 +36,7 @@ This node is no longer "filesystem from zero". It now tracks persistent storage 
 
 ## Blockers
 
-- No block device layer.
+- No disk-backed block device layer; only volatile `ramblk0` smoke media exists.
 - No ATA/AHCI driver.
 - No persistent allocation model.
 - No crash/recovery story.

@@ -37,6 +37,7 @@ Those only make sense after persistent storage and networking are real.
 ## Blockers
 
 - Persistent dunitFS is not implemented.
-- Block device layer is not implemented.
+- Disk-backed block storage is not implemented; only volatile `ramblk0` smoke
+  media exists.
 - Networking is planned, not working.
-- Userspace process execution is still not a full app runtime.
+- Userspace Runtime v1 is still being stabilized.
