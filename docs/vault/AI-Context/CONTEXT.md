@@ -8,7 +8,7 @@ Last updated: 2026-07-08
 
 ## What This Is
 
-**Dunit OS (Green Tea)** is an x86_64 OS project with a Rust `no_std` kernel, C/NASM HAL pieces, a kernel terminal, experimental GUI code, a runtime VFS/MemFS layer, and early userspace syscall support.
+**Dunit OS (Green Tea)** is an x86_64 OS project with a Rust `no_std` kernel, C/NASM HAL pieces, a kernel terminal, experimental GUI code, a runtime VFS/MemFS layer, early userspace syscall support, and QEMU virtio block storage.
 
 Repository: `https://github.com/susopki/dunit-os`
 
@@ -39,6 +39,9 @@ Repository: `https://github.com/susopki/dunit-os`
 - Basic IPC supports parent/child send/receive round trips.
 - Userspace `open/read/write/close` go through process fd table into VFS.
 - Userspace `write(1/2)` writes to serial as minimal stdio.
+- Block device layer registers `ramblk0` and legacy virtio-blk `vd0`.
+- `build_and_run_multipass.py --disk virtio` attaches a 1 MiB raw QEMU disk.
+- Terminal `blk`, `blkread`, and `blkwrite` verify sector read/write paths.
 
 ---
 
@@ -51,15 +54,15 @@ Repository: `https://github.com/susopki/dunit-os`
 - [[../Tasks/Completed/Stdio-FD|Minimal Stdio FDs]]
 - [[../Tasks/Completed/Dufetch|dufetch]]
 - [[../Tasks/Completed/Terminal-Mode|Kernel Terminal Mode]]
+- [[../Tasks/Completed/Block-Storage-v1|Block Storage v1]]
 
 ---
 
 ## Still Not Done
 
 - Persistent dunitFS.
-- Block device abstraction.
-- Disk driver.
 - Real mount table beyond root MemFS.
+- Mountable persistent dunitFS.
 - Real userspace terminal/shell using stdio.
 - Blocking wait/input semantics.
 - Hardened timer preemption/background process model.
@@ -70,7 +73,8 @@ Repository: `https://github.com/susopki/dunit-os`
 
 ## Do Not Assume
 
-- Do not assume persistent storage exists.
+- Do not assume a persistent filesystem exists. Raw sector IO exists on `vd0`,
+  but it is not mounted as files yet.
 - Do not assume `/dev` or `/proc` have real backends.
 - Do not assume long-running background userspace processes are fully hardened.
 - Do not treat current safe-copy as page-table validation. It is bounded range checking until page-fault recovery/user address spaces exist.
@@ -103,6 +107,22 @@ Expected boot evidence in serial logs:
 root@dunit:~#
 ```
 
+Block Storage v1 regression:
+
+```bash
+python3 build_and_run_multipass.py \
+  --mode test-terminal \
+  --disk virtio \
+  --qemu-timeout 60 \
+  --qemu-log qemu_block_v1.log \
+  --qemu-test-commands "blk;blkread vd0 0;blkwrite vd0 3;blkread vd0 3" \
+  --expect-log "vd0" \
+  --expect-log "virtio-blk" \
+  --expect-log "vd0 lba=3 written=512" \
+  --expect-log "DUNIT-BLOCK-STOR" \
+  --expect-log "AGE-V1"
+```
+
 ---
 
 ## Architecture Notes For Future Work
@@ -114,6 +134,8 @@ root@dunit:~#
 5. Userspace file IO is ready enough for the next stage, but stdin and real app launch are still blockers for a userspace terminal.
 6. `runtime_stress` is the canonical runtime regression app for VFS,
    resumable child execution, IPC, repeated spawn/wait, and recoverable faults.
+7. `vd0` is a raw block device. The next storage milestone should build a
+   mountable dunitFS layer above it instead of adding another storage backend.
 
 ---
 

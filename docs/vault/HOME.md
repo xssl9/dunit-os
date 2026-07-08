@@ -1,6 +1,6 @@
 # Dunit OS (Green Tea)
 
-> Microkernel-style OS project for x86_64 with a kernel terminal, framebuffer UI experiments, VFS/MemFS, syscall ABI foundation, and a small userspace runtime.
+> Microkernel-style OS project for x86_64 with a kernel terminal, framebuffer UI experiments, VFS/MemFS, syscall ABI foundation, a small userspace runtime, and early virtio block storage.
 
 ---
 
@@ -27,9 +27,9 @@ Syscall ABI       ###############----- working foundation
 Process model     ###############----- cooperative parent/child runtime
 Userspace runtime ###############----- exec/spawn/yield/wait + IPC/VFS
 GUI Mode          ########------------ experimental userspace apps + WM
-Drivers           ########------------ keyboard/mouse/PCI/xHCI/ramblk0
+Drivers           ##########---------- keyboard/mouse/PCI/xHCI/ramblk0/vd0
 Networking        -------------------- planned
-Persistent FS     -------------------- planned
+Persistent FS     ##------------------ block-backed groundwork
 ```
 
 ---
@@ -49,7 +49,9 @@ Persistent FS     -------------------- planned
 - Foreground userspace `exec` with argv/envp and exit/fault reporting.
 - Cooperative `spawn`/`yield`/`wait` child execution.
 - Userspace VFS, stdio, stdin, IPC, process, and sysinfo wrappers in `libdunit`.
-- Minimal `/proc`, `/dev`, and `ramblk0` diagnostics.
+- Minimal `/proc`, `/dev`, and block diagnostics.
+- Block device layer with `ramblk0` and QEMU legacy virtio-blk `vd0`.
+- Terminal `blk`, `blkread`, and `blkwrite` smoke commands.
 
 ---
 
@@ -68,6 +70,7 @@ Persistent FS     -------------------- planned
 - [[Tasks/Completed/Stdio-FD|Minimal Stdio FDs]]
 - [[Tasks/Completed/Dufetch|dufetch]]
 - [[Tasks/Completed/Userspace-Programs|Userspace Program Builds]]
+- [[Tasks/Completed/Block-Storage-v1|Block Storage v1]]
 
 ### In Progress
 

@@ -10,7 +10,9 @@
 
 Dunit OS has enough low-level hardware support to boot, draw to the framebuffer, receive keyboard input, initialize timer/PIC paths, and run the kernel terminal. This is enough for the current VFS/MemFS and syscall smoke workflows.
 
-What is still missing is a general driver model and real hardware/storage/network drivers.
+What is still missing is a general driver model and broader hardware/network
+coverage. The first QEMU disk-backed block driver exists as legacy virtio-blk
+`vd0`.
 
 ---
 
@@ -41,6 +43,12 @@ What is still missing is a general driver model and real hardware/storage/networ
   at `/dev/ramblk0`.
 - Terminal `blk` and `blkread` diagnostics for block inventory and sector-read
   smoke testing.
+- Legacy virtio-blk PCI driver for QEMU transitional devices, registering
+  disk-backed `vd0` through the block layer.
+- Terminal `blkwrite` writes a deterministic sector pattern for automated
+  read-after-write testing.
+- `build_and_run_multipass.py --disk virtio` creates/attaches the raw QEMU disk
+  image used by the block regression.
 - QEMU `qemu-xhci` + `usb-mouse` boot verified: controller initializes and logs
   the connected USB mouse port, then completes `Enable Slot` with slot 1.
 - Tracked terminal QEMU path uses the same USB devices:
@@ -55,7 +63,7 @@ What is still missing is a general driver model and real hardware/storage/networ
 
 - PCI IRQ routing beyond diagnostics and MSI/MSI-X enable/configuration.
 - ACPI support.
-- Disk driver, initially ATA/AHCI or a simpler QEMU-friendly target.
+- ATA/AHCI disk driver after the QEMU-friendly virtio path.
 - Network driver, likely E1000 or RTL8139 first.
 - USB stack beyond first command path: device contexts, address-device,
   descriptor enumeration, and real HID polling/interrupt transfers.
@@ -68,8 +76,10 @@ What is still missing is a general driver model and real hardware/storage/networ
 
 ```text
 PCI enumeration hardening
-    -> block device abstraction (minimal ramblk0 smoke path done)
-    -> disk driver
+    -> block device abstraction (done)
+    -> QEMU virtio-blk disk driver (done)
+    -> mountable dunitFS prototype
+    -> ATA/AHCI disk driver
     -> network driver -> [[../Future/Network-Stack|Network Stack]]
     -> USB xHCI device contexts and enumeration
     -> USB HID mouse path
@@ -84,8 +94,8 @@ ACPI
 
 ## Blockers
 
-- Persistent dunitFS needs a real disk-backed block driver before it can leave
-  MemFS/RAM. The block abstraction exists, but `ramblk0` is volatile smoke media.
+- Persistent dunitFS can now target `vd0`, but it still needs an on-disk format,
+  allocator, mount path, and VFS bridge before it can leave MemFS/RAM.
 - Networking needs a real NIC driver before a TCP/IP stack is useful.
 - DevFS is still a skeleton, but the first registered device nodes are exposed
   through `/dev` via MemFS.
@@ -97,13 +107,23 @@ ACPI
 
 ## Regression
 
-Use terminal mode with USB devices attached:
+Use the autonomous multipass/QEMU path; do not launch QEMU manually:
 
-```text
-make run-terminal
+```bash
+python3 build_and_run_multipass.py \
+  --mode test-terminal \
+  --disk virtio \
+  --qemu-timeout 60 \
+  --qemu-log qemu_block_v1.log \
+  --qemu-test-commands "blk;blkread vd0 0;blkwrite vd0 3;blkread vd0 3" \
+  --expect-log "vd0" \
+  --expect-log "virtio-blk" \
+  --expect-log "vd0 lba=3 written=512" \
+  --expect-log "DUNIT-BLOCK-STOR" \
+  --expect-log "AGE-V1"
 ```
 
-Then verify:
+Useful interactive diagnostics after boot:
 
 ```text
 lspci
@@ -112,6 +132,9 @@ ls /dev
 devs
 blk
 blkread ramblk0 0
+blkread vd0 0
+blkwrite vd0 3
+blkread vd0 3
 ps
 ```
 

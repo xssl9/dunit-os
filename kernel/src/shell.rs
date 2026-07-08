@@ -328,6 +328,64 @@ fn cmd_blkread(out: &mut dyn ShellSink, args: &str) {
     }
 }
 
+fn cmd_blkwrite(out: &mut dyn ShellSink, args: &str) {
+    let mut parts = args.split_whitespace();
+    let Some(device) = parts.next() else {
+        out.write_str("blkwrite: missing device\n");
+        return;
+    };
+    let Some(lba_text) = parts.next() else {
+        out.write_str("blkwrite: missing lba\n");
+        return;
+    };
+    let Some(lba) = parse_u64(lba_text) else {
+        out.write_str("blkwrite: invalid lba\n");
+        return;
+    };
+
+    let mut block = [0u8; 512];
+    let message = b"DUNIT-BLOCK-STORAGE-V1";
+    block[..message.len()].copy_from_slice(message);
+    let mut value = lba;
+    let mut offset = 32usize;
+    if value == 0 {
+        block[offset] = b'0';
+    } else {
+        let mut digits = [0u8; 20];
+        let mut index = digits.len();
+        while value > 0 {
+            index -= 1;
+            digits[index] = b'0' + (value % 10) as u8;
+            value /= 10;
+        }
+        for byte in &digits[index..] {
+            block[offset] = *byte;
+            offset += 1;
+        }
+    }
+
+    match drivers::block::write_block(device, lba, &block) {
+        Ok(bytes) => {
+            out.write_str(device);
+            out.write_str(" lba=");
+            write_u64(out, lba);
+            out.write_str(" written=");
+            write_usize(out, bytes);
+            out.write_str("\n");
+        }
+        Err(error) => {
+            out.write_str("blkwrite: ");
+            out.write_str(match error {
+                drivers::block::BlockError::NotFound => "device not found",
+                drivers::block::BlockError::OutOfRange => "lba out of range",
+                drivers::block::BlockError::BufferTooSmall => "buffer too small",
+                drivers::block::BlockError::Io => "I/O error",
+            });
+            out.write_str("\n");
+        }
+    }
+}
+
 fn hex_dump(out: &mut dyn ShellSink, data: &[u8]) {
     let mut offset = 0usize;
     while offset < data.len() {
@@ -736,6 +794,7 @@ fn cmd_help(out: &mut dyn ShellSink) {
     out.write_str("  devs       - Show registered devices\n");
     out.write_str("  blk        - Show block devices\n");
     out.write_str("  blkread    - Read a block device sector\n");
+    out.write_str("  blkwrite   - Write a test pattern to a block sector\n");
     out.write_str("  lspci      - Show PCI devices\n");
     out.write_str("  usb        - Show USB/xHCI driver status\n");
     out.write_str("  ps         - Show process table records\n");
@@ -800,6 +859,10 @@ pub fn run_command(out: &mut dyn ShellSink, cwd: &mut String, line: &str) -> She
         }
         "blkread" => cmd_blkread(out, ""),
         _ if trimmed.starts_with("blkread ") => cmd_blkread(out, &trimmed["blkread ".len()..]),
+        "blkwrite" => cmd_blkwrite(out, ""),
+        _ if trimmed.starts_with("blkwrite ") => {
+            cmd_blkwrite(out, &trimmed["blkwrite ".len()..])
+        }
         _ => return ShellOutcome::NotFound,
     }
 

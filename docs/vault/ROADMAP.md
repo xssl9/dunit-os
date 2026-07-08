@@ -17,6 +17,7 @@
 - [x] [[Tasks/Completed/Stdio-FD|Minimal stdin/stdout/stderr fd reservation]]
 - [x] [[Tasks/Completed/Dufetch|dufetch terminal system summary]]
 - [x] [[Tasks/Completed/Userspace-Programs|Userspace program build pipeline]]
+- [x] [[Tasks/Completed/Block-Storage-v1|QEMU virtio-blk `vd0` sector IO]]
 
 ---
 
@@ -33,8 +34,8 @@
 - [x] `wait` observes real child exit/fault status after execution
 - [x] Basic parent/child IPC round trip
 - [x] `runtime_stress` regression app
-- [ ] Canonical automated runtime regression through `build_and_run_multipass.py`
-- [ ] Documentation fully aligned with current runtime behavior
+- [x] Canonical automated runtime regression through `build_and_run_multipass.py`
+- [x] Documentation fully aligned with current runtime behavior
 - [ ] Host-side kernel test workflow fixed or documented
 
 ### Terminal Improvements
@@ -56,7 +57,8 @@
 → [[Tasks/InProgress/Drivers|Drivers]]
 
 - [x] PS/2 keyboard path for terminal mode
-- [ ] PCI enumeration
+- [x] PCI enumeration
+- [x] Disk driver: legacy virtio-blk `vd0` under QEMU
 - [ ] Disk driver: ATA/AHCI
 - [ ] Network driver: RTL8139/E1000
 - [ ] USB driver
@@ -82,7 +84,8 @@
 
 → [[Tasks/Future/Filesystem|Persistent dunitFS / block-backed FS]]
 
-- [ ] Block device abstraction
+- [x] Block device abstraction
+- [x] Disk-backed sector IO smoke via `vd0`
 - [ ] Persistent dunitFS design
 - [ ] Mount table beyond root MemFS
 - [ ] File permissions
@@ -147,3 +150,19 @@ python3 build_and_run_multipass.py \
 `build_and_run_multipass.py` is the only supported autonomous launch and test
 entrypoint. It builds the ISO, starts QEMU, injects terminal commands, stops QEMU
 on timeout, and analyzes the serial log.
+
+Block Storage v1 regression:
+
+```bash
+python3 build_and_run_multipass.py \
+  --mode test-terminal \
+  --disk virtio \
+  --qemu-timeout 60 \
+  --qemu-log qemu_block_v1.log \
+  --qemu-test-commands "blk;blkread vd0 0;blkwrite vd0 3;blkread vd0 3" \
+  --expect-log "vd0" \
+  --expect-log "virtio-blk" \
+  --expect-log "vd0 lba=3 written=512" \
+  --expect-log "DUNIT-BLOCK-STOR" \
+  --expect-log "AGE-V1"
+```

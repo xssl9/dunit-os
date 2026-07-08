@@ -57,6 +57,18 @@ pub fn init() {
     });
 }
 
+pub fn register_device(
+    info: BlockDeviceInfo,
+    read_block: fn(u64, &mut [u8]) -> Result<usize, BlockError>,
+    write_block: fn(u64, &[u8]) -> Result<usize, BlockError>,
+) {
+    register(BlockDeviceRegistration {
+        info,
+        read_block,
+        write_block,
+    });
+}
+
 pub fn snapshot(out: &mut [Option<BlockDeviceInfo>]) -> usize {
     lock_block();
 

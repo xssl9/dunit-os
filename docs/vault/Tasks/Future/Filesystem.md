@@ -1,7 +1,7 @@
 # Persistent dunitFS / Block-backed Filesystem
 
 **Status:** Future  
-**Depends on:** [[../Completed/VFS-MemFS|VFS + MemFS Runtime Layer]] · [[../InProgress/Drivers|Disk Driver]]
+**Depends on:** [[../Completed/VFS-MemFS|VFS + MemFS Runtime Layer]] · [[../Completed/Block-Storage-v1|Block Storage v1]]
 
 ---
 
@@ -14,6 +14,9 @@ The first runtime filesystem stage is complete:
 - Runtime file/directory operations.
 - Kernel terminal filesystem commands through VFS.
 - Userspace `open/read/write/close` syscalls through VFS.
+- Block device abstraction with `ramblk0` and QEMU legacy virtio-blk `vd0`.
+- Automated read/write sector regression through `build_and_run_multipass.py
+  --disk virtio`.
 
 See [[../Completed/VFS-MemFS|VFS + MemFS Runtime Layer]] and [[../Completed/Userspace-VFS-Syscalls|Userspace VFS Syscalls]].
 
@@ -23,9 +26,7 @@ See [[../Completed/VFS-MemFS|VFS + MemFS Runtime Layer]] and [[../Completed/User
 
 This node is no longer "filesystem from zero". It now tracks persistent storage work:
 
-- block device abstraction beyond the current volatile `ramblk0` smoke device
-- disk driver integration
-- persistent dunitFS design
+- persistent dunitFS design on top of `vd0`
 - on-disk inode/node format
 - mount table beyond root MemFS
 - file permissions
@@ -36,8 +37,7 @@ This node is no longer "filesystem from zero". It now tracks persistent storage 
 
 ## Blockers
 
-- No disk-backed block device layer; only volatile `ramblk0` smoke media exists.
-- No ATA/AHCI driver.
+- No mountable on-disk dunitFS yet.
 - No persistent allocation model.
 - No crash/recovery story.
 

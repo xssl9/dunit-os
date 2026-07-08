@@ -5,6 +5,7 @@ pub mod net;
 pub mod pci;
 pub mod registry;
 pub mod usb;
+pub mod virtio_blk;
 
 pub fn init() {
     registry::register("fb0", registry::DeviceClass::Framebuffer, "framebuffer");
@@ -14,6 +15,7 @@ pub fn init() {
     net::init();
     usb::init();
     block::init();
+    virtio_blk::init();
     keyboard::init();
     mouse::init();
 }
