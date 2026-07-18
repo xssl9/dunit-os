@@ -1519,6 +1519,15 @@ fn execute_gui_terminal_command(state: &mut UiState, app_index: usize, command: 
     }
 
     let mut cwd = String::from(state.gui_apps[app_index].cwd());
+    if trimmed == "dufetch" {
+        let app = &mut state.gui_apps[app_index];
+        let mut sink = GuiLineSink::new(app);
+        crate::apps::dufetch::run_stacked(&mut sink, &cwd);
+        sink.finish();
+        gui_terminal_new_prompt(&mut state.gui_apps[app_index]);
+        return;
+    }
+
     let outcome = {
         let app = &mut state.gui_apps[app_index];
         let mut sink = GuiLineSink::new(app);
@@ -3758,8 +3767,32 @@ fn apply_ui_action(state: &mut UiState, action: UiAction) -> bool {
     true
 }
 
-fn handle_keyboard_shortcuts(state: &mut UiState) -> bool {
-    let mut redraw = false;
+fn union_app_damage(
+    state: &UiState,
+    app_index: usize,
+    width: usize,
+    height: usize,
+    damage: &mut Option<Rect>,
+) {
+    if let Some(rect) = gui_app_window_rect(width, height, &state.gui_apps[app_index]) {
+        let padded = padded_rect(rect, 6, width, height);
+        *damage = Some(match *damage {
+            Some(current) => current.union(padded),
+            None => padded,
+        });
+    }
+}
+
+/// Drain pending keystrokes. Returns `(force_full_redraw, window_damage)` so the
+/// caller can repaint only the focused terminal window for ordinary typing
+/// instead of redrawing the whole screen (which is what made typing lag).
+fn handle_keyboard_shortcuts(
+    state: &mut UiState,
+    width: usize,
+    height: usize,
+) -> (bool, Option<Rect>) {
+    let mut force_full = false;
+    let mut damage: Option<Rect> = None;
 
     while let Some(scancode) = keyboard::read_scancode() {
         if scancode == 0xE0 {
@@ -3785,7 +3818,9 @@ fn handle_keyboard_shortcuts(state: &mut UiState) -> bool {
                         _ => GUI_KEY_RIGHT,
                     };
                     if let Some(app_index) = keyboard_target_gui_app(state) {
-                        redraw |= send_gui_key_event_and_flush(state, app_index, key);
+                        if send_gui_key_event_and_flush(state, app_index, key) {
+                            union_app_damage(state, app_index, width, height, &mut damage);
+                        }
                     }
                 }
                 _ => {}
@@ -3800,7 +3835,8 @@ fn handle_keyboard_shortcuts(state: &mut UiState) -> bool {
         if state.keyboard_super_down {
             if let Some(action) = configured_super_shortcut(key_code) {
                 reset_sticky_modifiers(state);
-                redraw |= apply_gui_shortcut(state, action);
+                // Window open/close changes layout: repaint everything.
+                force_full |= apply_gui_shortcut(state, action);
                 continue;
             }
             reset_sticky_modifiers(state);
@@ -3808,7 +3844,7 @@ fn handle_keyboard_shortcuts(state: &mut UiState) -> bool {
 
         if key_code == 0x3B {
             state.launcher_open = !state.launcher_open;
-            redraw = true;
+            force_full = true;
             continue;
         }
 
@@ -3819,12 +3855,14 @@ fn handle_keyboard_shortcuts(state: &mut UiState) -> bool {
                 _ => keyboard::scancode_to_char(key_code).map(|ch| ch as u8),
             };
             if let Some(key) = key {
-                redraw |= send_gui_key_event_and_flush(state, app_index, key);
+                if send_gui_key_event_and_flush(state, app_index, key) {
+                    union_app_damage(state, app_index, width, height, &mut damage);
+                }
             }
         }
     }
 
-    redraw
+    (force_full, damage)
 }
 
 fn ease_step(step: usize, total: usize) -> usize {
@@ -3983,18 +4021,21 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
     draw_cursor(front, width, height, old_mouse_x, old_mouse_y);
 
     loop {
-        let keyboard_redraw = handle_keyboard_shortcuts(&mut state);
+        let (keyboard_full, keyboard_damage) =
+            handle_keyboard_shortcuts(&mut state, width, height);
         mouse::update();
         let (mouse_x, mouse_y) = crate::input::mouse_position();
         let buttons = crate::input::mouse_buttons();
         let pressed = (buttons & 0x01) != 0;
         let was_pressed = (old_buttons & 0x01) != 0;
         let cursor_moved = mouse_x != old_mouse_x || mouse_y != old_mouse_y;
-        let mut full_redraw = keyboard_redraw;
+        let mut full_redraw = keyboard_full;
         let mut drag_damage: Option<Rect> = None;
-        let mut update_damage: Option<Rect> = None;
+        // Typing only dirties the focused terminal window, so repaint just that
+        // region instead of the whole screen.
+        let mut update_damage: Option<Rect> = keyboard_damage;
 
-        // Mouse wheel scrolls the focused terminal's scrollback.
+        // Mouse wheel scrolls the focused terminal's scrollback (partial repaint).
         let scroll_delta = crate::input::take_mouse_scroll_delta();
         if scroll_delta != 0 {
             if let Some(idx) = keyboard_target_gui_app(&state) {
@@ -4003,13 +4044,14 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                     let step = 3usize;
                     if scroll_delta > 0 {
                         let add = (scroll_delta as usize).saturating_mul(step);
-                        app.scroll_offset = app.scroll_offset.saturating_add(add).min(app.line_count);
+                        app.scroll_offset =
+                            app.scroll_offset.saturating_add(add).min(app.line_count);
                     } else {
                         let sub = ((-scroll_delta) as usize).saturating_mul(step);
                         app.scroll_offset = app.scroll_offset.saturating_sub(sub);
                     }
                     app.mark_dirty();
-                    full_redraw = true;
+                    union_app_damage(&state, idx, width, height, &mut update_damage);
                 }
             }
         }
@@ -4220,10 +4262,15 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                         if let Some((old_rect, new_rect)) =
                             resize_gui_app_window(&mut state, index, mx, my, width, height)
                         {
-                            // Resizing the window re-flows content, so repaint
-                            // the whole union region rather than a partial rect.
-                            let _ = old_rect.union(new_rect);
-                            full_redraw = true;
+                            let window_damage = old_rect
+                                .union(new_rect)
+                                .union(cursor_rect(old_mouse_x, old_mouse_y))
+                                .union(cursor_rect(mouse_x, mouse_y));
+                            if back_buffer.is_some() {
+                                drag_damage = Some(padded_rect(window_damage, 10, width, height));
+                            } else {
+                                full_redraw = true;
+                            }
                         }
                     }
                     PointerOp::Drag { .. } | PointerOp::Resize { .. } => {
