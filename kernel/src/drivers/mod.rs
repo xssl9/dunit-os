@@ -1,3 +1,4 @@
+pub mod ahci;
 pub mod block;
 pub mod keyboard;
 pub mod mouse;
@@ -15,6 +16,7 @@ pub fn init() {
     net::init();
     usb::init();
     block::init();
+    ahci::init();
     virtio_blk::init();
     keyboard::init();
     mouse::init();

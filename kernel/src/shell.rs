@@ -232,6 +232,23 @@ fn cmd_usb(out: &mut dyn ShellSink) {
     out.write_str("USB HID mouse parser: boot-protocol reports supported; enumeration/polling not implemented\n");
 }
 
+fn cmd_ahci(out: &mut dyn ShellSink) {
+    let status = drivers::ahci::status();
+    out.write_str("AHCI: found=");
+    write_usize(out, status.controllers_found);
+    out.write_str(" initialized=");
+    write_usize(out, status.controllers_initialized);
+    out.write_str(" disks=");
+    write_usize(out, status.disks);
+    if let Some(error) = status.last_error {
+        out.write_str(" last_error=");
+        out.write_str(error.as_str());
+    } else {
+        out.write_str(" last_error=none");
+    }
+    out.write_str("\n");
+}
+
 fn cmd_devs(out: &mut dyn ShellSink) {
     let mut devices: [Option<drivers::registry::DeviceRegistration>; 32] = [None; 32];
     let count = drivers::registry::snapshot(&mut devices);
@@ -857,6 +874,7 @@ fn cmd_help(out: &mut dyn ShellSink) {
     out.write_str("  lsblk      - Show disks and GPT partitions\n");
     out.write_str("  blkread    - Read a block device sector\n");
     out.write_str("  blkwrite   - Write a test pattern to a block sector\n");
+    out.write_str("  ahci       - Show SATA/AHCI driver status\n");
     out.write_str("  lspci      - Show PCI devices\n");
     out.write_str("  usb        - Show USB/xHCI driver status\n");
     out.write_str("  ps         - Show process table records\n");
@@ -915,6 +933,7 @@ pub fn run_command(out: &mut dyn ShellSink, cwd: &mut String, line: &str) -> She
         "devs" => cmd_devs(out),
         "blk" => cmd_blk(out),
         "lsblk" => cmd_lsblk(out),
+        "ahci" => cmd_ahci(out),
         "usb" => cmd_usb(out),
         "top" => out.write_str("top unavailable: scheduler not active\n"),
         "poweroff" | "shutdown" => {
