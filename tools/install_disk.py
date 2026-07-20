@@ -18,6 +18,7 @@ SECTOR_SIZE = 512
 ESP_START_MIB = 1
 ESP_END_MIB = 65
 MIN_DISK_MIB = 128
+ESP_SIZE_MIB = ESP_END_MIB - ESP_START_MIB
 DUNITFS_MAGIC = b"DUNITFS1"
 DUNITFS_VERSION = 1
 DUNITFS_METADATA_BLOCKS = 16
@@ -159,16 +160,45 @@ def format_esp(path: Path, start: int, sectors: int) -> str:
     return f"{path}@@{start * SECTOR_SIZE}"
 
 
+def build_esp_image(path: Path, root: Path, config: Path) -> None:
+    sectors = ESP_SIZE_MIB * 1024 * 1024 // SECTOR_SIZE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as image:
+        image.truncate(sectors * SECTOR_SIZE)
+    run(
+        [
+            "mkfs.fat",
+            "-F",
+            "32",
+            "-n",
+            "DUNITBOOT",
+            "-I",
+            str(path),
+            str(sectors // 2),
+        ]
+    )
+    copy_boot_files(root, str(path), config)
+
+
 def copy_boot_files(root: Path, fat_image: str, config: Path) -> None:
     env = os.environ.copy()
     env["MTOOLS_SKIP_CHECK"] = "1"
     for directory in ("EFI", "EFI/BOOT", "boot", "boot/limine", "boot/userspace"):
         run(["mmd", "-i", fat_image, f"::/{directory}"], env=env)
 
+    installed_config = root / "build/installed-limine.conf"
+    installed_config.write_text(
+        "".join(
+            line
+            for line in config.read_text(encoding="utf-8").splitlines(keepends=True)
+            if not line.lstrip().startswith("module_path:")
+        ),
+        encoding="utf-8",
+    )
     files = [
         (root / "limine/BOOTX64.EFI", "::/EFI/BOOT/BOOTX64.EFI"),
         (root / "build/kernel.elf", "::/boot/kernel.elf"),
-        (config, "::/boot/limine/limine.conf"),
+        (installed_config, "::/boot/limine/limine.conf"),
         (root / "limine/limine-bios.sys", "::/boot/limine/limine-bios.sys"),
     ]
     optional = [
@@ -213,6 +243,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-size-mib", type=int, default=256)
     parser.add_argument("--config", type=Path, default=Path("limine.conf"))
     parser.add_argument("--no-build", action="store_true")
+    parser.add_argument("--esp-image-only", action="store_true")
     parser.add_argument(
         "--yes-i-know-this-erases-the-disk",
         action="store_true",
@@ -233,13 +264,21 @@ def main() -> int:
     block_device = is_block_device(target)
     if str(target).startswith("/dev/") and not block_device:
         raise RuntimeError("target under /dev is not an existing whole block device")
-    tools = ["parted", "mkfs.fat", "mmd", "mcopy", "lsblk"]
+    tools = ["mkfs.fat", "mmd", "mcopy"]
+    if not args.esp_image_only:
+        tools.extend(["parted", "lsblk"])
     if not args.no_build:
         tools.append("make")
     require_tools(tools)
     if not args.no_build:
         subprocess.run(["make", "all", "userspace"], cwd=root, check=True)
     validate_payload(root, config)
+    if args.esp_image_only:
+        if block_device:
+            raise RuntimeError("ESP payload target must be a regular image file")
+        build_esp_image(target, root, config)
+        print(f"[INSTALL] ESP payload ready: {target}")
+        return 0
     prepare_target(target, args.image_size_mib, block_device)
     partition_disk(target)
     ranges = partition_ranges(target)

@@ -453,8 +453,14 @@ pub extern "C" fn kernel_main(
     _term_ptr: *const u8,
     terminal_mode: i32,
     hhdm_offset: u64,
+    installer_payload: *const u8,
+    installer_payload_size: u64,
 ) -> ! {
     serial_write("[KERNEL] START\r\n");
+
+    unsafe {
+        storage::installer::set_payload(installer_payload, installer_payload_size as usize);
+    }
 
     unsafe {
         cpu::init_fpu();

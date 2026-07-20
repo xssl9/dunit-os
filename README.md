@@ -143,6 +143,17 @@ sudo python3 tools/install_disk.py /dev/sdX --yes-i-know-this-erases-the-disk
 The installer creates a FAT32 EFI System Partition containing Limine and the
 kernel, plus a persistent DunitFS partition automatically mounted at `/persist`.
 
+The live ISO can also install directly from the Dunit terminal:
+
+```text
+lsblk
+install.dunit sda --yes
+```
+
+The in-system installer currently creates an x86_64 UEFI installation on a
+writable AHCI disk. Use the Linux/live-USB command above when legacy BIOS boot
+support is required.
+
 ## Honest Limitations
 
 Not implemented yet:

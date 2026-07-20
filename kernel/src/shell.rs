@@ -478,6 +478,41 @@ fn cmd_mount_dunit(out: &mut dyn ShellSink, args: &str) {
     }
 }
 
+fn cmd_install_dunit(out: &mut dyn ShellSink, args: &str) {
+    let mut parts = args.split_whitespace();
+    let Some(device_name) = parts.next() else {
+        out.write_str("usage: install.dunit <disk> --yes\n");
+        return;
+    };
+    if parts.next() != Some("--yes") || parts.next().is_some() {
+        out.write_str("install.dunit: installation requires explicit --yes\n");
+        return;
+    }
+    let Some(device) = find_block_device(device_name) else {
+        out.write_str("install.dunit: device not found\n");
+        return;
+    };
+    let Some(vfs) = vfs::get_vfs() else {
+        out.write_str("install.dunit: VFS not initialized\n");
+        return;
+    };
+
+    out.write_str("Installing Dunit OS to ");
+    out.write_str(device.name);
+    out.write_str(" (UEFI)...\n");
+    match crate::storage::installer::install(device, vfs) {
+        Ok(()) => {
+            out.write_str("Dunit OS installed successfully\n");
+            out.write_str("Persistent filesystem mounted at /persist\n");
+        }
+        Err(error) => {
+            out.write_str("install.dunit: ");
+            out.write_str(error.as_str());
+            out.write_str("\n");
+        }
+    }
+}
+
 fn parse_u64(text: &str) -> Option<u64> {
     if text.is_empty() {
         return None;
@@ -1003,6 +1038,7 @@ fn cmd_help(out: &mut dyn ShellSink) {
     out.write_str("  ahci       - Show SATA/AHCI driver status\n");
     out.write_str("  mkfs.dunit - Format a GPT partition as DunitFS\n");
     out.write_str("  mount.dunit- Mount DunitFS at /persist\n");
+    out.write_str("  install.dunit - Install Dunit OS to an AHCI disk (UEFI)\n");
     out.write_str("  lspci      - Show PCI devices\n");
     out.write_str("  usb        - Show USB/xHCI driver status\n");
     out.write_str("  ps         - Show process table records\n");
@@ -1069,6 +1105,10 @@ pub fn run_command(out: &mut dyn ShellSink, cwd: &mut String, line: &str) -> She
         "mount.dunit" => cmd_mount_dunit(out, ""),
         _ if trimmed.starts_with("mount.dunit ") => {
             cmd_mount_dunit(out, &trimmed["mount.dunit ".len()..])
+        }
+        "install.dunit" => cmd_install_dunit(out, ""),
+        _ if trimmed.starts_with("install.dunit ") => {
+            cmd_install_dunit(out, &trimmed["install.dunit ".len()..])
         }
         "usb" => cmd_usb(out),
         "top" => out.write_str("top unavailable: scheduler not active\n"),

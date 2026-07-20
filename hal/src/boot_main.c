@@ -79,6 +79,12 @@ struct limine_kernel_file_response {
     struct limine_kernel_file *kernel_file;
 };
 
+struct limine_module_response {
+    uint64_t revision;
+    uint64_t module_count;
+    struct limine_kernel_file **modules;
+};
+
 struct limine_hhdm_response {
     uint64_t revision;
     uint64_t offset;
@@ -99,6 +105,7 @@ struct limine_memmap_response {
 extern struct limine_framebuffer_response *get_framebuffer_response(void);
 extern struct limine_terminal_response *get_terminal_response(void);
 extern struct limine_kernel_file_response *get_kernel_file_response(void);
+extern struct limine_module_response *get_module_response(void);
 extern struct limine_hhdm_response *get_hhdm_response(void);
 extern struct limine_memmap_response *get_memmap_response(void);
 
@@ -145,7 +152,9 @@ extern void kernel_main(
     struct limine_framebuffer *fb,
     struct limine_terminal_response *term,
     int terminal_mode,
-    uint64_t hhdm_offset
+    uint64_t hhdm_offset,
+    const void *installer_payload,
+    uint64_t installer_payload_size
 );
 
 void boot_main(void) {
@@ -157,6 +166,7 @@ void boot_main(void) {
     struct limine_framebuffer_response *fb_resp = get_framebuffer_response();
     struct limine_terminal_response *term_resp = get_terminal_response();
     struct limine_kernel_file_response *kf_resp = get_kernel_file_response();
+    struct limine_module_response *module_resp = get_module_response();
     struct limine_hhdm_response *hhdm_resp = get_hhdm_response();
     struct limine_memmap_response *memmap_resp = get_memmap_response();
 
@@ -206,8 +216,26 @@ void boot_main(void) {
         serial_write("[BOOT] framebuffer FAIL\r\n");
     }
 
+    const void *installer_payload = NULL;
+    uint64_t installer_payload_size = 0;
+    if (module_resp && module_resp->module_count > 0 && module_resp->modules
+        && module_resp->modules[0]) {
+        installer_payload = module_resp->modules[0]->address;
+        installer_payload_size = module_resp->modules[0]->size;
+        serial_write("[BOOT] installer payload OK\r\n");
+    } else {
+        serial_write("[BOOT] installer payload unavailable\r\n");
+    }
+
     serial_write("[BOOT] kernel handoff START\r\n");
-    kernel_main(fb, term_resp, terminal_mode, hhdm_offset);
+    kernel_main(
+        fb,
+        term_resp,
+        terminal_mode,
+        hhdm_offset,
+        installer_payload,
+        installer_payload_size
+    );
     serial_write("[BOOT] kernel handoff FAIL\r\n");
 
     while (1) {

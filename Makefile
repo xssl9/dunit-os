@@ -153,9 +153,11 @@ userspace:
 
 iso: $(BUILD_DIR)/kernel.elf userspace
 	test -f $(LIMINE_CONFIG)
+	python3 tools/install_disk.py $(BUILD_DIR)/installer-esp.img --esp-image-only --no-build --config $(LIMINE_CONFIG) --yes-i-know-this-erases-the-disk
 	mkdir -p $(ISO_DIR)/boot/limine
 	mkdir -p $(ISO_DIR)/boot/userspace
 	cp $(BUILD_DIR)/kernel.elf $(ISO_DIR)/boot/
+	cp $(BUILD_DIR)/installer-esp.img $(ISO_DIR)/boot/
 	cp $(LIMINE_CONFIG) $(ISO_DIR)/boot/limine/limine.conf
 	test -f assets/gui/background.png && cp assets/gui/background.png $(ISO_DIR)/boot/background.png || true
 	test -f assets/boot/limine.png && cp assets/boot/limine.png $(ISO_DIR)/boot/limine.png || true

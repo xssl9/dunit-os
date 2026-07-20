@@ -19,6 +19,10 @@ const DATA_START: u64 = METADATA_START + METADATA_BLOCKS;
 
 static mut MOUNTED_FS: Option<DunitFs> = None;
 
+pub fn is_mounted() -> bool {
+    unsafe { MOUNTED_FS.is_some() }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DunitFsError {
     InvalidBlockSize,
