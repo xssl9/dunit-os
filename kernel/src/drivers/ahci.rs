@@ -14,6 +14,8 @@ const AHCI_MMIO_SIZE: usize = 0x2000;
 const MAX_CONTROLLERS: usize = 4;
 const MAX_DISKS: usize = 4;
 const PAGE_SIZE: usize = 4096;
+const DATA_PAGES: usize = 16;
+const DATA_BUFFER_SIZE: usize = PAGE_SIZE * DATA_PAGES;
 const SECTOR_SIZE: usize = 512;
 const TIMEOUT_SPINS: usize = 10_000_000;
 
@@ -164,7 +166,7 @@ struct AhciDisk {
     command_list: DmaPage,
     _received_fis: DmaPage,
     command_table: DmaPage,
-    data: DmaPage,
+    data: [DmaPage; DATA_PAGES],
 }
 
 pub fn init() {
@@ -319,9 +321,30 @@ fn sata_disk_present(port: usize, _port_number: u8) -> bool {
 fn setup_disk(port: usize, port_number: u8, supports_64bit: bool) -> Result<AhciDisk, AhciError> {
     stop_port(port)?;
     let command_list = alloc_dma_page(supports_64bit)?;
-    let received_fis = alloc_dma_page(supports_64bit)?;
-    let command_table = alloc_dma_page(supports_64bit)?;
-    let data = alloc_dma_page(supports_64bit)?;
+    let received_fis = match alloc_dma_page(supports_64bit) {
+        Ok(page) => page,
+        Err(error) => {
+            free_dma_page(command_list);
+            return Err(error);
+        }
+    };
+    let command_table = match alloc_dma_page(supports_64bit) {
+        Ok(page) => page,
+        Err(error) => {
+            free_dma_page(command_list);
+            free_dma_page(received_fis);
+            return Err(error);
+        }
+    };
+    let data = match alloc_dma_pages(supports_64bit) {
+        Ok(pages) => pages,
+        Err(error) => {
+            free_dma_page(command_list);
+            free_dma_page(received_fis);
+            free_dma_page(command_table);
+            return Err(error);
+        }
+    };
 
     write_address(port, PX_CLB, PX_CLBU, command_list.phys);
     write_address(port, PX_FB, PX_FBU, received_fis.phys);
@@ -355,7 +378,7 @@ fn setup_disk(port: usize, port_number: u8, supports_64bit: bool) -> Result<Ahci
         free_dma_page(command_list);
         free_dma_page(received_fis);
         free_dma_page(command_table);
-        free_dma_page(data);
+        free_dma_pages(data);
         return Err(AhciError::UnsupportedDevice);
     }
 
@@ -372,7 +395,7 @@ fn setup_disk(port: usize, port_number: u8, supports_64bit: bool) -> Result<Ahci
         free_dma_page(command_list);
         free_dma_page(received_fis);
         free_dma_page(command_table);
-        free_dma_page(data);
+        free_dma_pages(data);
         return Err(error);
     }
     Ok(disk)
@@ -392,8 +415,8 @@ fn stop_port(port: usize) -> Result<(), AhciError> {
 }
 
 fn identify(disk: &mut AhciDisk) -> Result<(), AhciError> {
-    issue_data(disk, ATA_CMD_IDENTIFY, 0, false, false).map_err(|_| AhciError::IdentifyFailed)?;
-    let data = unsafe { core::slice::from_raw_parts(disk.data.virt as *const u8, SECTOR_SIZE) };
+    issue_data(disk, ATA_CMD_IDENTIFY, 0, false, 0).map_err(|_| AhciError::IdentifyFailed)?;
+    let data = unsafe { core::slice::from_raw_parts(disk.data[0].virt as *const u8, SECTOR_SIZE) };
     let word106 = identify_word(data, 106);
     if (word106 & (1 << 14)) != 0 && (word106 & (1 << 15)) == 0 && (word106 & (1 << 12)) != 0 {
         let logical_words =
@@ -417,55 +440,71 @@ fn identify(disk: &mut AhciDisk) -> Result<(), AhciError> {
     Ok(())
 }
 
-fn transfer(index: usize, lba: u64, buffer: &mut [u8], write: bool) -> Result<usize, BlockError> {
-    if buffer.len() < SECTOR_SIZE {
+fn transfer_read(index: usize, lba: u64, buffer: &mut [u8]) -> Result<usize, BlockError> {
+    unsafe { transfer(index, lba, buffer.as_mut_ptr(), buffer.len(), false) }
+}
+
+fn transfer_write(index: usize, lba: u64, buffer: &[u8]) -> Result<usize, BlockError> {
+    unsafe { transfer(index, lba, buffer.as_ptr() as *mut u8, buffer.len(), true) }
+}
+
+unsafe fn transfer(
+    index: usize,
+    lba: u64,
+    buffer: *mut u8,
+    length: usize,
+    write: bool,
+) -> Result<usize, BlockError> {
+    if length < SECTOR_SIZE || length % SECTOR_SIZE != 0 {
         return Err(BlockError::BufferTooSmall);
     }
+    let sectors = (length / SECTOR_SIZE) as u64;
     lock_ahci();
     let result = unsafe {
         let Some(disk) = DISKS[index].as_mut() else {
             AHCI_LOCK.store(false, Ordering::Release);
             return Err(BlockError::NotFound);
         };
-        if lba >= disk.capacity_sectors {
+        if lba
+            .checked_add(sectors)
+            .map(|end| end > disk.capacity_sectors)
+            .unwrap_or(true)
+        {
             Err(BlockError::OutOfRange)
         } else {
-            if write {
-                core::ptr::copy_nonoverlapping(
-                    buffer.as_ptr(),
-                    disk.data.virt as *mut u8,
-                    SECTOR_SIZE,
-                );
-            }
-            match issue_data(
-                disk,
+            let mut done = 0usize;
+            let mut io_result = Ok(());
+            while done < length {
+                let bytes = (length - done).min(DATA_BUFFER_SIZE);
+                let count = (bytes / SECTOR_SIZE) as u16;
                 if write {
-                    ATA_CMD_WRITE_DMA_EXT
-                } else {
-                    ATA_CMD_READ_DMA_EXT
-                },
-                lba,
-                write,
-                true,
-            ) {
-                Ok(()) => {
-                    if write {
-                        if issue_nodata(disk, ATA_CMD_FLUSH_CACHE_EXT).is_err() {
-                            Err(BlockError::Io)
-                        } else {
-                            Ok(SECTOR_SIZE)
-                        }
-                    } else {
-                        core::ptr::copy_nonoverlapping(
-                            disk.data.virt as *const u8,
-                            buffer.as_mut_ptr(),
-                            SECTOR_SIZE,
-                        );
-                        Ok(SECTOR_SIZE)
-                    }
+                    copy_to_dma(&disk.data, buffer.add(done), bytes);
                 }
-                Err(_) => Err(BlockError::Io),
+                if issue_data(
+                    disk,
+                    if write {
+                        ATA_CMD_WRITE_DMA_EXT
+                    } else {
+                        ATA_CMD_READ_DMA_EXT
+                    },
+                    lba + (done / SECTOR_SIZE) as u64,
+                    write,
+                    count,
+                )
+                .is_err()
+                {
+                    io_result = Err(BlockError::Io);
+                    break;
+                }
+                if !write {
+                    copy_from_dma(&disk.data, buffer.add(done), bytes);
+                }
+                done += bytes;
             }
+            if io_result.is_ok() && write && issue_nodata(disk, ATA_CMD_FLUSH_CACHE_EXT).is_err() {
+                io_result = Err(BlockError::Io);
+            }
+            io_result.map(|_| length)
         }
     };
     AHCI_LOCK.store(false, Ordering::Release);
@@ -477,14 +516,14 @@ fn issue_data(
     command: u8,
     lba: u64,
     write: bool,
-    sector_count: bool,
+    sector_count: u16,
 ) -> Result<(), AhciError> {
     prepare_command(disk, command, lba, write, true, sector_count);
     issue_slot(disk.port)
 }
 
 fn issue_nodata(disk: &mut AhciDisk, command: u8) -> Result<(), AhciError> {
-    prepare_command(disk, command, 0, false, false, false);
+    prepare_command(disk, command, 0, false, false, 0);
     issue_slot(disk.port)
 }
 
@@ -494,16 +533,26 @@ fn prepare_command(
     lba: u64,
     write: bool,
     has_data: bool,
-    sector_count: bool,
+    sector_count: u16,
 ) {
     unsafe {
         core::ptr::write_bytes(disk.command_list.virt as *mut u8, 0, COMMAND_HEADER_SIZE);
-        core::ptr::write_bytes(disk.command_table.virt as *mut u8, 0, 256);
+        core::ptr::write_bytes(disk.command_table.virt as *mut u8, 0, PAGE_SIZE);
     }
 
     let header_flags = 5u16 | if write { 1 << 6 } else { 0 };
     mem_write16(disk.command_list.virt, 0, header_flags);
-    mem_write16(disk.command_list.virt, 2, if has_data { 1 } else { 0 });
+    let data_bytes = if sector_count == 0 {
+        SECTOR_SIZE
+    } else {
+        sector_count as usize * SECTOR_SIZE
+    };
+    let prdt_count = if has_data {
+        data_bytes.div_ceil(PAGE_SIZE)
+    } else {
+        0
+    };
+    mem_write16(disk.command_list.virt, 2, prdt_count as u16);
     mem_write64(disk.command_list.virt, 8, disk.command_table.phys);
 
     let fis = disk.command_table.virt + COMMAND_TABLE_CFIS;
@@ -517,15 +566,19 @@ fn prepare_command(
     mem_write8(fis, 8, (lba >> 24) as u8);
     mem_write8(fis, 9, (lba >> 32) as u8);
     mem_write8(fis, 10, (lba >> 40) as u8);
-    if sector_count {
-        mem_write8(fis, 12, 1);
+    if sector_count != 0 {
+        mem_write8(fis, 12, sector_count as u8);
+        mem_write8(fis, 13, (sector_count >> 8) as u8);
     }
 
     if has_data {
-        let prdt = disk.command_table.virt + COMMAND_TABLE_PRDT;
-        mem_write64(prdt, 0, disk.data.phys);
-        mem_write32(prdt, 8, 0);
-        mem_write32(prdt, 12, (SECTOR_SIZE - 1) as u32);
+        for index in 0..prdt_count {
+            let prdt = disk.command_table.virt + COMMAND_TABLE_PRDT + index * 16;
+            let bytes = (data_bytes - index * PAGE_SIZE).min(PAGE_SIZE);
+            mem_write64(prdt, 0, disk.data[index].phys);
+            mem_write32(prdt, 8, 0);
+            mem_write32(prdt, 12, (bytes - 1) as u32);
+        }
     }
     fence(Ordering::SeqCst);
 }
@@ -590,15 +643,10 @@ fn register_disks() {
 macro_rules! disk_io {
     ($read:ident, $write:ident, $index:expr) => {
         fn $read(lba: u64, buffer: &mut [u8]) -> Result<usize, BlockError> {
-            transfer($index, lba, buffer, false)
+            transfer_read($index, lba, buffer)
         }
         fn $write(lba: u64, buffer: &[u8]) -> Result<usize, BlockError> {
-            if buffer.len() < SECTOR_SIZE {
-                return Err(BlockError::BufferTooSmall);
-            }
-            let mut sector = [0u8; SECTOR_SIZE];
-            sector.copy_from_slice(&buffer[..SECTOR_SIZE]);
-            transfer($index, lba, &mut sector, true)
+            transfer_write($index, lba, buffer)
         }
     };
 }
@@ -621,6 +669,52 @@ fn alloc_dma_page(supports_64bit: bool) -> Result<DmaPage, AhciError> {
     };
     unsafe { core::ptr::write_bytes(page.virt as *mut u8, 0, PAGE_SIZE) };
     Ok(page)
+}
+
+fn alloc_dma_pages(supports_64bit: bool) -> Result<[DmaPage; DATA_PAGES], AhciError> {
+    let mut pages = [DmaPage { phys: 0, virt: 0 }; DATA_PAGES];
+    for index in 0..DATA_PAGES {
+        match alloc_dma_page(supports_64bit) {
+            Ok(page) => pages[index] = page,
+            Err(error) => {
+                for page in pages[..index].iter().copied() {
+                    free_dma_page(page);
+                }
+                return Err(error);
+            }
+        }
+    }
+    Ok(pages)
+}
+
+fn free_dma_pages(pages: [DmaPage; DATA_PAGES]) {
+    for page in pages {
+        free_dma_page(page);
+    }
+}
+
+unsafe fn copy_to_dma(pages: &[DmaPage; DATA_PAGES], source: *const u8, length: usize) {
+    let mut done = 0usize;
+    for page in pages {
+        if done >= length {
+            break;
+        }
+        let bytes = (length - done).min(PAGE_SIZE);
+        unsafe { core::ptr::copy_nonoverlapping(source.add(done), page.virt as *mut u8, bytes) };
+        done += bytes;
+    }
+}
+
+unsafe fn copy_from_dma(pages: &[DmaPage; DATA_PAGES], target: *mut u8, length: usize) {
+    let mut done = 0usize;
+    for page in pages {
+        if done >= length {
+            break;
+        }
+        let bytes = (length - done).min(PAGE_SIZE);
+        unsafe { core::ptr::copy_nonoverlapping(page.virt as *const u8, target.add(done), bytes) };
+        done += bytes;
+    }
 }
 
 fn free_dma_page(page: DmaPage) {
