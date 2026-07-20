@@ -274,6 +274,67 @@ fn cmd_blk(out: &mut dyn ShellSink) {
     }
 }
 
+fn cmd_lsblk(out: &mut dyn ShellSink) {
+    let mut devices: [Option<drivers::block::BlockDeviceInfo>; 8] = [None; 8];
+    let count = drivers::block::snapshot(&mut devices);
+
+    out.write_str("NAME  BLOCKS  BYTES  TYPE  LABEL\n");
+    for entry in devices.iter().take(count) {
+        let Some(device) = entry else {
+            continue;
+        };
+        out.write_str(device.name);
+        out.write_str("  ");
+        write_u64(out, device.blocks);
+        out.write_str("  ");
+        write_u64(out, device.bytes());
+        out.write_str("  disk\n");
+
+        match crate::storage::gpt::read(*device) {
+            Ok(table) => {
+                for partition in table.partitions.iter().flatten() {
+                    out.write_str("  ");
+                    out.write_str(device.name);
+                    out.write_str("p");
+                    write_u32(out, partition.index);
+                    out.write_str("  ");
+                    write_u64(out, partition.blocks());
+                    out.write_str("  ");
+                    write_u64(out, partition.blocks() * device.block_size as u64);
+                    out.write_str("  part  ");
+                    out.write_str(partition.name());
+                    out.write_str("\n");
+                }
+            }
+            Err(crate::storage::gpt::GptError::InvalidSignature)
+            | Err(crate::storage::gpt::GptError::DiskTooSmall) => {}
+            Err(error) => {
+                out.write_str("  GPT error: ");
+                out.write_str(gpt_error_str(error));
+                out.write_str("\n");
+            }
+        }
+    }
+}
+
+fn gpt_error_str(error: crate::storage::gpt::GptError) -> &'static str {
+    use crate::storage::gpt::GptError;
+    match error {
+        GptError::UnsupportedBlockSize => "unsupported block size",
+        GptError::DiskTooSmall => "disk too small",
+        GptError::InvalidSignature => "not GPT",
+        GptError::InvalidHeader => "invalid header",
+        GptError::InvalidHeaderCrc => "header CRC mismatch",
+        GptError::InvalidTableCrc => "table CRC mismatch",
+        GptError::TooManyEntries => "too many entries",
+        GptError::InvalidPartition => "invalid partition",
+        GptError::Block(drivers::block::BlockError::NotFound) => "device not found",
+        GptError::Block(drivers::block::BlockError::OutOfRange) => "LBA out of range",
+        GptError::Block(drivers::block::BlockError::BufferTooSmall) => "buffer too small",
+        GptError::Block(drivers::block::BlockError::Io) => "I/O error",
+    }
+}
+
 fn parse_u64(text: &str) -> Option<u64> {
     if text.is_empty() {
         return None;
@@ -793,6 +854,7 @@ fn cmd_help(out: &mut dyn ShellSink) {
     out.write_str("  exec       - Execute a program (GUI apps open a window)\n");
     out.write_str("  devs       - Show registered devices\n");
     out.write_str("  blk        - Show block devices\n");
+    out.write_str("  lsblk      - Show disks and GPT partitions\n");
     out.write_str("  blkread    - Read a block device sector\n");
     out.write_str("  blkwrite   - Write a test pattern to a block sector\n");
     out.write_str("  lspci      - Show PCI devices\n");
@@ -852,6 +914,7 @@ pub fn run_command(out: &mut dyn ShellSink, cwd: &mut String, line: &str) -> She
         "lspci" => cmd_lspci(out),
         "devs" => cmd_devs(out),
         "blk" => cmd_blk(out),
+        "lsblk" => cmd_lsblk(out),
         "usb" => cmd_usb(out),
         "top" => out.write_str("top unavailable: scheduler not active\n"),
         "poweroff" | "shutdown" => {

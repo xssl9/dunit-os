@@ -24,6 +24,7 @@ pub mod kthreads;
 pub mod memory;
 pub mod process;
 pub mod shell;
+pub mod storage;
 pub mod syscall;
 pub mod terminal;
 pub mod ui_loop;
