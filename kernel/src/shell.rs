@@ -352,6 +352,132 @@ fn gpt_error_str(error: crate::storage::gpt::GptError) -> &'static str {
     }
 }
 
+fn find_block_device(name: &str) -> Option<drivers::block::BlockDeviceInfo> {
+    let mut devices: [Option<drivers::block::BlockDeviceInfo>; 8] = [None; 8];
+    let count = drivers::block::snapshot(&mut devices);
+    devices[..count]
+        .iter()
+        .flatten()
+        .copied()
+        .find(|device| device.name == name)
+}
+
+fn find_gpt_partition(
+    device: drivers::block::BlockDeviceInfo,
+    index: u32,
+) -> core::result::Result<crate::storage::gpt::Partition, &'static str> {
+    let table = crate::storage::gpt::read(device).map_err(gpt_error_str)?;
+    table
+        .partitions
+        .iter()
+        .flatten()
+        .copied()
+        .find(|partition| partition.index == index)
+        .ok_or("partition not found")
+}
+
+fn cmd_mkfs_dunit(out: &mut dyn ShellSink, args: &str) {
+    let mut parts = args.split_whitespace();
+    let Some(device_name) = parts.next() else {
+        out.write_str("usage: mkfs.dunit <disk> <partition> --yes\n");
+        return;
+    };
+    let Some(index) = parts.next().and_then(parse_u64) else {
+        out.write_str("mkfs.dunit: invalid partition number\n");
+        return;
+    };
+    if index > u32::MAX as u64 {
+        out.write_str("mkfs.dunit: invalid partition number\n");
+        return;
+    }
+    if parts.next() != Some("--yes") || parts.next().is_some() {
+        out.write_str("mkfs.dunit: formatting requires explicit --yes\n");
+        return;
+    }
+    let Some(device) = find_block_device(device_name) else {
+        out.write_str("mkfs.dunit: device not found\n");
+        return;
+    };
+    if device.readonly {
+        out.write_str("mkfs.dunit: device is read-only\n");
+        return;
+    }
+    let partition = match find_gpt_partition(device, index as u32) {
+        Ok(partition) => partition,
+        Err(error) => {
+            out.write_str("mkfs.dunit: ");
+            out.write_str(error);
+            out.write_str("\n");
+            return;
+        }
+    };
+    match crate::fs::dunitfs::format(device, partition.first_lba, partition.blocks()) {
+        Ok(()) => {
+            out.write_str("formatted DunitFS on ");
+            out.write_str(device.name);
+            out.write_str(" partition ");
+            write_u32(out, partition.index);
+            out.write_str("\n");
+        }
+        Err(error) => {
+            out.write_str("mkfs.dunit: ");
+            out.write_str(error.as_str());
+            out.write_str("\n");
+        }
+    }
+}
+
+fn cmd_mount_dunit(out: &mut dyn ShellSink, args: &str) {
+    let mut parts = args.split_whitespace();
+    let Some(device_name) = parts.next() else {
+        out.write_str("usage: mount.dunit <disk> <partition>\n");
+        return;
+    };
+    let Some(index) = parts.next().and_then(parse_u64) else {
+        out.write_str("mount.dunit: invalid partition number\n");
+        return;
+    };
+    if index > u32::MAX as u64 {
+        out.write_str("mount.dunit: invalid partition number\n");
+        return;
+    }
+    if parts.next().is_some() {
+        out.write_str("usage: mount.dunit <disk> <partition>\n");
+        return;
+    }
+    let Some(device) = find_block_device(device_name) else {
+        out.write_str("mount.dunit: device not found\n");
+        return;
+    };
+    let partition = match find_gpt_partition(device, index as u32) {
+        Ok(partition) => partition,
+        Err(error) => {
+            out.write_str("mount.dunit: ");
+            out.write_str(error);
+            out.write_str("\n");
+            return;
+        }
+    };
+    let Some(vfs) = vfs::get_vfs() else {
+        out.write_str("mount.dunit: VFS not initialized\n");
+        return;
+    };
+    match crate::fs::dunitfs::mount_global(
+        vfs,
+        "/persist",
+        device,
+        partition.first_lba,
+        partition.blocks(),
+    ) {
+        Ok(()) => out.write_str("DunitFS mounted at /persist\n"),
+        Err(error) => {
+            out.write_str("mount.dunit: ");
+            out.write_str(error.as_str());
+            out.write_str("\n");
+        }
+    }
+}
+
 fn parse_u64(text: &str) -> Option<u64> {
     if text.is_empty() {
         return None;
@@ -875,6 +1001,8 @@ fn cmd_help(out: &mut dyn ShellSink) {
     out.write_str("  blkread    - Read a block device sector\n");
     out.write_str("  blkwrite   - Write a test pattern to a block sector\n");
     out.write_str("  ahci       - Show SATA/AHCI driver status\n");
+    out.write_str("  mkfs.dunit - Format a GPT partition as DunitFS\n");
+    out.write_str("  mount.dunit- Mount DunitFS at /persist\n");
     out.write_str("  lspci      - Show PCI devices\n");
     out.write_str("  usb        - Show USB/xHCI driver status\n");
     out.write_str("  ps         - Show process table records\n");
@@ -934,6 +1062,14 @@ pub fn run_command(out: &mut dyn ShellSink, cwd: &mut String, line: &str) -> She
         "blk" => cmd_blk(out),
         "lsblk" => cmd_lsblk(out),
         "ahci" => cmd_ahci(out),
+        "mkfs.dunit" => cmd_mkfs_dunit(out, ""),
+        _ if trimmed.starts_with("mkfs.dunit ") => {
+            cmd_mkfs_dunit(out, &trimmed["mkfs.dunit ".len()..])
+        }
+        "mount.dunit" => cmd_mount_dunit(out, ""),
+        _ if trimmed.starts_with("mount.dunit ") => {
+            cmd_mount_dunit(out, &trimmed["mount.dunit ".len()..])
+        }
         "usb" => cmd_usb(out),
         "top" => out.write_str("top unavailable: scheduler not active\n"),
         "poweroff" | "shutdown" => {

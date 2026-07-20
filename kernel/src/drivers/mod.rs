@@ -18,6 +18,9 @@ pub fn init() {
     block::init();
     ahci::init();
     virtio_blk::init();
+    if let Some(vfs) = crate::fs::vfs::get_vfs() {
+        crate::fs::dunitfs::auto_mount(vfs);
+    }
     keyboard::init();
     mouse::init();
 }

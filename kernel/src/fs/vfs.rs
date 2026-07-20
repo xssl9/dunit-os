@@ -232,14 +232,21 @@ impl Drop for OpenFile {
 
 pub struct VirtualFileSystem {
     root_fs: Option<*mut dyn FileSystem>,
+    mounts: Vec<MountPoint>,
     open_files: BTreeMap<FileDescriptor, OpenFile>,
     next_fd: FileDescriptor,
+}
+
+struct MountPoint {
+    path: String,
+    fs: *mut dyn FileSystem,
 }
 
 impl VirtualFileSystem {
     pub fn new() -> Self {
         Self {
             root_fs: None,
+            mounts: Vec::new(),
             open_files: BTreeMap::new(),
             next_fd: 3,
         }
@@ -248,10 +255,19 @@ impl VirtualFileSystem {
     pub fn mount(&mut self, path: &str, fs: &'static mut dyn FileSystem) -> Result<()> {
         if path == "/" {
             self.root_fs = Some(fs as *mut dyn FileSystem);
-            Ok(())
-        } else {
-            Err(VfsError::Unsupported)
+            return Ok(());
         }
+        if !path.starts_with('/') || path.ends_with('/') || path.len() > 255 {
+            return Err(VfsError::InvalidPath);
+        }
+        if self.mounts.iter().any(|mount| mount.path == path) {
+            return Err(VfsError::AlreadyExists);
+        }
+        self.mounts.push(MountPoint {
+            path: String::from(path),
+            fs: fs as *mut dyn FileSystem,
+        });
+        Ok(())
     }
 
     fn resolve_path<'a>(
@@ -261,8 +277,28 @@ impl VirtualFileSystem {
         buffer: &'a mut [u8; 256],
     ) -> Result<(*mut dyn FileSystem, &'a str)> {
         let normalized = normalize_path_into(path, cwd, buffer)?;
-        let fs = self.root_fs.ok_or(VfsError::NotFound)?;
-        let relative = normalized.trim_start_matches('/');
+        let mut selected: Option<&MountPoint> = None;
+        for mount in &self.mounts {
+            let exact = normalized == mount.path;
+            let child = normalized.starts_with(&mount.path)
+                && normalized.as_bytes().get(mount.path.len()) == Some(&b'/');
+            if (exact || child)
+                && selected
+                    .map(|current| mount.path.len() > current.path.len())
+                    .unwrap_or(true)
+            {
+                selected = Some(mount);
+            }
+        }
+        let (fs, relative) = if let Some(mount) = selected {
+            let relative = normalized[mount.path.len()..].trim_start_matches('/');
+            (mount.fs, relative)
+        } else {
+            (
+                self.root_fs.ok_or(VfsError::NotFound)?,
+                normalized.trim_start_matches('/'),
+            )
+        };
 
         Ok((fs, relative))
     }
@@ -491,6 +527,7 @@ pub fn init() -> Result<()> {
 
         register_assets();
         let _ = ROOT_MEMFS.mkdir("/cfg/gui");
+        let _ = ROOT_MEMFS.mkdir("/persist");
         let mut gui_shortcuts = Vec::new();
         gui_shortcuts.extend_from_slice(GUI_SHORTCUTS_CONFIG);
         ROOT_MEMFS.add_file("/cfg/gui/shortcuts.conf", gui_shortcuts);
