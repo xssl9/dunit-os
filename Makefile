@@ -1,4 +1,4 @@
-.PHONY: all clean hal kernel userspace iso run run-gui
+.PHONY: all clean hal kernel userspace iso disk-image run run-gui
 
 CC = gcc
 AS = nasm
@@ -183,6 +183,9 @@ iso-test-terminal:
 
 iso-test-gui:
 	$(MAKE) iso LIMINE_CONFIG=limine_test_gui.conf
+
+disk-image: all userspace
+	python3 tools/install_disk.py $(BUILD_DIR)/dunit-disk.img --no-build --yes-i-know-this-erases-the-disk
 
 grub-iso: $(BUILD_DIR)/kernel.elf
 	rm -rf $(BUILD_DIR)/iso_grub

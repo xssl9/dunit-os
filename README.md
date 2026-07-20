@@ -125,13 +125,31 @@ menu:
 Terminal Mode is the reliable development path. GUI Mode exists, but it is not
 the focus of the current runtime milestones.
 
+## Install to a Disk
+
+Build a bootable BIOS/UEFI image without root privileges:
+
+```bash
+make disk-image
+```
+
+Install to a whole physical disk from Linux or a live USB. This erases the
+selected disk, so verify the device name first:
+
+```bash
+sudo python3 tools/install_disk.py /dev/sdX --yes-i-know-this-erases-the-disk
+```
+
+The installer creates a FAT32 EFI System Partition containing Limine and the
+kernel, plus a persistent DunitFS partition automatically mounted at `/persist`.
+
 ## Honest Limitations
 
 Not implemented yet:
 
 - Hardened timer preemption.
 - SMP.
-- Disk-backed filesystem.
+- Journaling and recovery for the disk-backed filesystem.
 - Network stack.
 - Userspace terminal/shell process.
 - Full libc.
