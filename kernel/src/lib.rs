@@ -455,11 +455,14 @@ pub extern "C" fn kernel_main(
     hhdm_offset: u64,
     installer_payload: *const u8,
     installer_payload_size: u64,
+    bios_payload: *const u8,
+    bios_payload_size: u64,
 ) -> ! {
     serial_write("[KERNEL] START\r\n");
 
     unsafe {
         storage::installer::set_payload(installer_payload, installer_payload_size as usize);
+        storage::installer::set_bios_payload(bios_payload, bios_payload_size as usize);
     }
 
     unsafe {

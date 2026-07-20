@@ -499,7 +499,7 @@ fn cmd_install_dunit(out: &mut dyn ShellSink, args: &str) {
 
     out.write_str("Installing Dunit OS to ");
     out.write_str(device.name);
-    out.write_str(" (UEFI)...\n");
+    out.write_str(" (BIOS + UEFI)...\n");
     match crate::storage::installer::install(device, vfs) {
         Ok(()) => {
             out.write_str("Dunit OS installed successfully\n");
@@ -1038,7 +1038,7 @@ fn cmd_help(out: &mut dyn ShellSink) {
     out.write_str("  ahci       - Show SATA/AHCI driver status\n");
     out.write_str("  mkfs.dunit - Format a GPT partition as DunitFS\n");
     out.write_str("  mount.dunit- Mount DunitFS at /persist\n");
-    out.write_str("  install.dunit - Install Dunit OS to an AHCI disk (UEFI)\n");
+    out.write_str("  install.dunit - Install Dunit OS to an AHCI disk\n");
     out.write_str("  lspci      - Show PCI devices\n");
     out.write_str("  usb        - Show USB/xHCI driver status\n");
     out.write_str("  ps         - Show process table records\n");

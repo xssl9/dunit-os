@@ -154,7 +154,9 @@ extern void kernel_main(
     int terminal_mode,
     uint64_t hhdm_offset,
     const void *installer_payload,
-    uint64_t installer_payload_size
+    uint64_t installer_payload_size,
+    const void *bios_payload,
+    uint64_t bios_payload_size
 );
 
 void boot_main(void) {
@@ -227,6 +229,17 @@ void boot_main(void) {
         serial_write("[BOOT] installer payload unavailable\r\n");
     }
 
+    const void *bios_payload = NULL;
+    uint64_t bios_payload_size = 0;
+    if (module_resp && module_resp->module_count > 1 && module_resp->modules
+        && module_resp->modules[1]) {
+        bios_payload = module_resp->modules[1]->address;
+        bios_payload_size = module_resp->modules[1]->size;
+        serial_write("[BOOT] BIOS payload OK\r\n");
+    } else {
+        serial_write("[BOOT] BIOS payload unavailable\r\n");
+    }
+
     serial_write("[BOOT] kernel handoff START\r\n");
     kernel_main(
         fb,
@@ -234,7 +247,9 @@ void boot_main(void) {
         terminal_mode,
         hhdm_offset,
         installer_payload,
-        installer_payload_size
+        installer_payload_size,
+        bios_payload,
+        bios_payload_size
     );
     serial_write("[BOOT] kernel handoff FAIL\r\n");
 

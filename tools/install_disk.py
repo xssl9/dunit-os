@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import struct
@@ -178,6 +179,13 @@ def build_esp_image(path: Path, root: Path, config: Path) -> None:
         ]
     )
     copy_boot_files(root, str(path), config)
+    bios_header = (root / "limine/limine-bios-hdd.h").read_text(encoding="ascii")
+    bios_payload = bytes(
+        int(value, 16) for value in re.findall(r"0x([0-9a-fA-F]{2})", bios_header)
+    )
+    if len(bios_payload) <= SECTOR_SIZE or bios_payload[510:512] != b"\x55\xaa":
+        raise RuntimeError("invalid Limine BIOS HDD payload")
+    path.with_name("installer-bios.bin").write_bytes(bios_payload)
 
 
 def copy_boot_files(root: Path, fat_image: str, config: Path) -> None:

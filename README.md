@@ -150,9 +150,8 @@ lsblk
 install.dunit sda --yes
 ```
 
-The in-system installer currently creates an x86_64 UEFI installation on a
-writable AHCI disk. Use the Linux/live-USB command above when legacy BIOS boot
-support is required.
+The in-system installer creates a BIOS and x86_64 UEFI installation on a
+writable AHCI disk.
 
 ## Honest Limitations
 
