@@ -221,7 +221,7 @@ kernel/                      Rust no_std kernel
 userspace/libdunit/          Userspace syscall/startup helper library
 userspace/system_apps/       Small Rust ELF apps embedded into /app
 docs/                        Design notes and milestone context
-build_and_run_multipass.py   Canonical build/test/run automation
+tools/qemu_test.py           Canonical build/test/run automation
 limine.conf                  Normal interactive boot menu
 limine_test_terminal.conf    Automated terminal test boot config
 limine_test_gui.conf         Automated GUI test boot config
