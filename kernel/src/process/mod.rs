@@ -29,6 +29,12 @@ static TERMINAL_FOREGROUND_PID: AtomicU64 = AtomicU64::new(0);
 static FOREGROUND_OUTPUT_SINK: AtomicU64 = AtomicU64::new(ProcessOutputSink::SerialOnly as u64);
 static TERMINAL_STDIN_WAITING_PID: AtomicU64 = AtomicU64::new(0);
 static PREEMPT_SWITCH_REQUESTED: AtomicBool = AtomicBool::new(false);
+// Timer-driven preemption is experimental and OFF by default. The userspace
+// runtime contract (spawn/yield/wait) is cooperative: a spawned child stays
+// Ready until the parent explicitly yields. Letting the PIT run Ready children
+// out from under a parent breaks that contract (e.g. runtime_stress's
+// `expect_wait_would_block` checks). Opt in explicitly to experiment with it.
+static PREEMPTION_ENABLED: AtomicBool = AtomicBool::new(false);
 static mut TERMINAL_STDIN_BUFFER: [u8; 256] = [0; 256];
 static mut TERMINAL_STDIN_LEN: usize = 0;
 static mut TERMINAL_STDIN_READY: bool = false;
@@ -1094,7 +1100,21 @@ pub fn clear_preempt_switch() {
     PREEMPT_SWITCH_REQUESTED.store(false, Ordering::SeqCst);
 }
 
+/// Enable or disable experimental timer-driven preemption. Off by default so
+/// the cooperative userspace runtime contract holds deterministically.
+pub fn set_preemption_enabled(enabled: bool) {
+    PREEMPTION_ENABLED.store(enabled, Ordering::SeqCst);
+}
+
+pub fn preemption_enabled() -> bool {
+    PREEMPTION_ENABLED.load(Ordering::SeqCst)
+}
+
 pub fn timer_preempt_save_and_schedule(frame: &crate::interrupts::InterruptFrame) {
+    if !PREEMPTION_ENABLED.load(Ordering::SeqCst) {
+        return;
+    }
+
     let current = match current_pid() {
         Some(pid) => pid,
         None => return,
