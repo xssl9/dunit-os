@@ -1,0 +1,332 @@
+# Dunit OS — Code Review
+
+Полное ревью проекта: костыли, затычки, явные ошибки, slop и блокеры дальнейшего
+развития ОС. Каждый пункт — под исправление, отмечен `[ ]`.
+
+Отметки серьёзности:
+- 🔴 **BLOCKER** — мешает дальнейшему развитию (SMP, стабильность, корректность памяти).
+- 🟠 **BUG** — явная ошибка/дефект корректности.
+- 🟡 **HACK / затычка** — работает, но временно/неправильно спроектировано.
+- ⚪ **SLOP** — мусор, мёртвый код, обман в логах, копипаста.
+
+Легенда файлов сверялась с состоянием репозитория на момент ревью.
+
+---
+
+## 🔴 Блокеры (архитектурные, мешают развитию)
+
+- [ ] **Алиасинг `PROCESS_TABLE` → UB и блокер SMP.**
+  `kernel/src/process/mod.rs`: `static mut PROCESS_TABLE: Option<Vec<ProcessRecord>>`
+  раздаётся многими функциями без синхронизации. `current_process()` возвращает
+  `&'static Process`, `current_process_mut()` — `&'static mut Process`, ссылаясь
+  внутрь `Vec`, который в другом месте (`insert_process_record`) делает `push`.
+  При реаллокации `Vec` эти ссылки становятся висячими → UB. Это же — фундаментальный
+  блокер для SMP. Нужно: индексная адресация вместо долгоживущих ссылок + примитив
+  синхронизации (spinlock/`RwLock`), хранение процессов в стабильных слотах.
+
+- [ ] **Гонка `timer_preempt_save_and_schedule` из IRQ-контекста.**
+  `kernel/src/process/mod.rs`: мутирует `PROCESS_TABLE` прямо из обработчика таймера,
+  без блокировки, в то время как syscall-путь тоже её мутирует. Data race.
+  (Сейчас замаскировано тем, что `PREEMPTION_ENABLED = false`, но это и есть причина,
+  по которой преемпшн нельзя включить.)
+
+- [ ] **Нет page-fault recovery при копировании user-памяти → краш ядра.**
+  `kernel/src/syscall/mod.rs`: `copy_buffer_from_user` / `copy_buffer_to_user` /
+  `copy_string_from_user` делают сырые `read_volatile`/`write_volatile` по
+  пользовательскому указателю. Если страница не отображена — падает само ядро,
+  а не процесс. `is_valid_user_pointer` лишь проверяет диапазон
+  (`USER_SPACE_START..USER_SPACE_END`), но не проверяет, что страница реально
+  замаплена. Нужно: проверять маппинг через `AddressSpace`/таблицы страниц перед
+  доступом, либо обрабатывать #PF при копировании.
+
+- [ ] **Лок-фри доступ к глобальному состоянию ядра.**
+  Множество подсистем используют `static mut ... : Option<T>` без синхронизации и
+  раздают `&'static mut`:
+  - `kernel/src/process/scheduler.rs`: `static mut SCHEDULER_INSTANCE`.
+  - `kernel/src/fs/vfs.rs`: `static mut VFS_INSTANCE`, `static mut ROOT_MEMFS`,
+    `static mut VFS_PATH_BUFFER` (общий буфер пути — реентерабельность/гонки).
+  - `kernel/src/memory/vmm.rs`: `static mut HHDM_OFFSET`, `static mut VMM_INSTANCE`.
+  - `kernel/src/drivers/net.rs`: `static mut NET_SNAPSHOT`.
+  - `kernel/src/drivers/ahci.rs`: `static mut DISKS`.
+  Пока однопоточно и кооперативно — «работает», но это системный блокер для SMP и
+  преемпшна. Нужна единая стратегия синхронизации.
+
+- [ ] **Аллокатор кучи не PMM-backed и не растёт.**
+  `kernel/src/allocator.rs`: фиксированный `static mut KERNEL_HEAP: [u8; 2*1024*1024]`
+  в BSS. Куча не может вырасти; при исчерпании — отказ аллокаций. Для растущего числа
+  процессов/ФС это потолок. Нужно: backing кучи через PMM с возможностью расширения.
+
+- [ ] **PMM использует только один регион памяти.**
+  `kernel/src/memory/pmm.rs`: битмап-аллокатор берёт только самый большой usable-регион
+  из memory map, игнорируя остальные usable-регионы → теряется доступная RAM. Нужно:
+  учитывать все usable-регионы.
+
+- [ ] **MMIO-маппинг не попадает в уже созданные адресные пространства.**
+  `kernel/src/memory/vmm.rs`: `map_kernel_page` правит только активный root. Kernel-half
+  копируется в `AddressSpace` в момент создания (`copy_kernel_half_from_active`), поэтому
+  MMIO, замапленный после создания процесса, в его адресном пространстве не виден. Нужно:
+  общая (shared) верхняя половина PML4 между всеми адресными пространствами.
+
+- [ ] **Ключевые syscalls возвращают ENOSYS.**
+  `kernel/src/syscall/mod.rs`: `sys_fork`, `sys_exec`, `sys_kill_process`, `sys_mmap` —
+  заглушки `ENOSYS`. Без `exec`/`mmap` полноценный userspace (в т.ч. userspace-шелл из
+  роадмапа) невозможен. Это функциональные блокеры.
+
+---
+
+## 🟠 Явные ошибки (bugs)
+
+- [ ] **`sys_sleep` — busy-wait с риском переполнения.**
+  `kernel/src/syscall/mod.rs`: `sys_sleep(ms)` = `for _ in 0..ms*1000 { pause }`.
+  Жжёт CPU целиком, не отдаёт управление, `ms*1000` может переполниться, а длительность
+  никак не привязана к реальному времени. Нужно: сон через таймер/расписание, отдачей
+  управления планировщику.
+
+- [ ] **`copy_string_from_user` трактует байты как Latin-1, а не UTF-8.**
+  `kernel/src/syscall/mod.rs`: `out.push(byte as char)` — некорректно для многобайтового
+  UTF-8 (каждый байт становится отдельным codepoint). То же в userspace:
+  `userspace/libdunit/src/lib.rs` — `read_line`/`read_to_string` (`out.push(*byte as char)`).
+  Нужно: собирать `Vec<u8>` и валидировать через `from_utf8`.
+
+- [ ] **`MemFs::readdir` молча обрезает список до 32 записей.**
+  `kernel/src/fs/memfs.rs`: `readdir` использует фиксированный буфер `[DirEntry; 32]`,
+  хотя результат отдаётся `Vec`. В `/app` уже ~33 бинарника + ассеты → часть записей
+  теряется. Нужно: динамический сбор без фиксированного лимита.
+
+- [ ] **Возможная ошибка индексации дисков в `register_disks`.**
+  `kernel/src/drivers/ahci.rs`: при заполнении `DISKS` в `bring_up_controller` индекс —
+  `AHCI_DISK_COUNT + added`, но `AHCI_DISK_COUNT` инкрементируется только ПОСЛЕ возврата
+  из `bring_up_controller`. `register_disks` затем читает `DISKS[0..count]`. При нескольких
+  контроллерах/частичных сбоях индексация «слотов» и итоговый count могут разойтись.
+  Нужно: единый источник истины по занятым слотам.
+
+- [ ] **`memory::init()` молча продолжает при отказе PMM.**
+  `kernel/src/memory/mod.rs`: если `pmm::init()` не удался, `init()` тихо возвращается,
+  оставляя кучу неинициализированной → падение на первой аллокации. Нужно: явная ошибка
+  и остановка/паника с диагностикой.
+
+- [ ] **`Process::new()` тихо деградирует без адресного пространства.**
+  `kernel/src/process/mod.rs`: при неудаче создания `AddressSpace` молча вызывает
+  `new_without_address_space`. Процесс «создан», но без изоляции памяти — скрытый
+  неконсистентный статус. Нужно: возвращать ошибку, а не молчаливый фолбэк.
+
+- [ ] **Утечка при выравнивании в аллокаторе.**
+  `kernel/src/allocator.rs`: `alloc` возвращает выровненный адрес, но `dealloc` трактует
+  указатель как начало блока. Padding-байты до выровненного адреса теряются
+  (не возвращаются во free-list). Нужно: хранить/восстанавливать реальное начало блока.
+
+- [ ] **`uptime_ticks` / `uptime_available` захардкожены в 0.**
+  `kernel/src/syscall/mod.rs`: в `SystemStats` поля времени всегда 0 → `dtop`/`dufetch`
+  показывают неверный аптайм. Нужно: реальный счётчик тиков таймера.
+
+- [ ] **Опечатка в README.**
+  `README.md:19`: `"...GUI Mode still available.ч"` — лишняя кириллическая «ч».
+
+---
+
+## 🟡 Костыли и затычки
+
+- [ ] **Обманный boot-лог (фейковые данные).**
+  `kernel/src/lib.rs`: `kernel_main` печатает неизмеряемые строки как факты:
+  `"[ OK ] CPU features: SSE, SSE2, AVX available"`, `"Memory: 512MB RAM detected"`,
+  `"Window manager: 5 applications registered"`, `"7 processes running"`. Ни одно из
+  значений не измеряется. Нужно: либо измерять реально, либо убрать.
+
+- [ ] **Встроенный smoke-тест syscall прогоняется в проде на каждой загрузке.**
+  `kernel/src/syscall/mod.rs`: ~240 строк inline-asm (`user_syscall_smoke_entry`),
+  константы `SMOKE_USER_PAGE = 0x400000`, `SMOKE_RETURN_MAGIC` и ручные обходчики таблиц
+  (`map_current_user_page`, `mark_current_mapping_user`, `ensure_next_table`,
+  `set_user_bit`), запекаемые в релиз и исполняемые каждый boot. Нужно: убрать из
+  продового пути (feature-флаг/тест-таргет).
+
+- [ ] **`ADDRSPACE-TEST` smoke также в продовом пути.**
+  `kernel/src/memory/vmm.rs`: `run_address_space_smoke()` создаёт адресное пространство,
+  маппит страницу и пишет магию при каждой загрузке. Место — не в релизе.
+
+- [ ] **Дублирование логики page-table walk.**
+  Ручные обходчики таблиц страниц скопированы в трёх местах вместо использования
+  `AddressSpace`/VMM API:
+  - `kernel/src/syscall/mod.rs` (`map_current_user_page` и др.),
+  - `kernel/src/elf/mod.rs` (`load_into_current_address_space`, `load_segment_current`,
+    `current_mapping_phys`, `map_current_user_page`, `ensure_next_table`),
+  - `kernel/src/memory/vmm.rs` (`map_kernel_page`, `ensure_kernel_table`).
+  Нужно: единый API маппинга.
+
+- [ ] **Два параллельных пути загрузки ELF.**
+  `kernel/src/elf/mod.rs`: `load_into_process_address_space` (правильный, через
+  `AddressSpace`) и `load_into_current_address_space` (ручные обходы таблиц). Плюс
+  легаси `ElfLoader::load`/`create_process`, использующие никогда не инициализируемый
+  `VirtualMemoryManager`. Нужно: оставить один путь, легаси удалить.
+
+- [ ] **`VirtualMemoryManager` — мёртвый/сломанный путь.**
+  `kernel/src/memory/vmm.rs`: `map_page`/`translate` используют сырой phys как `*mut
+  PageTable` (без HHDM), а `VMM_INSTANCE` вообще никогда не инициализируется
+  (`init()` только печатает START/OK). Любой код, зависящий от `get_vmm()`, нерабочий.
+  Нужно: удалить либо привести к HHDM и инициализировать.
+
+- [ ] **MMIO-виртуальный диапазон не переиспользуется.**
+  `kernel/src/memory/vmm.rs`: `map_mmio_region` только двигает `NEXT_MMIO_VIRT` вперёд
+  (bump), освобождение не предусмотрено. При многократном ремапе — исчерпание диапазона.
+
+- [ ] **`terminal_cwd()` мутирует состояние в геттере.**
+  `kernel/src/lib.rs`: функция-геттер изменяет `static mut TERMINAL_CWD`. Побочный
+  эффект в геттере — источник трудноуловимых багов.
+
+- [ ] **Захардкоженный автокомплит из 22 команд.**
+  `kernel/src/lib.rs`: массив команд для автодополнения задан вручную и расходится с
+  реальным набором команд. README сам отмечает цель «сделать команды менее
+  kernel-hardcoded». Нужно: единый реестр команд.
+
+- [ ] **`scancode_to_char` без Shift/регистра/символов.**
+  `userspace/libdunit/src/lib.rs`: таблица скан-кодов только нижний регистр и цифры,
+  без модификаторов. Ограничивает любой ввод в userspace-приложениях.
+
+- [ ] **Bump-аллокатор userspace никогда не освобождает память.**
+  `userspace/libdunit/src/lib.rs`: `dealloc` — no-op, куча фиксированные 64 KiB. Для
+  долгоживущих приложений — исчерпание. Для тест-аппов ок, но это затычка.
+
+- [ ] **Копипаста цели `userspace:` в Makefile.**
+  `Makefile`: ~30 почти идентичных блоков `cd ... cargo build ... && cp ...` на каждое
+  приложение. Нужно: `foreach` по списку имён приложений.
+
+- [ ] **`sys_kill_process` = ENOSYS, но `libdunit::kill` присутствует.**
+  Userspace выставляет `kill()` (`userspace/libdunit/src/lib.rs`), которого ядро не
+  поддерживает — тихий no-op/ошибка для вызывающего. Согласовать ABI.
+
+---
+
+## ⚪ Slop, мёртвый код, шум
+
+- [ ] **`kernel/src/main.rs` — мёртвая заглушка.**
+  Оротанный файл: VGA-текст `"DUNIT OS WORKS!"` и пустой `#[panic_handler] fn panic()
+  -> ! { loop {} }`. Реальная точка входа — `kernel_main` в `lib.rs`. Файл путает.
+  Удалить.
+
+- [ ] **Четыре копии таблиц глиф-битмапов в `lib.rs`.**
+  `kernel/src/lib.rs`: одинаковые `match`-таблицы глифов продублированы в
+  `draw_text_direct`, `draw_colored_text`, `draw_error_text_old`, внутреннем
+  `draw_text` и `draw_char`. Нужно: единая таблица шрифта.
+
+- [ ] **Мёртвые функции отрисовки.**
+  `kernel/src/lib.rs`: `draw_error_text_old`, `draw_char`, `draw_text`, `draw_window`
+  не используются (или дублируют активные пути). Удалить.
+
+- [ ] **Отладочный серийный спам TERM-001..007.**
+  `kernel/src/lib.rs`: маркеры `TERM-001`..`TERM-007` в серийный порт. Убрать/спрятать
+  за debug-флагом.
+
+- [ ] **Busy-wait задержки `for _ in 0..500000 { pause }`.**
+  `kernel/src/lib.rs`: «магические» циклы ожидания. Заменить на таймер/явную задержку.
+
+- [ ] **Дублирование `serial_write`.**
+  `serial_write` объявлен/дублирован в нескольких местах (`kernel/src/lib.rs`,
+  `kernel/src/memory/mod.rs`, `kernel/src/fs/vfs.rs` через `extern`). Свести к одному
+  модулю логирования.
+
+- [ ] **Тяжёлое серийное логирование на горячих путях процессов.**
+  `kernel/src/process/mod.rs`: обильные `serial_write` на путях планирования/переключения.
+  Замедляет и зашумляет. Спрятать за уровнем логирования.
+
+- [ ] **Дублированные `write_hex`/`write_dec`/`write_mac` по драйверам.**
+  `kernel/src/drivers/ahci.rs`, `kernel/src/drivers/net.rs` содержат собственные копии
+  хелперов форматирования. Вынести в общий util.
+
+- [ ] **`net_*` поля в `SystemStats`/dufetch при отсутствии стека.**
+  `kernel/src/drivers/net.rs` — только discovery (`stack=not-implemented`). Поля
+  `net_total_nics`/`supported`/`mmio_ready`/`mac_ready` пробрасываются в
+  `SystemStats` (`userspace/libdunit/src/lib.rs`). Риск ввести в заблуждение о
+  наличии сети. Пометить как discovery-only в выводе.
+
+---
+
+## 🔴 Цель: полная переработка GUI — уход от хардкода к TOML-конфигам (в стиле Hyprland)
+
+Сейчас GUI — это сплошной хардкод прямо в ядре. Тема, геометрия окон, набор
+приложений, раскладка панели, обои и хоткеи запечены в `const`/`enum` внутри
+kernel-кода и не конфигурируются без пересборки ОС. Это архитектурно плохо и
+является блокером для развития рабочего стола. Целевое состояние: GUI управляется
+декларативными TOML-конфигами (как `hyprland.conf` у Hyprland) — пользователь меняет
+тему/биндинги/раскладку/автозапуск без пересборки ядра, а сам композитор/WM живёт в
+userspace.
+
+Конкретные точки хардкода (что убрать в конфиг):
+
+- [ ] **Тема/цвета захардкожены в ядре.**
+  `kernel/src/gui/ui_loop.rs:9-26`: вся палитра — `const BG = 0x030504`, `PANEL`,
+  `TEXT`, `ACCENT`, `WINDOW_BG`, `TERMINAL_BG`, `GLASS*`, `SHADOW` и т.д. Должно
+  задаваться в TOML-теме (`[theme] bg = "#030504"` …).
+
+- [ ] **Геометрия и заголовки окон захардкожены.**
+  `kernel/src/window_manager.rs:57-81` (`default_window`): позиции/размеры/тайтлы для
+  каждого приложения заданы кортежами (`Terminal => (50, 80, 420, 310, "Terminal")` и
+  т.п.). Пиксельные оффсеты кнопок закрыть/свернуть/зум тоже магические
+  (`window.x + 12/32/52`, `close_at`/`minimize_at`/`zoom_at`). Должно описываться
+  правилами окон в конфиге (как `windowrule` в Hyprland).
+
+- [ ] **Набор приложений — фиксированный `enum`, а не конфиг/реестр.**
+  `kernel/src/window_manager.rs:19-27`: `enum AppType { Terminal, Calculator, Files,
+  Settings, Monitor, Editor }` жёстко зашит. Пути к GUI-бинарям тоже захардкожены:
+  `kernel/src/gui/ui_loop.rs:36-42` (`GUI_PING_PATH`, `GUI_TERMINAL_STUB_PATH`,
+  `GUI_CALCULATOR_PATH`, `GUI_STATS_PATH`, `GUI_FILE_MANAGER_PATH`). Должно быть:
+  список приложений/автозапуск/ярлыки из конфига (`[[app]]` записи).
+
+- [ ] **Обои: путь и размеры прибиты гвоздями.**
+  `kernel/src/gui/ui_loop.rs:30-34`: `WALLPAPER_WIDTH = 1600`, `WALLPAPER_HEIGHT = 900`,
+  `WALLPAPER_STRIDE`, `WALLPAPER_PATH = "/assets/wallpapers/wallpaper.bmp"`. Фиксированные
+  размеры сломаются на другом разрешении. Должно: путь и режим (fit/stretch/tile) из
+  конфига, размеры — из самого изображения.
+
+- [ ] **Хоткеи: плоский самопальный формат вместо полноценного конфига.**
+  `kernel/src/fs/vfs.rs:469` зашивает дефолт `super+q=close_window\nsuper+enter=open_terminal`
+  в `/cfg/gui/shortcuts.conf` (`GUI_SHORTCUTS_CONFIG`), парсинг — в
+  `kernel/src/gui/ui_loop.rs` (`GUI_SHORTCUTS_PATH`). Это затычка: формат ad-hoc,
+  набор действий ограничен. Должно: биндинги в TOML (`[[bind]] mods=["super"]
+  key="q" action="close_window"`), расширяемый список действий.
+
+- [ ] **Границы/ограничения раскладки — магические числа.**
+  `kernel/src/window_manager.rs`: `drag_window` фиксирует верхнюю границу `42`
+  (высота панели), `zoom_at` — оффсеты `24/54/48/150`, минимумы `260/180`. Панель/гэпы/
+  границы должны конфигурироваться (`[layout] gaps`, `panel_height` …).
+
+- [ ] **Композитор/WM живёт в ядре, а не в userspace.**
+  `kernel/src/window_manager.rs` + `kernel/src/gui/ui_loop.rs` (~4467 строк) держат
+  состояние окон и логику отрисовки прямо в ядре (`static mut WM_INSTANCE`). README
+  сам ставит цель: *«Prefer real userspace GUI processes over fake desktop state»*.
+  Целевая архитектура Hyprland-стиля: тонкий kernel-фреймбуфер/ввод + userspace-
+  композитор, читающий TOML. Это верхнеуровневый блокер, из которого следуют все
+  пункты выше.
+
+**Итог по GUI:** текущая реализация — хардкод, и это действительно плохо.
+Направление переработки: (1) вынести композитор/WM в userspace; (2) перевести тему,
+правила окон, список приложений/автозапуск, обои, хоткеи и параметры раскладки в
+TOML-конфиги в `/cfg/gui/`; (3) добавить парсер TOML и горячую перезагрузку конфига.
+
+---
+
+## Заметки к области, не вошедшей в глубокий разбор
+
+- [ ] **GUI/`ui_loop.rs` (~4467 строк) — отдельный аудит (см. раздел про переработку GUI выше).**
+  Ключевая цель по GUI вынесена в отдельный раздел «Полная переработка GUI». Помимо
+  ухода от хардкода к TOML, `kernel/src/gui/ui_loop.rs` и связанные
+  (`window_manager.rs`, `gui/renderer.rs`, `shell.rs`, `command.rs`, `terminal.rs`)
+  требуют прохода на предмет фейкового «desktop state», дублирования отрисовки и
+  мёртвого кода.
+
+- [ ] **Проверить остальные драйверы/ФС на те же паттерны.**
+  `drivers/{pci,virtio_blk,keyboard,mouse,block,registry,usb/*}.rs`,
+  `fs/{dunitfs,devfs,procfs}.rs`, `storage/{gpt,mod}.rs`, HAL asm/C. Ожидаемые
+  повторяющиеся проблемы: `static mut` без синхронизации, дубли форматтеров,
+  busy-wait, отладочный лог. Пройтись после устранения системных блокеров.
+
+---
+
+## Приоритеты исправления (рекомендация)
+
+1. Синхронизация + стабильная адресация процессов (`PROCESS_TABLE`, scheduler) — снимает
+   главный блокер SMP/преемпшна и класс UB.
+2. Безопасное копирование user↔kernel с проверкой маппинга (устраняет краши ядра от
+   userspace-указателей).
+3. PMM (все регионы) + растущая PMM-backed куча + shared kernel-half PML4.
+4. Убрать smoke-тесты и фейковый boot-лог из продового пути; свести дублирующиеся
+   page-walk/форматтеры/глифы к единым API.
+5. Функциональные syscalls (`exec`, `mmap`, `kill`, реальный `sleep`), затем чистка slop.
