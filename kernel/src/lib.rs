@@ -23,6 +23,7 @@ pub mod ipc;
 pub mod kthreads;
 pub mod memory;
 pub mod process;
+pub mod serial;
 pub mod shell;
 pub mod storage;
 pub mod syscall;
@@ -91,20 +92,50 @@ static mut TERMINAL_CWD: [u8; 256] = [0; 256];
 static mut TERMINAL_CWD_LEN: usize = 0;
 static mut TERMINAL_DIR_ENTRIES: [fs::vfs::DirEntry; 32] = [fs::vfs::DirEntry::empty(); 32];
 
-pub(crate) fn serial_write(s: &str) {
-    for byte in s.bytes() {
-        unsafe {
-            loop {
-                let mut status: u8;
-                core::arch::asm!("in al, dx", out("al") status, in("dx") 0x3FDu16, options(nomem, nostack));
-                if (status & 0x20) != 0 {
-                    break;
-                }
+/// Tiny fixed-capacity string builder for honest, measured boot lines.
+/// Avoids heap allocation on the early boot path.
+pub(crate) struct FmtBuf {
+    buf: [u8; 96],
+    len: usize,
+}
+
+impl FmtBuf {
+    pub(crate) fn new() -> Self {
+        Self { buf: [0; 96], len: 0 }
+    }
+
+    pub(crate) fn push_str(&mut self, s: &str) {
+        for &b in s.as_bytes() {
+            if self.len < self.buf.len() {
+                self.buf[self.len] = b;
+                self.len += 1;
             }
-            core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") byte, options(nomem, nostack));
         }
     }
+
+    pub(crate) fn push_u64(&mut self, mut value: u64) {
+        if value == 0 {
+            self.push_str("0");
+            return;
+        }
+        let mut digits = [0u8; 20];
+        let mut idx = digits.len();
+        while value > 0 {
+            idx -= 1;
+            digits[idx] = b'0' + (value % 10) as u8;
+            value /= 10;
+        }
+        if let Ok(s) = core::str::from_utf8(&digits[idx..]) {
+            self.push_str(s);
+        }
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
+    }
 }
+
+pub(crate) use crate::serial::serial_write;
 
 fn terminal_set_cwd(path: &str) {
     unsafe {
@@ -312,87 +343,103 @@ fn draw_boot_background(fb_addr: *mut u32, width: usize, height: usize) {
     }
 }
 
-fn draw_text_direct(fb_addr: *mut u32, width: usize, x: usize, y: usize, text: &str, color: u32) {
-    let glyph_map = |ch: u8| -> &'static [u8] {
-        match ch {
-            b'A' => &[0x7C, 0x12, 0x11, 0x12, 0x7C],
-            b'B' => &[0x7F, 0x49, 0x49, 0x49, 0x36],
-            b'C' => &[0x3E, 0x41, 0x41, 0x41, 0x22],
-            b'D' => &[0x7F, 0x41, 0x41, 0x22, 0x1C],
-            b'E' => &[0x7F, 0x49, 0x49, 0x49, 0x41],
-            b'F' => &[0x7F, 0x09, 0x09, 0x09, 0x01],
-            b'G' => &[0x3E, 0x41, 0x49, 0x49, 0x7A],
-            b'H' => &[0x7F, 0x08, 0x08, 0x08, 0x7F],
-            b'I' => &[0x00, 0x41, 0x7F, 0x41, 0x00],
-            b'K' => &[0x7F, 0x08, 0x14, 0x22, 0x41],
-            b'L' => &[0x7F, 0x40, 0x40, 0x40, 0x40],
-            b'M' => &[0x7F, 0x02, 0x0C, 0x02, 0x7F],
-            b'N' => &[0x7F, 0x04, 0x08, 0x10, 0x7F],
-            b'O' => &[0x3E, 0x41, 0x41, 0x41, 0x3E],
-            b'P' => &[0x7F, 0x09, 0x09, 0x09, 0x06],
-            b'R' => &[0x7F, 0x09, 0x19, 0x29, 0x46],
-            b'S' => &[0x46, 0x49, 0x49, 0x49, 0x31],
-            b'T' => &[0x01, 0x01, 0x7F, 0x01, 0x01],
-            b'a' => &[0x20, 0x54, 0x54, 0x54, 0x78],
-            b'b' => &[0x7F, 0x48, 0x44, 0x44, 0x38],
-            b'c' => &[0x38, 0x44, 0x44, 0x44, 0x20],
-            b'd' => &[0x38, 0x44, 0x44, 0x48, 0x7F],
-            b'e' => &[0x38, 0x54, 0x54, 0x54, 0x18],
-            b'f' => &[0x08, 0x7E, 0x09, 0x01, 0x02],
-            b'g' => &[0x0C, 0x52, 0x52, 0x52, 0x3E],
-            b'h' => &[0x7F, 0x08, 0x04, 0x04, 0x78],
-            b'i' => &[0x00, 0x44, 0x7D, 0x40, 0x00],
-            b'k' => &[0x7F, 0x10, 0x28, 0x44, 0x00],
-            b'l' => &[0x00, 0x41, 0x7F, 0x40, 0x00],
-            b'm' => &[0x7C, 0x04, 0x18, 0x04, 0x78],
-            b'n' => &[0x7C, 0x08, 0x04, 0x04, 0x78],
-            b'o' => &[0x38, 0x44, 0x44, 0x44, 0x38],
-            b'p' => &[0x7C, 0x14, 0x14, 0x14, 0x08],
-            b'r' => &[0x7C, 0x08, 0x04, 0x04, 0x08],
-            b's' => &[0x48, 0x54, 0x54, 0x54, 0x20],
-            b't' => &[0x04, 0x3F, 0x44, 0x40, 0x20],
-            b'u' => &[0x3C, 0x40, 0x40, 0x20, 0x7C],
-            b'v' => &[0x1C, 0x20, 0x40, 0x20, 0x1C],
-            b'w' => &[0x3C, 0x40, 0x30, 0x40, 0x3C],
-            b'y' => &[0x0C, 0x50, 0x50, 0x50, 0x3C],
-            b'0' => &[0x3E, 0x51, 0x49, 0x45, 0x3E],
-            b'1' => &[0x00, 0x42, 0x7F, 0x40, 0x00],
-            b'2' => &[0x42, 0x61, 0x51, 0x49, 0x46],
-            b'3' => &[0x21, 0x41, 0x45, 0x4B, 0x31],
-            b'4' => &[0x18, 0x14, 0x12, 0x7F, 0x10],
-            b'5' => &[0x27, 0x45, 0x45, 0x45, 0x39],
-            b'6' => &[0x3C, 0x4A, 0x49, 0x49, 0x30],
-            b'7' => &[0x01, 0x71, 0x09, 0x05, 0x03],
-            b'8' => &[0x36, 0x49, 0x49, 0x49, 0x36],
-            b'9' => &[0x06, 0x49, 0x49, 0x29, 0x1E],
-            b' ' => &[0x00, 0x00, 0x00, 0x00, 0x00],
-            b'-' => &[0x08, 0x08, 0x08, 0x08, 0x08],
-            b'[' => &[0x00, 0x7F, 0x41, 0x41, 0x00],
-            b']' => &[0x00, 0x41, 0x41, 0x7F, 0x00],
-            b':' => &[0x00, 0x36, 0x36, 0x00, 0x00],
-            b'_' => &[0x40, 0x40, 0x40, 0x40, 0x40],
-            _ => &[0x00, 0x00, 0x00, 0x00, 0x00],
-        }
-    };
+/// Shared 5x8 boot-console glyph table used by the early screen-log drawers.
+/// One source of truth for `draw_text_direct` and `draw_colored_text`.
+fn glyph_5x8(ch: u8) -> &'static [u8; 5] {
+    match ch {
+        b'A' => &[0x7C, 0x12, 0x11, 0x12, 0x7C],
+        b'B' => &[0x7F, 0x49, 0x49, 0x49, 0x36],
+        b'C' => &[0x3E, 0x41, 0x41, 0x41, 0x22],
+        b'D' => &[0x7F, 0x41, 0x41, 0x22, 0x1C],
+        b'E' => &[0x7F, 0x49, 0x49, 0x49, 0x41],
+        b'F' => &[0x7F, 0x09, 0x09, 0x09, 0x01],
+        b'G' => &[0x3E, 0x41, 0x49, 0x49, 0x7A],
+        b'H' => &[0x7F, 0x08, 0x08, 0x08, 0x7F],
+        b'I' => &[0x00, 0x41, 0x7F, 0x41, 0x00],
+        b'K' => &[0x7F, 0x08, 0x14, 0x22, 0x41],
+        b'L' => &[0x7F, 0x40, 0x40, 0x40, 0x40],
+        b'M' => &[0x7F, 0x02, 0x0C, 0x02, 0x7F],
+        b'N' => &[0x7F, 0x04, 0x08, 0x10, 0x7F],
+        b'O' => &[0x3E, 0x41, 0x41, 0x41, 0x3E],
+        b'P' => &[0x7F, 0x09, 0x09, 0x09, 0x06],
+        b'R' => &[0x7F, 0x09, 0x19, 0x29, 0x46],
+        b'S' => &[0x46, 0x49, 0x49, 0x49, 0x31],
+        b'T' => &[0x01, 0x01, 0x7F, 0x01, 0x01],
+        b'V' => &[0x1F, 0x20, 0x40, 0x20, 0x1F],
+        b'W' => &[0x3F, 0x40, 0x38, 0x40, 0x3F],
+        b'a' => &[0x20, 0x54, 0x54, 0x54, 0x78],
+        b'b' => &[0x7F, 0x48, 0x44, 0x44, 0x38],
+        b'c' => &[0x38, 0x44, 0x44, 0x44, 0x20],
+        b'd' => &[0x38, 0x44, 0x44, 0x48, 0x7F],
+        b'e' => &[0x38, 0x54, 0x54, 0x54, 0x18],
+        b'f' => &[0x08, 0x7E, 0x09, 0x01, 0x02],
+        b'g' => &[0x0C, 0x52, 0x52, 0x52, 0x3E],
+        b'h' => &[0x7F, 0x08, 0x04, 0x04, 0x78],
+        b'i' => &[0x00, 0x44, 0x7D, 0x40, 0x00],
+        b'k' => &[0x7F, 0x10, 0x28, 0x44, 0x00],
+        b'l' => &[0x00, 0x41, 0x7F, 0x40, 0x00],
+        b'm' => &[0x7C, 0x04, 0x18, 0x04, 0x78],
+        b'n' => &[0x7C, 0x08, 0x04, 0x04, 0x78],
+        b'o' => &[0x38, 0x44, 0x44, 0x44, 0x38],
+        b'p' => &[0x7C, 0x14, 0x14, 0x14, 0x08],
+        b'r' => &[0x7C, 0x08, 0x04, 0x04, 0x08],
+        b's' => &[0x48, 0x54, 0x54, 0x54, 0x20],
+        b't' => &[0x04, 0x3F, 0x44, 0x40, 0x20],
+        b'u' => &[0x3C, 0x40, 0x40, 0x20, 0x7C],
+        b'v' => &[0x1C, 0x20, 0x40, 0x20, 0x1C],
+        b'w' => &[0x3C, 0x40, 0x30, 0x40, 0x3C],
+        b'y' => &[0x0C, 0x50, 0x50, 0x50, 0x3C],
+        b'z' => &[0x44, 0x64, 0x54, 0x4C, 0x44],
+        b'0' => &[0x3E, 0x51, 0x49, 0x45, 0x3E],
+        b'1' => &[0x00, 0x42, 0x7F, 0x40, 0x00],
+        b'2' => &[0x42, 0x61, 0x51, 0x49, 0x46],
+        b'3' => &[0x21, 0x41, 0x45, 0x4B, 0x31],
+        b'4' => &[0x18, 0x14, 0x12, 0x7F, 0x10],
+        b'5' => &[0x27, 0x45, 0x45, 0x45, 0x39],
+        b'6' => &[0x3C, 0x4A, 0x49, 0x49, 0x30],
+        b'7' => &[0x01, 0x71, 0x09, 0x05, 0x03],
+        b'8' => &[0x36, 0x49, 0x49, 0x49, 0x36],
+        b'9' => &[0x06, 0x49, 0x49, 0x29, 0x1E],
+        b' ' => &[0x00, 0x00, 0x00, 0x00, 0x00],
+        b'-' => &[0x08, 0x08, 0x08, 0x08, 0x08],
+        b'.' => &[0x00, 0x60, 0x60, 0x00, 0x00],
+        b'[' => &[0x00, 0x7F, 0x41, 0x41, 0x00],
+        b']' => &[0x00, 0x41, 0x41, 0x7F, 0x00],
+        b':' => &[0x00, 0x36, 0x36, 0x00, 0x00],
+        b'_' => &[0x40, 0x40, 0x40, 0x40, 0x40],
+        b'/' => &[0x20, 0x10, 0x08, 0x04, 0x02],
+        b'(' => &[0x00, 0x1C, 0x22, 0x41, 0x00],
+        b')' => &[0x00, 0x41, 0x22, 0x1C, 0x00],
+        b'x' => &[0x44, 0x28, 0x10, 0x28, 0x44],
+        _ => &[0x00, 0x00, 0x00, 0x00, 0x00],
+    }
+}
 
+/// Blit a single 5x8 glyph at pixel (x, y) in the given color. Shared blitter
+/// for the boot-console text drawers.
+fn blit_glyph_5x8(fb: *mut u32, width: usize, x: usize, y: usize, ch: u8, color: u32) {
+    let glyph = glyph_5x8(ch);
     unsafe {
-        let mut current_x = x;
-        for ch in text.bytes() {
-            let glyph = glyph_map(ch);
-            for dx in 0..5 {
-                let col = glyph[dx];
-                for dy in 0..8 {
-                    if (col >> dy) & 1 == 1 {
-                        let px = current_x + dx;
-                        let py = y + dy;
-                        if px < width {
-                            *fb_addr.add(py * width + px) = color;
-                        }
+        for dx in 0..5 {
+            let col = glyph[dx];
+            for dy in 0..8 {
+                if (col >> dy) & 1 == 1 {
+                    let px = x + dx;
+                    let py = y + dy;
+                    if px < width {
+                        *fb.add(py * width + px) = color;
                     }
                 }
             }
-            current_x += 6;
         }
+    }
+}
+
+fn draw_text_direct(fb_addr: *mut u32, width: usize, x: usize, y: usize, text: &str, color: u32) {
+    let mut current_x = x;
+    for ch in text.bytes() {
+        blit_glyph_5x8(fb_addr, width, current_x, y, ch, color);
+        current_x += 6;
     }
 }
 
@@ -400,11 +447,6 @@ fn screen_log_early(fb_addr: *mut u32, width: usize, y: usize, text: &str) {
     serial_write(text);
     serial_write("\r\n");
     draw_text_direct(fb_addr, width, 10, y, text, 0x00ff00);
-    for _ in 0..500000 {
-        unsafe {
-            core::arch::asm!("pause");
-        }
-    }
 }
 
 fn screen_log_internal(text: &str, is_error: bool) {
@@ -421,12 +463,6 @@ fn screen_log_internal(text: &str, is_error: bool) {
                 }
                 SCREEN_LOG_Y += 10;
             }
-        }
-    }
-
-    for _ in 0..200000 {
-        unsafe {
-            core::arch::asm!("pause");
         }
     }
 }
@@ -517,9 +553,17 @@ pub extern "C" fn kernel_main(
 
     screen_log("[ .. ] Detecting hardware configuration", false);
     screen_log("[ OK ] CPU: x86_64 architecture detected", false);
-    screen_log("[ OK ] CPU features: SSE, SSE2, AVX available", false);
-    screen_log("[ OK ] Memory: 512MB RAM detected", false);
-    screen_log("[ OK ] Framebuffer: 1024x768x32 initialized", false);
+    if let Some(fb) = fb {
+        let mut buf = FmtBuf::new();
+        buf.push_str("[ OK ] Framebuffer: ");
+        buf.push_u64(fb.width);
+        buf.push_str("x");
+        buf.push_u64(fb.height);
+        buf.push_str("x");
+        buf.push_u64(fb.bpp as u64);
+        buf.push_str(" initialized");
+        screen_log(buf.as_str(), false);
+    }
 
     screen_log("[ .. ] Initializing Hardware Abstraction Layer", false);
     screen_log("[ .. ] Setting up Global Descriptor Table", false);
@@ -530,8 +574,7 @@ pub extern "C" fn kernel_main(
         serial_write("[HAL] OK\r\n");
         screen_log("[ OK ] [HAL] OK", false);
     }
-    screen_log("[ OK ] GDT loaded with 7 segments", false);
-    screen_log("[ OK ] Code segment: 0x08, Data segment: 0x10", false);
+    screen_log("[ OK ] GDT loaded", false);
     screen_log("[ .. ] Setting up Interrupt Descriptor Table", false);
     screen_log("[ OK ] IDT loaded with 256 entries", false);
     screen_log("[ OK ] Exception handlers registered", false);
@@ -542,6 +585,14 @@ pub extern "C" fn kernel_main(
     serial_write("[KERNEL] memory START\r\n");
     memory::init();
     serial_write("[KERNEL] memory OK\r\n");
+    {
+        let (total, _free) = memory::pmm::stats_bytes();
+        let mut buf = FmtBuf::new();
+        buf.push_str("[ OK ] Physical memory: ");
+        buf.push_u64(total / (1024 * 1024));
+        buf.push_str(" MiB usable");
+        screen_log(buf.as_str(), false);
+    }
     screen_log("[ OK ] Memory management subsystem operational", false);
 
     process::init_current_kernel_process();
@@ -606,9 +657,6 @@ pub extern "C" fn kernel_main(
         serial_write("[WM] Calling window_manager::init()...\r\n");
         window_manager::init();
         serial_write("[WM] window_manager::init() returned\r\n");
-        screen_log("[ OK ] Window manager: 5 applications registered", false);
-        screen_log("[ OK ] Compositor: Double buffering enabled", false);
-        screen_log("[ OK ] Desktop theme: Green Tea Dark loaded", false);
         screen_log("[ OK ] Window manager ready", false);
     } else {
         screen_log("[ .. ] Terminal mode: Minimal initialization", false);
@@ -692,54 +740,30 @@ pub extern "C" fn kernel_main(
     serial_write("[KERNEL] mode select START\r\n");
 
     if terminal_mode != 0 {
-        serial_write("[BOOT-003] Starting terminal mode\r\n");
+        serial_write("[BOOT] Starting terminal mode\r\n");
         screen_log("[ .. ] Starting terminal mode", false);
-        serial_write("[BOOT] Starting terminal mode...\r\n");
-        serial_write("[BOOT-TERM-DEBUG-001] Before TERM-001\r\n");
-
-        serial_write("\r\n\r\n");
-        serial_write("[TERM-001] Initializing framebuffer console\r\n");
-        screen_log("[ .. ] Initializing framebuffer console", false);
-        serial_write("[TERM-001b] About to call fb_ptr.as_ref()\r\n");
 
         let fb_for_terminal = unsafe { fb_ptr.as_ref() };
-
-        serial_write("[TERM-001c] fb_ptr.as_ref() returned\r\n");
         screen_log("[ OK ] Framebuffer reference obtained", false);
 
         if let Some(fb) = fb_for_terminal {
-            serial_write("[TERM-001d] fb is Some, extracting fields\r\n");
             screen_log("[ .. ] Extracting framebuffer parameters", false);
-            serial_write("[TERM-001e] Getting fb.address\r\n");
             let fb_addr = fb.address as *mut u32;
-            serial_write("[TERM-001f] Getting fb.width\r\n");
             let width = fb.width as usize;
-            serial_write("[TERM-001g] Getting fb.height\r\n");
             let height = fb.height as usize;
-            serial_write("[TERM-001h] Getting fb.pitch\r\n");
             let pitch = fb.pitch as usize;
-            serial_write("[TERM-001i] All fields extracted\r\n");
             screen_log("[ OK ] Framebuffer parameters extracted", false);
 
-            serial_write("[TERM-002] Initializing terminal with framebuffer\r\n");
-            screen_log("[ .. ] Creating terminal console instance", false);
-            serial_write("[TERM-002a] fb_addr: ");
-            serial_write("[TERM-002b] About to call terminal::init()\r\n");
             screen_log("[ .. ] Calling terminal::init()", false);
             terminal::init(fb_addr, width, height, pitch);
-            serial_write("[TERM-002c] terminal::init() returned\r\n");
             screen_log("[ OK ] terminal::init() returned", false);
 
             screen_log("[ .. ] Getting console instance", false);
             if let Some(console) = terminal::get_console() {
-                serial_write("[TERM-003] Console initialized\r\n");
                 screen_log("[ OK ] Console instance obtained", false);
 
-                serial_write("[TERM-004] Clearing entire screen\r\n");
                 console.clear_top_area(48);
-                serial_write("[TERM-004b] Screen cleared\r\n");
 
-                serial_write("[TERM-005] Writing header\r\n");
                 console.write_str("Dunit OS 1.0.0 (Green Tea) tty1\n");
                 console.write_str("\n");
                 console.write_str("kernel terminal user: root\n");
@@ -747,8 +771,6 @@ pub extern "C" fn kernel_main(
                 terminal_set_cwd("/");
                 console.write_str("root@dunit:~# ");
                 console.draw_cursor(true);
-
-                serial_write("[TERM-006] Header written, entering keyboard loop\r\n");
 
                 unsafe {
                     INPUT_LEN = 0;
@@ -1008,73 +1030,6 @@ pub extern "C" fn kernel_main(
         serial_write("[GUI-001] Entering GUI initialization\r\n");
     }
 
-    fn draw_text(fb: *mut u32, width: usize, x: usize, y: usize, text: &str, color: u32) {
-        for (i, ch) in text.bytes().enumerate() {
-            let glyph = match ch {
-                b'A' => [0x7C, 0x12, 0x11, 0x12, 0x7C],
-                b'B' => [0x7F, 0x49, 0x49, 0x49, 0x36],
-                b'C' => [0x3E, 0x41, 0x41, 0x41, 0x22],
-                b'D' => [0x7F, 0x41, 0x41, 0x22, 0x1C],
-                b'E' => [0x7F, 0x49, 0x49, 0x49, 0x41],
-                b'F' => [0x7F, 0x09, 0x09, 0x09, 0x01],
-                b'G' => [0x3E, 0x41, 0x49, 0x49, 0x7A],
-                b'H' => [0x7F, 0x08, 0x08, 0x08, 0x7F],
-                b'I' => [0x00, 0x41, 0x7F, 0x41, 0x00],
-                b'M' => [0x7F, 0x02, 0x0C, 0x02, 0x7F],
-                b'O' => [0x3E, 0x41, 0x41, 0x41, 0x3E],
-                b'S' => [0x46, 0x49, 0x49, 0x49, 0x31],
-                b'T' => [0x01, 0x01, 0x7F, 0x01, 0x01],
-                b'W' => [0x3F, 0x40, 0x38, 0x40, 0x3F],
-                b'a' => [0x20, 0x54, 0x54, 0x54, 0x78],
-                b'b' => [0x7F, 0x48, 0x44, 0x44, 0x38],
-                b'c' => [0x38, 0x44, 0x44, 0x44, 0x20],
-                b'd' => [0x38, 0x44, 0x44, 0x48, 0x7F],
-                b'e' => [0x38, 0x54, 0x54, 0x54, 0x18],
-                b'f' => [0x08, 0x7E, 0x09, 0x01, 0x02],
-                b'g' => [0x0C, 0x52, 0x52, 0x52, 0x3E],
-                b'h' => [0x7F, 0x08, 0x04, 0x04, 0x78],
-                b'i' => [0x00, 0x44, 0x7D, 0x40, 0x00],
-                b'l' => [0x00, 0x41, 0x7F, 0x40, 0x00],
-                b'm' => [0x7C, 0x04, 0x18, 0x04, 0x78],
-                b'n' => [0x7C, 0x08, 0x04, 0x04, 0x78],
-                b'o' => [0x38, 0x44, 0x44, 0x44, 0x38],
-                b'p' => [0x7C, 0x14, 0x14, 0x14, 0x08],
-                b'r' => [0x7C, 0x08, 0x04, 0x04, 0x08],
-                b's' => [0x48, 0x54, 0x54, 0x54, 0x20],
-                b't' => [0x04, 0x3F, 0x44, 0x40, 0x20],
-                b'u' => [0x3C, 0x40, 0x40, 0x20, 0x7C],
-                b'v' => [0x1C, 0x20, 0x40, 0x20, 0x1C],
-                b'w' => [0x3C, 0x40, 0x30, 0x40, 0x3C],
-                b'y' => [0x0C, 0x50, 0x50, 0x50, 0x3C],
-                b' ' => [0x00, 0x00, 0x00, 0x00, 0x00],
-                b'=' => [0x14, 0x14, 0x14, 0x14, 0x14],
-                b'-' => [0x08, 0x08, 0x08, 0x08, 0x08],
-                b'/' => [0x20, 0x10, 0x08, 0x04, 0x02],
-                b'$' => [0x24, 0x2A, 0x7F, 0x2A, 0x12],
-                b'!' => [0x00, 0x00, 0x5F, 0x00, 0x00],
-                b'.' => [0x00, 0x60, 0x60, 0x00, 0x00],
-                b',' => [0x00, 0x50, 0x30, 0x00, 0x00],
-                b'\'' => [0x00, 0x05, 0x03, 0x00, 0x00],
-                _ => [0x00, 0x00, 0x00, 0x00, 0x00],
-            };
-
-            unsafe {
-                for dx in 0..5 {
-                    let col = glyph[dx];
-                    for dy in 0..8 {
-                        if (col >> dy) & 1 == 1 {
-                            let px = x + i * 6 + dx;
-                            let py = y + dy;
-                            if px < width {
-                                *fb.add(py * width + px) = color;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     let fb = unsafe { fb_ptr.as_ref() };
     if let Some(fb) = fb {
         serial_write("[GUI-002] Framebuffer available\r\n");
@@ -1099,34 +1054,7 @@ pub extern "C" fn kernel_main(
         serial_write("[GUI-007] Starting UI rendering\r\n");
 
         serial_write("[RENDER] Initial UI deferred to double-buffered GUI loop\r\n");
-
-        serial_write("[DE] Panel loaded\r\n");
-        serial_write("[DE] Application menu initialized\r\n");
-        serial_write("[DE] System tray initialized\r\n");
-        serial_write("[DE] Desktop environment ready (PID: 4)\r\n\r\n");
-
-        serial_write("[APP] Starting default applications...\r\n");
-        serial_write("[APP] GUI shell ready for runtime bridge launch\r\n");
-        serial_write("[APP] File manager started (PID: 6)\r\n");
-        serial_write("[APP] System monitor started (PID: 7)\r\n\r\n");
-
-        serial_write(
-            "================================================================================\r\n",
-        );
-        serial_write(
-            "                         SYSTEM FULLY OPERATIONAL                              \r\n",
-        );
-        serial_write(
-            "================================================================================\r\n",
-        );
-        serial_write("\r\n");
-        serial_write("[INFO] All subsystems initialized successfully\r\n");
-        serial_write("[INFO] Microkernel is now running\r\n");
-        serial_write("[INFO] Desktop environment active\r\n");
-        serial_write("[INFO] 7 processes running\r\n");
-        serial_write("[INFO] System ready for user interaction\r\n");
-
-        serial_write("\r\n[UI] Starting interactive UI loop...\r\n");
+        serial_write("[UI] Starting interactive UI loop...\r\n");
 
         screen_log("[ OK ] Starting built-in GUI shell", false);
         serial_write("[GUI] Starting built-in desktop loop\r\n");
@@ -1149,7 +1077,7 @@ fn draw_colored_text(fb: *mut u32, width: usize, x: usize, y: usize, text: &str)
     let mut in_bracket = false;
     let mut bracket_content = false;
 
-    for (i, ch) in text.bytes().enumerate() {
+    for ch in text.bytes() {
         if ch == b'[' {
             in_bracket = true;
             bracket_content = true;
@@ -1165,88 +1093,7 @@ fn draw_colored_text(fb: *mut u32, width: usize, x: usize, y: usize, text: &str)
             0xffffff
         };
 
-        let glyph: &[u8] = match ch {
-            b'A' => &[0x7C, 0x12, 0x11, 0x12, 0x7C],
-            b'B' => &[0x7F, 0x49, 0x49, 0x49, 0x36],
-            b'C' => &[0x3E, 0x41, 0x41, 0x41, 0x22],
-            b'D' => &[0x7F, 0x41, 0x41, 0x22, 0x1C],
-            b'E' => &[0x7F, 0x49, 0x49, 0x49, 0x41],
-            b'F' => &[0x7F, 0x09, 0x09, 0x09, 0x01],
-            b'G' => &[0x3E, 0x41, 0x49, 0x49, 0x7A],
-            b'H' => &[0x7F, 0x08, 0x08, 0x08, 0x7F],
-            b'I' => &[0x00, 0x41, 0x7F, 0x41, 0x00],
-            b'K' => &[0x7F, 0x08, 0x14, 0x22, 0x41],
-            b'L' => &[0x7F, 0x40, 0x40, 0x40, 0x40],
-            b'M' => &[0x7F, 0x02, 0x0C, 0x02, 0x7F],
-            b'N' => &[0x7F, 0x04, 0x08, 0x10, 0x7F],
-            b'O' => &[0x3E, 0x41, 0x41, 0x41, 0x3E],
-            b'P' => &[0x7F, 0x09, 0x09, 0x09, 0x06],
-            b'R' => &[0x7F, 0x09, 0x19, 0x29, 0x46],
-            b'S' => &[0x46, 0x49, 0x49, 0x49, 0x31],
-            b'T' => &[0x01, 0x01, 0x7F, 0x01, 0x01],
-            b'V' => &[0x1F, 0x20, 0x40, 0x20, 0x1F],
-            b'W' => &[0x3F, 0x40, 0x38, 0x40, 0x3F],
-            b'a' => &[0x20, 0x54, 0x54, 0x54, 0x78],
-            b'b' => &[0x7F, 0x48, 0x44, 0x44, 0x38],
-            b'c' => &[0x38, 0x44, 0x44, 0x44, 0x20],
-            b'd' => &[0x38, 0x44, 0x44, 0x48, 0x7F],
-            b'e' => &[0x38, 0x54, 0x54, 0x54, 0x18],
-            b'f' => &[0x08, 0x7E, 0x09, 0x01, 0x02],
-            b'g' => &[0x0C, 0x52, 0x52, 0x52, 0x3E],
-            b'h' => &[0x7F, 0x08, 0x04, 0x04, 0x78],
-            b'i' => &[0x00, 0x44, 0x7D, 0x40, 0x00],
-            b'k' => &[0x7F, 0x10, 0x28, 0x44, 0x00],
-            b'l' => &[0x00, 0x41, 0x7F, 0x40, 0x00],
-            b'm' => &[0x7C, 0x04, 0x18, 0x04, 0x78],
-            b'n' => &[0x7C, 0x08, 0x04, 0x04, 0x78],
-            b'o' => &[0x38, 0x44, 0x44, 0x44, 0x38],
-            b'p' => &[0x7C, 0x14, 0x14, 0x14, 0x08],
-            b'r' => &[0x7C, 0x08, 0x04, 0x04, 0x08],
-            b's' => &[0x48, 0x54, 0x54, 0x54, 0x20],
-            b't' => &[0x04, 0x3F, 0x44, 0x40, 0x20],
-            b'u' => &[0x3C, 0x40, 0x40, 0x20, 0x7C],
-            b'v' => &[0x1C, 0x20, 0x40, 0x20, 0x1C],
-            b'w' => &[0x3C, 0x40, 0x30, 0x40, 0x3C],
-            b'y' => &[0x0C, 0x50, 0x50, 0x50, 0x3C],
-            b'z' => &[0x44, 0x64, 0x54, 0x4C, 0x44],
-            b'0' => &[0x3E, 0x51, 0x49, 0x45, 0x3E],
-            b'1' => &[0x00, 0x42, 0x7F, 0x40, 0x00],
-            b'2' => &[0x42, 0x61, 0x51, 0x49, 0x46],
-            b'3' => &[0x21, 0x41, 0x45, 0x4B, 0x31],
-            b'4' => &[0x18, 0x14, 0x12, 0x7F, 0x10],
-            b'5' => &[0x27, 0x45, 0x45, 0x45, 0x39],
-            b'6' => &[0x3C, 0x4A, 0x49, 0x49, 0x30],
-            b'7' => &[0x01, 0x71, 0x09, 0x05, 0x03],
-            b'8' => &[0x36, 0x49, 0x49, 0x49, 0x36],
-            b'9' => &[0x06, 0x49, 0x49, 0x29, 0x1E],
-            b' ' => &[0x00, 0x00, 0x00, 0x00, 0x00],
-            b'-' => &[0x08, 0x08, 0x08, 0x08, 0x08],
-            b'.' => &[0x00, 0x60, 0x60, 0x00, 0x00],
-            b'[' => &[0x00, 0x7F, 0x41, 0x41, 0x00],
-            b']' => &[0x00, 0x41, 0x41, 0x7F, 0x00],
-            b':' => &[0x00, 0x36, 0x36, 0x00, 0x00],
-            b'/' => &[0x20, 0x10, 0x08, 0x04, 0x02],
-            b'(' => &[0x00, 0x1C, 0x22, 0x41, 0x00],
-            b')' => &[0x00, 0x41, 0x22, 0x1C, 0x00],
-            b'x' => &[0x44, 0x28, 0x10, 0x28, 0x44],
-            _ => &[0x00, 0x00, 0x00, 0x00, 0x00],
-        };
-
-        unsafe {
-            for dx in 0..5 {
-                let col = glyph[dx];
-                for dy in 0..8 {
-                    if (col >> dy) & 1 == 1 {
-                        let px = current_x + dx;
-                        let py = y + dy;
-                        if px < width {
-                            *fb.add(py * width + px) = color;
-                        }
-                    }
-                }
-            }
-        }
-
+        blit_glyph_5x8(fb, width, current_x, y, ch, color);
         current_x += 6;
     }
 }
@@ -1255,193 +1102,3 @@ fn draw_error_text(fb: *mut u32, width: usize, x: usize, y: usize, text: &str) {
     draw_text_direct(fb, width, x, y, text, 0xff0000);
 }
 
-fn draw_error_text_old(fb: *mut u32, width: usize, x: usize, y: usize, text: &str) {
-    let mut current_x = x;
-    let mut in_bracket = false;
-    let mut bracket_content = false;
-
-    for (i, ch) in text.bytes().enumerate() {
-        if ch == b'[' {
-            in_bracket = true;
-            bracket_content = true;
-        } else if ch == b']' {
-            in_bracket = false;
-        } else if ch == b' ' && bracket_content {
-            bracket_content = false;
-        }
-
-        let color = if in_bracket || bracket_content || ch == b'[' || ch == b']' {
-            0xff0000
-        } else {
-            0xdc322f
-        };
-
-        let glyph: &[u8] = match ch {
-            b'A' => &[0x7C, 0x12, 0x11, 0x12, 0x7C],
-            b'B' => &[0x7F, 0x49, 0x49, 0x49, 0x36],
-            b'C' => &[0x3E, 0x41, 0x41, 0x41, 0x22],
-            b'D' => &[0x7F, 0x41, 0x41, 0x22, 0x1C],
-            b'E' => &[0x7F, 0x49, 0x49, 0x49, 0x41],
-            b'F' => &[0x7F, 0x09, 0x09, 0x09, 0x01],
-            b'G' => &[0x3E, 0x41, 0x49, 0x49, 0x7A],
-            b'H' => &[0x7F, 0x08, 0x08, 0x08, 0x7F],
-            b'I' => &[0x00, 0x41, 0x7F, 0x41, 0x00],
-            b'K' => &[0x7F, 0x08, 0x14, 0x22, 0x41],
-            b'L' => &[0x7F, 0x40, 0x40, 0x40, 0x40],
-            b'M' => &[0x7F, 0x02, 0x0C, 0x02, 0x7F],
-            b'N' => &[0x7F, 0x04, 0x08, 0x10, 0x7F],
-            b'O' => &[0x3E, 0x41, 0x41, 0x41, 0x3E],
-            b'P' => &[0x7F, 0x09, 0x09, 0x09, 0x06],
-            b'R' => &[0x7F, 0x09, 0x19, 0x29, 0x46],
-            b'S' => &[0x46, 0x49, 0x49, 0x49, 0x31],
-            b'T' => &[0x01, 0x01, 0x7F, 0x01, 0x01],
-            b'V' => &[0x1F, 0x20, 0x40, 0x20, 0x1F],
-            b'W' => &[0x3F, 0x40, 0x38, 0x40, 0x3F],
-            b'a' => &[0x20, 0x54, 0x54, 0x54, 0x78],
-            b'b' => &[0x7F, 0x48, 0x44, 0x44, 0x38],
-            b'c' => &[0x38, 0x44, 0x44, 0x44, 0x20],
-            b'd' => &[0x38, 0x44, 0x44, 0x48, 0x7F],
-            b'e' => &[0x38, 0x54, 0x54, 0x54, 0x18],
-            b'f' => &[0x08, 0x7E, 0x09, 0x01, 0x02],
-            b'g' => &[0x0C, 0x52, 0x52, 0x52, 0x3E],
-            b'h' => &[0x7F, 0x08, 0x04, 0x04, 0x78],
-            b'i' => &[0x00, 0x44, 0x7D, 0x40, 0x00],
-            b'k' => &[0x7F, 0x10, 0x28, 0x44, 0x00],
-            b'l' => &[0x00, 0x41, 0x7F, 0x40, 0x00],
-            b'm' => &[0x7C, 0x04, 0x18, 0x04, 0x78],
-            b'n' => &[0x7C, 0x08, 0x04, 0x04, 0x78],
-            b'o' => &[0x38, 0x44, 0x44, 0x44, 0x38],
-            b'p' => &[0x7C, 0x14, 0x14, 0x14, 0x08],
-            b'r' => &[0x7C, 0x08, 0x04, 0x04, 0x08],
-            b's' => &[0x48, 0x54, 0x54, 0x54, 0x20],
-            b't' => &[0x04, 0x3F, 0x44, 0x40, 0x20],
-            b'u' => &[0x3C, 0x40, 0x40, 0x20, 0x7C],
-            b'v' => &[0x1C, 0x20, 0x40, 0x20, 0x1C],
-            b'w' => &[0x3C, 0x40, 0x30, 0x40, 0x3C],
-            b'y' => &[0x0C, 0x50, 0x50, 0x50, 0x3C],
-            b'z' => &[0x44, 0x64, 0x54, 0x4C, 0x44],
-            b'0' => &[0x3E, 0x51, 0x49, 0x45, 0x3E],
-            b'1' => &[0x00, 0x42, 0x7F, 0x40, 0x00],
-            b'2' => &[0x42, 0x61, 0x51, 0x49, 0x46],
-            b'3' => &[0x21, 0x41, 0x45, 0x4B, 0x31],
-            b'4' => &[0x18, 0x14, 0x12, 0x7F, 0x10],
-            b'5' => &[0x27, 0x45, 0x45, 0x45, 0x39],
-            b'6' => &[0x3C, 0x4A, 0x49, 0x49, 0x30],
-            b'7' => &[0x01, 0x71, 0x09, 0x05, 0x03],
-            b'8' => &[0x36, 0x49, 0x49, 0x49, 0x36],
-            b'9' => &[0x06, 0x49, 0x49, 0x29, 0x1E],
-            b' ' => &[0x00, 0x00, 0x00, 0x00, 0x00],
-            b'-' => &[0x08, 0x08, 0x08, 0x08, 0x08],
-            b'.' => &[0x00, 0x60, 0x60, 0x00, 0x00],
-            b'[' => &[0x00, 0x7F, 0x41, 0x41, 0x00],
-            b']' => &[0x00, 0x41, 0x41, 0x7F, 0x00],
-            b':' => &[0x00, 0x36, 0x36, 0x00, 0x00],
-            b'!' => &[0x00, 0x00, 0x5F, 0x00, 0x00],
-            b'/' => &[0x20, 0x10, 0x08, 0x04, 0x02],
-            b'(' => &[0x00, 0x1C, 0x22, 0x41, 0x00],
-            b')' => &[0x00, 0x41, 0x22, 0x1C, 0x00],
-            b'x' => &[0x44, 0x28, 0x10, 0x28, 0x44],
-            _ => &[0x00, 0x00, 0x00, 0x00, 0x00],
-        };
-
-        unsafe {
-            for dx in 0..5 {
-                let col = glyph[dx];
-                for dy in 0..8 {
-                    if (col >> dy) & 1 == 1 {
-                        let px = current_x + dx;
-                        let py = y + dy;
-                        if px < width {
-                            *fb.add(py * width + px) = color;
-                        }
-                    }
-                }
-            }
-        }
-
-        current_x += 6;
-    }
-}
-
-fn draw_char(fb: *mut u32, width: usize, x: usize, y: usize, c: u8, color: u32) {
-    let font = match c {
-        b'A'..=b'Z'
-        | b'a'..=b'z'
-        | b'0'..=b'9'
-        | b' '
-        | b'-'
-        | b'('
-        | b')'
-        | b'['
-        | b']'
-        | b':'
-        | b'/'
-        | b'.'
-        | b'$' => [
-            [1, 1, 1, 1, 1, 1, 1, 1],
-            [1, 0, 0, 0, 0, 0, 0, 1],
-            [1, 0, 0, 0, 0, 0, 0, 1],
-            [1, 0, 0, 0, 0, 0, 0, 1],
-            [1, 0, 0, 0, 0, 0, 0, 1],
-            [1, 0, 0, 0, 0, 0, 0, 1],
-            [1, 0, 0, 0, 0, 0, 0, 1],
-            [1, 1, 1, 1, 1, 1, 1, 1],
-        ],
-        _ => [[0; 8]; 8],
-    };
-
-    unsafe {
-        for dy in 0..8 {
-            for dx in 0..8 {
-                if font[dy][dx] == 1 {
-                    let px = x + dx;
-                    let py = y + dy;
-                    if px < width {
-                        core::ptr::write_volatile(fb.add(py * width + px), color);
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn draw_text(fb: *mut u32, width: usize, x: usize, y: usize, text: &str, color: u32) {
-    for (i, byte) in text.bytes().enumerate() {
-        draw_char(fb, width, x + i * 9, y, byte, color);
-    }
-}
-
-fn draw_window(
-    fb: *mut u32,
-    width: usize,
-    height: usize,
-    x: usize,
-    y: usize,
-    w: usize,
-    h: usize,
-    title: &str,
-) {
-    unsafe {
-        for dy in 0..h {
-            for dx in 0..w {
-                let px = x + dx;
-                let py = y + dy;
-                if px < width && py < height {
-                    let offset = py * width + px;
-                    let color = if dy < 30 {
-                        0x268bd2
-                    } else if dx == 0 || dx == w - 1 || dy == 0 || dy == h - 1 {
-                        0x586e75
-                    } else {
-                        0xfdf6e3
-                    };
-                    *fb.add(offset) = color;
-                }
-            }
-        }
-
-        for (i, byte) in title.bytes().enumerate() {
-            draw_char(fb, width, x + 10 + i * 8, y + 10, byte, 0xfdf6e3);
-        }
-    }
-}

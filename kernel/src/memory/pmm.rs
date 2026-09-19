@@ -316,3 +316,12 @@ pub fn init_pmm(memory_start: usize, memory_size: usize, bitmap: &'static mut [u
 pub fn get_pmm() -> Option<&'static PhysicalMemoryManager> {
     unsafe { PMM_INSTANCE.as_ref() }
 }
+
+/// Returns (total_bytes, free_bytes) for the physical frame pool, or (0, 0)
+/// if the PMM has not been initialized yet.
+pub fn stats_bytes() -> (u64, u64) {
+    match get_pmm() {
+        Some(pmm) => (pmm.total_memory() as u64, pmm.available_memory() as u64),
+        None => (0, 0),
+    }
+}

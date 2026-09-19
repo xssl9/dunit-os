@@ -468,12 +468,8 @@ static mut ROOT_MEMFS: MemFs = MemFs::empty();
 static mut VFS_PATH_BUFFER: [u8; 256] = [0; 256];
 const GUI_SHORTCUTS_CONFIG: &[u8] = b"super+q=close_window\nsuper+enter=open_terminal\n";
 
-extern "C" {
-    fn serial_write(s: *const u8);
-}
-
-fn serial_log(msg: &'static [u8]) {
-    unsafe { serial_write(msg.as_ptr()) }
+fn serial_log(msg: &str) {
+    crate::serial::serial_write(msg);
 }
 
 fn register_assets() {
@@ -489,7 +485,7 @@ fn register_assets() {
 }
 
 pub fn init() -> Result<()> {
-    serial_log(b"[VFS] init START\r\n\0");
+    serial_log("[VFS] init START\r\n");
     unsafe {
         let mut vfs = VirtualFileSystem::new();
 
@@ -621,12 +617,12 @@ pub fn init() -> Result<()> {
         ROOT_MEMFS.add_file("/app/fault_ud", fault_ud);
 
         vfs.mount("/", &mut ROOT_MEMFS)?;
-        serial_log(b"[MEMFS] mounted as /\r\n\0");
+        serial_log("[MEMFS] mounted as /\r\n");
 
         VFS_INSTANCE = Some(vfs);
     }
 
-    serial_log(b"[VFS] init OK\r\n\0");
+    serial_log("[VFS] init OK\r\n");
     Ok(())
 }
 
