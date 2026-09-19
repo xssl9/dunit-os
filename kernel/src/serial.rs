@@ -2,6 +2,32 @@
 //! logging. Every subsystem routes through `serial_write` here instead of
 //! carrying its own copy of the port I/O loop.
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
+/// When false (default), high-frequency debug traces on hot paths
+/// (scheduling, process state transitions) are suppressed. Unconditional
+/// diagnostics still go out via `serial_write`.
+static DEBUG_TRACE: AtomicBool = AtomicBool::new(false);
+
+/// Enable/disable high-frequency debug tracing at runtime.
+pub fn set_debug_trace(enabled: bool) {
+    DEBUG_TRACE.store(enabled, Ordering::Relaxed);
+}
+
+/// Whether high-frequency debug tracing is currently enabled.
+#[inline]
+pub fn debug_trace_enabled() -> bool {
+    DEBUG_TRACE.load(Ordering::Relaxed)
+}
+
+/// Write a string only when debug tracing is enabled.
+#[inline]
+pub fn trace(s: &str) {
+    if debug_trace_enabled() {
+        serial_write(s);
+    }
+}
+
 /// Write one byte to COM1, spinning until the transmitter holding register is
 /// empty.
 #[inline]

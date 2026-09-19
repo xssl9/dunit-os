@@ -494,6 +494,9 @@ fn log_process_transition(pid: ProcessId, from: ProcessState, to: ProcessState, 
     if reason == "yield" || reason == "enter-user" {
         return;
     }
+    if !crate::serial::debug_trace_enabled() {
+        return;
+    }
     crate::memory::serial_write("[PROCESS] pid=");
     serial_write_u64(pid.0);
     crate::memory::serial_write(" state=");
@@ -702,16 +705,18 @@ pub fn create_user_process_record(path: String, waitable: bool) -> Result<Proces
         Some(process),
     );
 
-    crate::memory::serial_write("[PROCESS] pid=");
-    serial_write_u64(pid.0);
-    crate::memory::serial_write(" parent=");
-    match parent {
-        Some(parent_pid) => serial_write_u64(parent_pid.0),
-        None => crate::memory::serial_write("none"),
+    if crate::serial::debug_trace_enabled() {
+        crate::memory::serial_write("[PROCESS] pid=");
+        serial_write_u64(pid.0);
+        crate::memory::serial_write(" parent=");
+        match parent {
+            Some(parent_pid) => serial_write_u64(parent_pid.0),
+            None => crate::memory::serial_write("none"),
+        }
+        crate::memory::serial_write(" state=prepared path=");
+        crate::memory::serial_write(&path);
+        crate::memory::serial_write("\r\n");
     }
-    crate::memory::serial_write(" state=prepared path=");
-    crate::memory::serial_write(&path);
-    crate::memory::serial_write("\r\n");
 
     Ok(pid)
 }
