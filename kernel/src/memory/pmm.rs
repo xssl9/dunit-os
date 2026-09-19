@@ -33,6 +33,7 @@ impl PhysicalAddress {
 pub struct PhysicalMemoryManager {
     bitmap: UnsafeCell<&'static mut [u8]>,
     total_frames: usize,
+    usable_frames: AtomicUsize,
     free_frames: AtomicUsize,
     base_addr: usize,
 }
@@ -51,69 +52,62 @@ impl PhysicalMemoryManager {
         Self {
             bitmap: UnsafeCell::new(bitmap),
             total_frames,
+            usable_frames: AtomicUsize::new(total_frames),
             free_frames: AtomicUsize::new(total_frames),
             base_addr: memory_start,
         }
     }
 
-    fn mark_frame_index_used(&self, frame_idx: usize) -> bool {
+    fn mark_frame_index_free(&self, frame_idx: usize) -> bool {
         if frame_idx >= self.total_frames {
             return false;
         }
-
         let byte_idx = frame_idx / 8;
         let bit_idx = frame_idx % 8;
         let mask = 1u8 << bit_idx;
-
         let bitmap = unsafe { &mut *self.bitmap.get() };
-        if byte_idx < bitmap.len() && (bitmap[byte_idx] & mask) == 0 {
-            bitmap[byte_idx] |= mask;
+        if byte_idx < bitmap.len() && (bitmap[byte_idx] & mask) != 0 {
+            bitmap[byte_idx] &= !mask;
             true
         } else {
             false
         }
     }
 
-    /// Mark only frames inside the PMM pool that overlap [base, base + length).
-    fn mark_region_used_in_pool(&self, base: u64, length: u64) -> usize {
-        if length == 0 {
-            return 0;
+    fn reserve_all_frames(&self) {
+        let bitmap = unsafe { &mut *self.bitmap.get() };
+        for byte in bitmap.iter_mut() {
+            *byte = 0xFF;
         }
+        self.usable_frames.store(0, Ordering::SeqCst);
+        self.free_frames.store(0, Ordering::SeqCst);
+    }
 
+    /// Makes only complete pages inside a usable memory-map region allocatable.
+    fn mark_region_free_in_pool(&self, base: u64, length: u64) -> usize {
+        let region_start = base as usize;
+        let region_end = region_start.saturating_add(length as usize);
+        let aligned_start = region_start.saturating_add(PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        let aligned_end = region_end & !(PAGE_SIZE - 1);
         let pool_start = self.base_addr;
         let pool_end = pool_start.saturating_add(self.total_frames * PAGE_SIZE);
-
-        let region_start = base as usize;
-        let region_end = match (base as usize).checked_add(length as usize) {
-            Some(end) => end,
-            None => usize::MAX,
-        };
-
-        let overlap_start = region_start.max(pool_start);
-        let overlap_end = region_end.min(pool_end);
-
-        if overlap_start >= overlap_end {
+        let start = aligned_start.max(pool_start);
+        let end = aligned_end.min(pool_end);
+        if start >= end {
             return 0;
         }
 
-        let first_frame = (overlap_start - pool_start) / PAGE_SIZE;
-        let last_frame = overlap_end
-            .saturating_sub(pool_start)
-            .saturating_add(PAGE_SIZE - 1)
-            / PAGE_SIZE;
-
-        let mut newly_used = 0usize;
-        for frame_idx in first_frame..last_frame.min(self.total_frames) {
-            if self.mark_frame_index_used(frame_idx) {
-                newly_used += 1;
+        let first = (start - pool_start) / PAGE_SIZE;
+        let last = (end - pool_start) / PAGE_SIZE;
+        let mut newly_free = 0usize;
+        for frame_idx in first..last.min(self.total_frames) {
+            if self.mark_frame_index_free(frame_idx) {
+                newly_free += 1;
             }
         }
-
-        if newly_used != 0 {
-            self.free_frames.fetch_sub(newly_used, Ordering::SeqCst);
-        }
-
-        newly_used
+        self.usable_frames.fetch_add(newly_free, Ordering::SeqCst);
+        self.free_frames.fetch_add(newly_free, Ordering::SeqCst);
+        newly_free
     }
 
     pub fn alloc_frame(&self) -> Option<PhysicalAddress> {
@@ -169,7 +163,7 @@ impl PhysicalMemoryManager {
     }
 
     pub fn total_memory(&self) -> usize {
-        self.total_frames * PAGE_SIZE
+        self.usable_frames.load(Ordering::SeqCst) * PAGE_SIZE
     }
 }
 
@@ -208,22 +202,21 @@ fn copy_regions_from_boot() -> usize {
     }
 }
 
-fn largest_usable_region(regions: &[MemRegion]) -> Option<MemRegion> {
-    let mut best: Option<MemRegion> = None;
-
-    for &region in regions {
+fn usable_pool_bounds(regions: &[MemRegion]) -> Option<(usize, usize)> {
+    let mut first = usize::MAX;
+    let mut last = 0usize;
+    for region in regions {
         if region.region_type != MEMMAP_USABLE || region.length < PAGE_SIZE as u64 {
             continue;
         }
-
-        match best {
-            None => best = Some(region),
-            Some(current) if region.length > current.length => best = Some(region),
-            _ => {}
+        let start = (region.base as usize).saturating_add(PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        let end = (region.base as usize).saturating_add(region.length as usize) & !(PAGE_SIZE - 1);
+        if start < end {
+            first = first.min(start);
+            last = last.max(end);
         }
     }
-
-    best
+    (first < last).then_some((first, last))
 }
 
 pub fn init() -> bool {
@@ -238,26 +231,20 @@ pub fn init() -> bool {
     serial_write("[PMM] regions copied\r\n");
 
     let regions = unsafe { &REGION_CACHE[..copied] };
-    let usable = match largest_usable_region(regions) {
-        Some(region) => region,
+    let (pool_start, pool_end) = match usable_pool_bounds(regions) {
+        Some(bounds) => bounds,
         None => {
             serial_write("[PMM] FAIL\r\n");
             return false;
         }
     };
-
-    let base = usable.base as usize;
-    let size = usable.length as usize;
-    let aligned_base = (base + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-    let usable_size = size.saturating_sub(aligned_base.saturating_sub(base));
-    let aligned_size = usable_size & !(PAGE_SIZE - 1);
-
-    if aligned_size < PAGE_SIZE {
+    let pool_size = pool_end.saturating_sub(pool_start);
+    if pool_size < PAGE_SIZE {
         serial_write("[PMM] FAIL\r\n");
         return false;
     }
 
-    let total_frames = aligned_size / PAGE_SIZE;
+    let total_frames = pool_size / PAGE_SIZE;
     let bitmap_size = (total_frames + 7) / 8;
 
     if bitmap_size > BITMAP_BYTES {
@@ -272,28 +259,21 @@ pub fn init() -> bool {
 
     serial_write("[PMM] pool ready\r\n");
 
-    let pmm = PhysicalMemoryManager::new(aligned_base, aligned_size, bitmap);
+    let pmm = PhysicalMemoryManager::new(pool_start, pool_size, bitmap);
+    pmm.reserve_all_frames();
 
-    serial_write("[PMM] marking reserved\r\n");
-
+    serial_write("[PMM] enabling usable regions\r\n");
     for region in regions {
         if region.region_type == MEMMAP_USABLE {
-            continue;
+            pmm.mark_region_free_in_pool(region.base, region.length);
         }
-        pmm.mark_region_used_in_pool(region.base, region.length);
     }
 
-    for region in regions {
-        if region.region_type != MEMMAP_USABLE {
-            continue;
-        }
-        if region.base == usable.base && region.length == usable.length {
-            continue;
-        }
-        pmm.mark_region_used_in_pool(region.base, region.length);
+    if pmm.free_frames.load(Ordering::SeqCst) == 0 {
+        serial_write("[PMM] FAIL: no aligned usable frames\r\n");
+        return false;
     }
-
-    serial_write("[PMM] reserved done\r\n");
+    serial_write("[PMM] usable regions ready\r\n");
 
     unsafe {
         PMM_INSTANCE = Some(pmm);
