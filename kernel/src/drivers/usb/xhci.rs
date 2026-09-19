@@ -1,6 +1,7 @@
 use crate::drivers::pci::{self, PciBar, PciDevice};
 use crate::memory::pmm::{get_pmm, PhysicalAddress};
 use crate::memory::vmm;
+use crate::serial::write_hex;
 use crate::serial_write;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -612,39 +613,9 @@ fn write_pci_addr(dev: PciDevice) {
     write_hex(dev.function as u64, 1);
 }
 
-fn write_hex(mut value: u64, digits: usize) {
-    let mut buf = [0u8; 16];
-    let mut index = digits.min(buf.len());
-    while index > 0 {
-        index -= 1;
-        let nibble = (value & 0xF) as u8;
-        buf[index] = if nibble < 10 {
-            b'0' + nibble
-        } else {
-            b'a' + nibble - 10
-        };
-        value >>= 4;
-    }
-    if let Ok(text) = core::str::from_utf8(&buf[..digits.min(buf.len())]) {
-        serial_write(text);
-    }
-}
-
-fn write_dec(mut value: usize) {
-    let mut buf = [0u8; 20];
-    let mut index = buf.len();
-    if value == 0 {
-        serial_write("0");
-        return;
-    }
-    while value > 0 {
-        index -= 1;
-        buf[index] = b'0' + (value % 10) as u8;
-        value /= 10;
-    }
-    if let Ok(text) = core::str::from_utf8(&buf[index..]) {
-        serial_write(text);
-    }
+#[inline]
+fn write_dec(value: usize) {
+    crate::serial::write_dec(value as u64);
 }
 
 #[derive(Clone, Copy)]

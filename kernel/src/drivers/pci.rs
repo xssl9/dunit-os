@@ -1,3 +1,4 @@
+use crate::serial::{write_dec, write_hex, write_hex16, write_hex8};
 use crate::{hal, serial_write};
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -92,15 +93,15 @@ pub fn init() {
 
     let snapshot = snapshot();
     serial_write("[PCI] devices detected=");
-    write_dec(snapshot.total_devices);
+    write_dec(snapshot.total_devices as u64);
     serial_write(" usb=");
-    write_dec(snapshot.usb_controllers);
+    write_dec(snapshot.usb_controllers as u64);
     serial_write(" net=");
-    write_dec(snapshot.network_controllers);
+    write_dec(snapshot.network_controllers as u64);
     serial_write(" msi=");
-    write_dec(snapshot.msi_devices);
+    write_dec(snapshot.msi_devices as u64);
     serial_write(" msix=");
-    write_dec(snapshot.msix_devices);
+    write_dec(snapshot.msix_devices as u64);
     serial_write("\r\n");
 }
 
@@ -441,45 +442,3 @@ fn write_pci_addr(dev: PciDevice) {
     write_hex(dev.function as u64, 1);
 }
 
-fn write_hex8(value: u8) {
-    write_hex(value as u64, 2);
-}
-
-fn write_hex16(value: u16) {
-    write_hex(value as u64, 4);
-}
-
-fn write_hex(mut value: u64, digits: usize) {
-    let mut buf = [0u8; 16];
-    let mut index = digits.min(buf.len());
-    while index > 0 {
-        index -= 1;
-        let nibble = (value & 0xF) as u8;
-        buf[index] = if nibble < 10 {
-            b'0' + nibble
-        } else {
-            b'a' + nibble - 10
-        };
-        value >>= 4;
-    }
-    if let Ok(text) = core::str::from_utf8(&buf[..digits.min(buf.len())]) {
-        serial_write(text);
-    }
-}
-
-fn write_dec(mut value: usize) {
-    let mut buf = [0u8; 20];
-    let mut index = buf.len();
-    if value == 0 {
-        serial_write("0");
-        return;
-    }
-    while value > 0 {
-        index -= 1;
-        buf[index] = b'0' + (value % 10) as u8;
-        value /= 10;
-    }
-    if let Ok(text) = core::str::from_utf8(&buf[index..]) {
-        serial_write(text);
-    }
-}

@@ -4,6 +4,7 @@ use crate::drivers::block::{self, BlockDeviceInfo, BlockError};
 use crate::drivers::pci::{self, PciBar, PciDevice};
 use crate::memory::pmm::{get_pmm, PhysicalAddress};
 use crate::memory::vmm;
+use crate::serial::{write_dec, write_hex};
 use crate::serial_write;
 
 const AHCI_CLASS: u8 = 0x01;
@@ -783,32 +784,3 @@ fn write_pci_addr(dev: PciDevice) {
     write_hex(dev.function as u64, 1);
 }
 
-fn write_hex(mut value: u64, digits: usize) {
-    let mut buffer = [0u8; 16];
-    let count = digits.min(buffer.len());
-    for index in (0..count).rev() {
-        let digit = (value & 0xf) as u8;
-        buffer[index] = if digit < 10 {
-            b'0' + digit
-        } else {
-            b'a' + digit - 10
-        };
-        value >>= 4;
-    }
-    serial_write(core::str::from_utf8(&buffer[..count]).unwrap_or("?"));
-}
-
-fn write_dec(mut value: u64) {
-    if value == 0 {
-        serial_write("0");
-        return;
-    }
-    let mut buffer = [0u8; 20];
-    let mut index = buffer.len();
-    while value != 0 {
-        index -= 1;
-        buffer[index] = b'0' + (value % 10) as u8;
-        value /= 10;
-    }
-    serial_write(core::str::from_utf8(&buffer[index..]).unwrap_or("?"));
-}

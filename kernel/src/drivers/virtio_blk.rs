@@ -367,19 +367,4 @@ unsafe fn write_u64(addr: usize, value: u64) {
     core::ptr::write_volatile(addr as *mut u64, value);
 }
 
-fn write_dec(mut value: u64) {
-    let mut buf = [0u8; 20];
-    let mut index = buf.len();
-    if value == 0 {
-        crate::serial_write("0");
-        return;
-    }
-    while value > 0 {
-        index -= 1;
-        buf[index] = b'0' + (value % 10) as u8;
-        value /= 10;
-    }
-    if let Ok(text) = core::str::from_utf8(&buf[index..]) {
-        crate::serial_write(text);
-    }
-}
+use crate::serial::write_dec;

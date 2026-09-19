@@ -1,6 +1,7 @@
 use crate::drivers::pci::{self, PciBar, PciDevice};
 use crate::drivers::registry::{self, DeviceClass};
 use crate::memory::vmm;
+use crate::serial::{write_dec, write_hex, write_hex16, write_hex8, write_mac};
 use crate::serial_write;
 
 const PCI_CLASS_NETWORK: u8 = 0x02;
@@ -107,13 +108,13 @@ pub fn init() {
         serial_write("[NET] no PCI network controller detected\r\n");
     } else {
         serial_write("[NET] discovery ready nics=");
-        write_dec(total);
+        write_dec(total as u64);
         serial_write(" supported=");
-        write_dec(supported);
+        write_dec(supported as u64);
         serial_write(" mmio-ready=");
-        write_dec(mmio_ready);
+        write_dec(mmio_ready as u64);
         serial_write(" mac-ready=");
-        write_dec(mac_ready);
+        write_dec(mac_ready as u64);
         serial_write(" stack=not-implemented\r\n");
     }
 }
@@ -234,69 +235,6 @@ fn write_pci_addr(dev: PciDevice) {
     write_hex(dev.function as u64, 1);
 }
 
-fn write_hex8(value: u8) {
-    write_hex(value as u64, 2);
-}
-
-fn write_hex16(value: u16) {
-    write_hex(value as u64, 4);
-}
-
-fn write_hex(mut value: u64, digits: usize) {
-    let mut buf = [0u8; 16];
-    let mut index = digits.min(buf.len());
-    while index > 0 {
-        index -= 1;
-        let nibble = (value & 0xF) as u8;
-        buf[index] = if nibble < 10 {
-            b'0' + nibble
-        } else {
-            b'a' + nibble - 10
-        };
-        value >>= 4;
-    }
-    if let Ok(text) = core::str::from_utf8(&buf[..digits.min(buf.len())]) {
-        serial_write(text);
-    }
-}
-
-fn write_dec(mut value: usize) {
-    let mut buf = [0u8; 20];
-    let mut index = buf.len();
-    if value == 0 {
-        serial_write("0");
-        return;
-    }
-    while value > 0 {
-        index -= 1;
-        buf[index] = b'0' + (value % 10) as u8;
-        value /= 10;
-    }
-    if let Ok(text) = core::str::from_utf8(&buf[index..]) {
-        serial_write(text);
-    }
-}
-
 fn read32(base: usize, offset: usize) -> u32 {
     unsafe { core::ptr::read_volatile((base + offset) as *const u32) }
-}
-
-fn write_mac(ral: u32, rah: u32) {
-    let bytes = [
-        (ral & 0xFF) as u8,
-        ((ral >> 8) & 0xFF) as u8,
-        ((ral >> 16) & 0xFF) as u8,
-        ((ral >> 24) & 0xFF) as u8,
-        (rah & 0xFF) as u8,
-        ((rah >> 8) & 0xFF) as u8,
-    ];
-
-    let mut index = 0usize;
-    while index < bytes.len() {
-        if index != 0 {
-            serial_write(":");
-        }
-        write_hex(bytes[index] as u64, 2);
-        index += 1;
-    }
 }

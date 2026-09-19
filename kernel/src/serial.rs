@@ -34,3 +34,71 @@ pub fn serial_write(s: &str) {
         serial_write_byte(byte);
     }
 }
+
+/// Write `value` as `digits` lowercase hex digits (zero-padded, no `0x`).
+pub fn write_hex(mut value: u64, digits: usize) {
+    let mut buf = [0u8; 16];
+    let width = digits.min(buf.len());
+    let mut index = width;
+    while index > 0 {
+        index -= 1;
+        let nibble = (value & 0xF) as u8;
+        buf[index] = if nibble < 10 {
+            b'0' + nibble
+        } else {
+            b'a' + nibble - 10
+        };
+        value >>= 4;
+    }
+    if let Ok(text) = core::str::from_utf8(&buf[..width]) {
+        serial_write(text);
+    }
+}
+
+/// Write an 8-bit value as two hex digits.
+#[inline]
+pub fn write_hex8(value: u8) {
+    write_hex(value as u64, 2);
+}
+
+/// Write a 16-bit value as four hex digits.
+#[inline]
+pub fn write_hex16(value: u16) {
+    write_hex(value as u64, 4);
+}
+
+/// Write an unsigned value in decimal.
+pub fn write_dec(mut value: u64) {
+    if value == 0 {
+        serial_write("0");
+        return;
+    }
+    let mut buf = [0u8; 20];
+    let mut index = buf.len();
+    while value > 0 {
+        index -= 1;
+        buf[index] = b'0' + (value % 10) as u8;
+        value /= 10;
+    }
+    if let Ok(text) = core::str::from_utf8(&buf[index..]) {
+        serial_write(text);
+    }
+}
+
+/// Write a MAC address from the e1000 RAL/RAH register pair as `aa:bb:...`.
+pub fn write_mac(ral: u32, rah: u32) {
+    let bytes = [
+        (ral & 0xFF) as u8,
+        ((ral >> 8) & 0xFF) as u8,
+        ((ral >> 16) & 0xFF) as u8,
+        ((ral >> 24) & 0xFF) as u8,
+        (rah & 0xFF) as u8,
+        ((rah >> 8) & 0xFF) as u8,
+    ];
+    for (index, byte) in bytes.iter().enumerate() {
+        if index != 0 {
+            serial_write(":");
+        }
+        write_hex8(*byte);
+    }
+}
