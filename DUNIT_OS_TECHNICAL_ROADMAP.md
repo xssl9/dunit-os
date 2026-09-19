@@ -622,9 +622,232 @@ src/mman/, src/fs/        native VM/VFS mappings
 
 **Общий результат M6:** native Dunit-linked C programs и SDK без Linux kernel ABI. **Критерий завершения:** reproducible `x86_64-dunit` sysroot; static hello/args/env/file/malloc/spawn/thread suites проходят в QEMU; persistence case переживает power cycle; unsupported POSIX surface документирован. **Главные риски:** скрытые Linux assumptions, слишком ранняя заморозка ABI, некорректный TLS, попытка одновременно реализовать signals/fork/ldso. **Меры:** static-first, capability profiles, узкий adapter, фазовые test gates и контролируемый upstream delta.
 
-### M7 — platform services и ecosystem (later, часть можно параллельно после M1)
+### M7 — networking, platform services и ecosystem (later, часть можно параллельно после M1)
 
-- [ ] Networking: E1000 RX/TX rings -> Ethernet/ARP/IPv4/ICMP/UDP -> TCP/DNS/DHCP -> native socket handles.
+#### M7.1. Честное текущее состояние networking
+
+`kernel/src/drivers/net.rs` сейчас выполняет только PCI discovery: распознаёт E1000/RTL8139/legacy VirtIO IDs, для E1000 временно отображает MMIO, читает status и MAC, затем снимает mapping. RX/TX descriptors, packet buffers, interrupts, Ethernet frames и protocol stack отсутствуют; serial log прямо печатает `packet-io=not-implemented` и `stack=not-implemented`. `userspace/system_apps/gui_stats` также корректно показывает `Network (discovery only)`. Поэтому наличие `net0` в registry не считается сетевой поддержкой.
+
+Первый reference target — **E1000 в QEMU**. VirtIO-net добавляется после доказанного end-to-end packet path и modern VirtIO transport; RTL8139 остаётся later/compatibility, а не параллельным отвлечением.
+
+#### M7.2. Целевая архитектура: driver в kernel, stack в `netd`
+
+```text
+applications / browser network service / package client
+                    |
+          native Dunit socket protocol
+                    |
+             libdunit / musl adapter
+                    |
+          IPC + readiness event handles
+                    |
+        netd (userspace network service)
+  Ethernet, ARP/NDP, IP, ICMP, UDP, TCP, DHCP, DNS
+                    |
+      shared bounded RX/TX packet queues
+                    |
+ Green Tea Kernel NIC driver + IRQ + DMA/IOMMU policy
+                    |
+              E1000 / VirtIO-net
+```
+
+Green Tea Kernel отвечает только за PCI/MMIO, DMA-safe memory, NIC reset/configuration, IRQ moderation, bounded descriptor rings, packet ownership и capability-gated transfer в `netd`. IP, TCP, DNS и policy не должны разрастаться внутри ядра. `netd` — supervised privileged service; приложения не получают MMIO, DMA buffers или raw Ethernet по умолчанию.
+
+- [ ] Добавить `NET_DEVICE`/`PACKET_QUEUE` handles с rights `RX`, `TX`, `CONTROL`, `RAW`, `TRANSFER`.
+- [ ] Передавать пакеты между driver и `netd` через bounded shared rings и event handles, без syscall на каждый byte.
+- [ ] Зафиксировать ownership state каждого buffer: `DRIVER_RX -> NETD -> FREE` и `APP/NETD_TX -> DRIVER -> COMPLETE`.
+- [ ] При падении `netd` kernel останавливает queue, отзывает mappings, сбрасывает NIC и позволяет service manager запустить его заново.
+- [ ] Raw packet capability выдавать только diagnostics/network services; обычное приложение получает socket endpoint с ограниченными правами.
+- [ ] Конфигурацию интерфейсов и policy хранить вне kernel; driver не знает DHCP, DNS, routes или proxy.
+
+**Цель:** модульный native stack без Linux network ABI. **Причина:** TCP/DNS в kernel усложнят recovery, безопасность и независимое обновление. **Подсистемы:** PCI, VMM/DMA, interrupts, IPC/shared memory, handles, init, `netd`. **Зависимости:** M1 handles/events/shared VM и service supervision. **Результат:** перезапускаемый userspace stack над узким packet I/O backend. **Готовность:** crash/restart `netd` не повреждает kernel и возвращает интерфейс в рабочее состояние. **Риски:** копирование и context-switch overhead; решать shared rings/batching, не переносом всего stack в kernel.
+
+#### M7.3. N0 — E1000 packet I/O foundation
+
+- [ ] Реализовать hardware reset, EEPROM/RAL-MAC selection, link state и documented register initialization.
+- [ ] Выделять физически пригодные DMA regions через общий DMA API; не использовать произвольные virtual pointers как bus addresses.
+- [ ] Реализовать RX/TX descriptor rings, head/tail management, buffer recycling и memory barriers.
+- [ ] Настроить MSI/MSI-X при наличии, с fallback на legacy interrupt; polling разрешён только как диагностический режим.
+- [ ] Добавить interrupt moderation/NAPI-like bounded drain без копирования Linux API.
+- [ ] Обработать link up/down, queue stall, malformed/oversized frames, ring exhaustion и reset recovery.
+- [ ] Публиковать counters: packets/bytes, drops by reason, checksum errors, queue full, resets, link transitions.
+
+**Результат:** driver отправляет и принимает реальные Ethernet frames. **Готовность:** двунаправленный frame loop через QEMU network backend; 10-minute flood не зависает и не течёт. **Тесты:** ring wrap, RX starvation, TX completion, link toggle, invalid length, interrupt storm, forced reset. **Риски:** DMA corruption и races; guard regions, ownership assertions и bounded descriptors обязательны.
+
+#### M7.4. N1 — link/network layers: Ethernet, ARP, IPv4 и ICMP
+
+- [ ] Ethernet II parser/builder: destination/source MAC, EtherType, minimum/maximum frame size и padding.
+- [ ] Drop неизвестных/повреждённых frames до глубокого parsing; каждый length проверять до чтения header.
+- [ ] ARP cache со states `INCOMPLETE/REACHABLE/STALE`, bounded entries, retry/expiry и защита от бесконтрольного poisoning.
+- [ ] IPv4 validation: version/IHL, total length, header checksum, TTL, protocol, source/destination и interface ownership.
+- [ ] Реализовать routing table с connected/default routes и longest-prefix match; не зашивать один gateway в код.
+- [ ] Зафиксировать fragmentation policy: v1 может не фрагментировать TX, но обязан корректно вернуть MTU error; RX reassembly — bounded по bytes/fragments/time либо явно later.
+- [ ] ICMPv4 echo request/reply и необходимые destination-unreachable/time-exceeded сообщения; rate limiting обязателен.
+- [ ] Реализовать loopback как логический interface без обращения к физическому NIC.
+
+**Результат:** статически настроенный Dunit host отвечает на ping и пингует gateway. **Готовность:** ARP resolution + ICMP echo проходят при cache miss/hit/expiry; malformed packets не валят `netd`. **Тесты:** bad checksum/length/IHL, TTL zero, unknown EtherType/protocol, ARP timeout, route miss, MTU boundary, packet fuzzing. **Риски:** parser vulnerabilities и unbounded reassembly; использовать checked cursor API и жёсткие budgets.
+
+#### M7.5. N2 — UDP, DHCPv4 и DNS resolver
+
+- [ ] UDP demultiplexing по local address/port, ephemeral port allocation, checksum и bounded receive queues.
+- [ ] Native datagram endpoint: bind/connect/send-to/receive-from, nonblocking mode, timeout и readiness events.
+- [ ] DHCPv4 state machine `INIT -> SELECTING -> REQUESTING -> BOUND -> RENEWING/REBINDING`, lease timers и link-change reset.
+- [ ] Валидировать DHCP offers/options; применять address, prefix, gateway и DNS atomically, с rollback на ошибке.
+- [ ] Сохранять lease только как optimization; после reboot/link change проверять его заново и не считать вечным.
+- [ ] DNS stub resolver: A/AAAA/CNAME, UDP query IDs, compression-pointer bounds, retry/timeout, bounded TTL cache и TCP fallback для truncated replies.
+- [ ] Источники конфигурации: static system profile, DHCP и user/admin override с явно определённым precedence.
+
+**Результат:** интерфейс получает адрес автоматически, разрешает имя и обменивается UDP datagrams. **Готовность:** DNS lookup не требует hardcoded server; lease renew и timeout корректны. **Тесты:** DHCP loss/NAK/renew, duplicate address response, DNS malformed compression, NXDOMAIN, timeout/retry/cache expiry, UDP queue overflow. **Риски:** spoofing и parser loops; transaction validation, budgets и privileges.
+
+#### M7.6. N3 — TCP transport
+
+- [ ] Реализовать отдельную TCP state machine для active/passive open и states от `CLOSED` до `TIME_WAIT`.
+- [ ] Проверять 4-tuple, sequence/acknowledgement numbers, flags, header length, checksum и receive window.
+- [ ] Реализовать SYN retransmission, data retransmission, RTT/RTO estimator, duplicate ACK handling и bounded retry policy.
+- [ ] Добавить sliding send/receive windows, out-of-order queue с memory limit, FIN/RST handling и half-close.
+- [ ] Начать с простого проверяемого congestion control (например, Reno-подобного); congestion control не может отсутствовать в Internet-facing release.
+- [ ] Поддержать listen backlog, accept queue, ephemeral ports, `SO_REUSEADDR`, keepalive policy и `TCP_NODELAY`; редкие options later.
+- [ ] Все timers вести от monotonic clock и обрабатывать wrap/large jumps детерминированно.
+
+**Результат:** надёжный byte stream для локальных и внешних соединений. **Готовность:** клиент и сервер передают multi-megabyte stream с искусственными loss/reorder/duplication; connection teardown не течёт. **Тесты:** handshake timeout, simultaneous close, reset, zero window, retransmission, reordered segments, TIME_WAIT pressure, SYN/backlog exhaustion. **Риски:** сложность TCP и resource exhaustion; state/property tests, per-socket/global quotas и сначала один congestion algorithm.
+
+#### M7.7. N4 — native Dunit socket API и event model
+
+Native API является service protocol/object model, а не копией Linux syscall table:
+
+```text
+net.open(family, type, protocol) -> socket handle
+net.bind(handle, endpoint)
+net.connect(handle, endpoint)
+net.listen(handle, backlog)
+net.accept(handle) -> socket handle + peer
+net.send/receive(handle, buffers, flags)
+net.send_to/receive_from(handle, endpoint, buffers, flags)
+net.shutdown(handle, direction)
+net.get/set_option(handle, typed option)
+resolver.lookup(name, family, flags) -> address list
+event.wait([socket readiness, IPC, timer, file], deadline)
+```
+
+- [ ] Версионировать socket/resolver protocol независимо от TCP implementation.
+- [ ] Представлять IPv4/IPv6 endpoints typed structures, не строками внутри protocol.
+- [ ] Определить partial I/O, EOF, reset, timeout, would-block и cancellation semantics.
+- [ ] Интегрировать readiness в общий Dunit event wait; не добавлять busy polling в GUI/browser.
+- [ ] Разделить права `CONNECT`, `BIND_LOW_PORT`, `LISTEN`, `RAW`, `CONFIGURE_INTERFACE` и `OBSERVE_ALL`.
+- [ ] Добавить per-process quotas на sockets, queued bytes, DNS requests и listening backlog.
+- [ ] Поддержать capability revocation и deterministic errors при рестарте `netd`.
+
+**Результат:** Rust/Dunit-native приложения используют сеть без POSIX и без доступа к NIC. **Готовность:** echo client/server работают через public `libdunit` API; один зависший клиент не блокирует `netd`. **Тесты:** readiness edge cases, close during wait, partial send, quota denial, handle transfer, service restart. **Риски:** premature ABI freeze; сначала versioned protocol + conformance suite.
+
+#### M7.8. N5 — подключение к Dunit musl
+
+```text
+POSIX C API (`socket`, `connect`, `send`, `poll`, `getaddrinfo`)
+        -> Dunit musl adapter
+        -> libdunit native socket/resolver protocol
+        -> netd
+```
+
+- [ ] Реализовать musl mappings для `socket/bind/connect/listen/accept`, send/receive family, `shutdown` и close.
+- [ ] Переводить POSIX `sockaddr`, flags/options и errors в versioned Dunit types; kernel и `netd` не принимают Linux structs.
+- [ ] Реализовать blocking/nonblocking behaviour поверх readiness events, включая timeout и interruption policy.
+- [ ] Подключить `poll`/`pselect`-подобный libc слой к общему Dunit event wait, чтобы socket, pipe, IPC и timer ожидались вместе.
+- [ ] Перенести `getaddrinfo/getnameinfo` на resolver protocol; не заставлять каждое приложение самостоятельно разбирать DNS.
+- [ ] Документировать supported socket options и возвращать `ENOPROTOOPT` для неподдерживаемых, а не fake success.
+
+**Результат:** одна и та же native сеть обслуживает Dunit-native и C/POSIX applications. **Зависимости:** M6 static runtime + N4 API. **Готовность:** статические C echo/DNS/HTTP clients проходят без Linux ABI. **Тесты:** POSIX error mapping, IPv4/IPv6 address conversion, nonblocking connect, poll timeout/readiness, resolver concurrency. **Риски:** расхождение POSIX и native semantics; contract tests запускаются против обоих APIs.
+
+#### M7.9. N6 — TLS, HTTP и путь к GUI-браузеру
+
+TLS и HTTP не помещаются в kernel или NIC driver. Они работают в отдельном userspace network service браузера либо в общей high-level библиотеке:
+
+```text
+browser-ui (GUI client)
+    |
+browser content processes
+    |
+browser-network-service
+  URL policy, proxy, cache, cookies, HTTP, TLS, certificates
+    |
+musl sockets или native Dunit socket API
+    |
+netd -> NIC driver
+```
+
+- [ ] До TLS предоставить cryptographically secure entropy, корректное realtime clock и обновляемое read-only certificate store.
+- [ ] Портировать проверенную TLS/crypto library; не писать собственную криптографию как часть network stack.
+- [ ] Ввести trust-store update/version/rollback и hostname/certificate validation tests.
+- [ ] Реализовать HTTP/1.1 client с redirects, chunked/content-length framing, compression limits и connection reuse; HTTP/2 позже поверх доказанного TLS/TCP.
+- [ ] Вынести browser networking в отдельный sandboxed process; renderer/content process не получает unrestricted sockets.
+- [ ] Network service применяет origin/proxy/download policy, quotas и передаёт браузеру responses через IPC/shared buffers.
+- [ ] Persistent browser cache/cookies живут в user data directories и используют size limits/atomic updates; это не состояние `netd`.
+- [ ] GUI Browser является обычным GUI client: создаёт surfaces через GUI Server и не получает framebuffer/input/network master capabilities.
+- [ ] Сначала сделать headless HTTP fetch + minimal GUI response viewer; полноценный HTML/CSS/JS browser engine — отдельный поздний проект.
+
+**Результат:** архитектура сети изначально пригодна для браузера, но browser engine не блокирует network stack. **Готовность первого browser-network slice:** GUI-приложение просит sandboxed network service загрузить HTTPS resource, получает body/status через IPC и отображает результат через GUI Server. **Тесты:** invalid/expired/wrong-host certificate, redirect loop, truncated/chunked response, decompression bomb limit, cache corruption, network-service crash/restart. **Риски:** огромный security surface; process isolation, established crypto/TLS, strict parsers и no ambient network access.
+
+#### M7.10. N7 — IPv6 и multi-interface (после стабильного IPv4 vertical slice)
+
+- [ ] Ethernet multicast, IPv6 header validation, ICMPv6, Neighbor Discovery и Duplicate Address Detection.
+- [ ] Link-local addresses, SLAAC, router advertisements и DNS configuration; DHCPv6 только по подтверждённой необходимости.
+- [ ] IPv6 UDP/TCP через тот же transport/socket API, без отдельного application path.
+- [ ] Несколько interfaces, per-interface addresses/routes/DNS, route metrics и link failover.
+- [ ] Happy Eyeballs policy реализовать в resolver/client layer после стабильного dual-stack.
+
+**Готовность:** IPv4-only, IPv6-only и dual-stack tests используют одни application APIs. **Риски:** преждевременное удвоение scope; packet/address abstractions проектируются dual-stack заранее, реализация IPv6 следует после N1–N6.
+
+#### M7.11. Network configuration, observability и security
+
+Предлагаемое состояние:
+
+```text
+/system/share/network/defaults.toml       immutable defaults
+/system/services/netd.toml                service manifest/capabilities
+/users/<uid>/config/network/              allowed user preferences
+/var/lib/netd/                            leases and bounded service state
+/var/log/netd/                            bounded/rotated diagnostics
+/run/netd/                                volatile endpoints/status
+```
+
+- [ ] Schema-versioned static/DHCP configuration с validate -> stage -> atomic apply -> rollback.
+- [ ] Status API: interfaces, addresses, routes, DNS, link state и counters без раскрытия чужого traffic.
+- [ ] Diagnostic tools: `ip`-подобный status, route, ping, DNS lookup, TCP connect и privileged bounded packet capture.
+- [ ] Default deny для raw sockets, interface configuration и low ports; application manifests запрашивают network scopes.
+- [ ] Ограничить packet sizes, fragment queues, socket buffers, DNS cache, TCP states и log volume.
+- [ ] Все parsers fuzz/property-test; входной packet никогда не приводит к panic всего `netd`, kernel или desktop.
+- [ ] Не заявлять firewall/VPN как готовые до появления routing/hooks/key storage; предусмотреть policy hooks без ранней реализации сложного framework.
+
+#### M7.12. Network milestone order и acceptance matrix
+
+```text
+N0 E1000 RX/TX
+ -> N1 Ethernet/ARP/IPv4/ICMP
+ -> N2 UDP/DHCP/DNS
+ -> N3 TCP
+ -> N4 native sockets/events
+ -> N5 musl sockets
+ -> N6 TLS/HTTP/browser-network slice
+ -> N7 IPv6/multi-interface
+```
+
+N4 API проектируется параллельно N1–N3, но фиксируется только после работающих semantics. N5 musl adapter и N6 HTTP tests можно разрабатывать против host mock/reference server, затем переключить на `netd` conformance endpoint.
+
+Обязательная автоматическая матрица через `tools/qemu_test.py`:
+
+- QEMU E1000: link/reset, ARP, ping, UDP, DHCP, DNS, TCP client/server;
+- deterministic isolated test network, без зависимости CI от публичного Internet;
+- loss/reorder/duplicate/corruption/latency injection;
+- malformed packet corpus и bounded fuzz runs;
+- `netd` crash/restart и NIC reset во время активных sockets;
+- static musl C socket client рядом с native Rust client;
+- HTTPS test против локального deterministic server и тестового trust root;
+- GUI response viewer через GUI Server без прямых network/display privileges;
+- soak: множество connect/close, DNS cache expiry, TCP retransmission и memory/handle leak accounting.
+
+**Критерий завершения networking v1:** E1000 выполняет реальный packet I/O; `netd` получает DHCP address, резолвит DNS и держит TCP stream; native и static-musl clients проходят одинаковые conformance cases; локальный HTTPS resource загружается через sandboxed browser-network service; reboot сохраняет только разрешённую configuration/state; malformed traffic и падение `netd` не рушат kernel/GUI. Публичный Internet smoke допустим как optional manual/release test, но не заменяет deterministic CI.
+
+#### M7.13. Остальные platform services
+
 - [ ] Audio: HDA discovery/DMA -> mixer service -> per-app streams/permissions.
 - [ ] USB: xHCI enumeration -> descriptors/endpoints -> HID keyboard/mouse -> mass storage; hotplug events.
 - [ ] Power: ACPI tables, reboot/poweroff, battery/thermal, затем suspend/resume.
@@ -673,7 +896,7 @@ Upstream-ориентиры для реализации и проверки assu
 - **M4:** feature parity и config reload без kernel GUI code.
 - **M5:** BIOS/UEFI installed root + content/config persistence + recovery test.
 - **M6:** static C hello/file/malloc/thread suite на Dunit musl fork.
-- **M7:** каждый service имеет end-to-end I/O и permission test, не только discovery.
+- **M7 networking v1:** E1000 packet I/O -> `netd` DHCP/DNS/TCP -> native sockets -> static-musl client -> local HTTPS browser-network slice проходит end-to-end; остальные services имеют собственные I/O и permission gates, не только discovery.
 
 ## 21. Dunit Minimal и Dunit DWM images
 
@@ -690,7 +913,7 @@ M0 baseline
  |                    `--------------> M6 musl static -> pthread -> dynamic later
  |- M2 protocol/headless tests ------> M3
  `- M5 filesystem/installer ---------> M4 config persistence + M6 disk userspace
-                                      `-> M7 packages/services
+                                      `-> M7 netd/packages/services
 ```
 
 Можно параллельно:
@@ -748,6 +971,8 @@ M0 baseline
 - IPC: queue full, client crash, endpoint close, rights transfer, shared buffer lifecycle;
 - GUI: headless protocol suite + QEMU screenshot markers + interactive event injection;
 - libc: static C conformance tiers; dynamic tier отдельно;
+- network: E1000/link -> ARP/ICMP -> DHCP/DNS/UDP/TCP -> native/musl sockets -> local TLS/HTTP; loss/reorder/malformed traffic и `netd` restart;
+- browser-network: sandbox/capability denial, test trust root, certificate/redirect/framing/cache failures, GUI response viewer через GUI Server;
 - longevity: 10 min smoke per PR, multi-hour nightly stress.
 
 Обязательные gates milestone:
@@ -778,10 +1003,10 @@ M0 baseline
 kernel/
   arch/x86_64/  memory/  process/  ipc/  vfs/  drivers/  abi/
 userspace/
-  init/  services/gui-server/  services/inputd/  services/audiod/
-  dwm/  ui-runtime/  shell/  terminal/  apps/  libdunit/
+  init/  services/gui-server/  services/inputd/  services/netd/  services/audiod/
+  services/browser-network/  dwm/  ui-runtime/  shell/  terminal/  apps/  libdunit/
 protocols/
-  gui-v1/  service-v1/  package-v1/
+  gui-v1/  net-v1/  resolver-v1/  service-v1/  package-v1/
 filesystems/dunitfs/
 toolchains/
   dunit-musl/  sysroot/  wrappers/  cmake/  meson/
@@ -799,6 +1024,6 @@ tools/qemu_test.py
 
 ## 30. Итоговая целевая архитектура Dunit Desktop OS
 
-Завершённая архитектура — не Linux distribution и не GUI внутри kernel. Green Tea Kernel предоставляет собственные Dunit objects, ABI, scheduling, VM, IPC, VFS и device primitives. `init` запускает userspace services. GUI Server единолично владеет display/input handles и композитит shared surfaces. Независимый Dunit DWM задаёт desktop policy через Dunit UI Runtime и versioned DUI/DSS/TOML. Установленная система грузит programs/config/data с проверяемой DunitFS, а Dunit musl fork предоставляет source portability поверх Dunit ABI.
+Завершённая архитектура — не Linux distribution и не GUI внутри kernel. Green Tea Kernel предоставляет собственные Dunit objects, ABI, scheduling, VM, IPC, VFS и device primitives. `init` запускает userspace services. GUI Server единолично владеет display/input handles и композитит shared surfaces. Независимый Dunit DWM задаёт desktop policy через Dunit UI Runtime и versioned DUI/DSS/TOML. Kernel NIC drivers отдают bounded packet queues отдельному `netd`; native и musl socket APIs сходятся на одном versioned network protocol. Будущий browser использует sandboxed browser-network service для TLS/HTTP и остаётся обычным GUI client без raw display/network privileges. Установленная система грузит programs/config/data с проверяемой DunitFS, а Dunit musl fork предоставляет source portability поверх Dunit ABI.
 
 Ближайший правильный порядок: **M0 honest baseline -> M1 preemption/threads/blocking IPC/shared VM -> M3 GUI Server vertical slice**, параллельно **M2 protocol tests** и **M5 DunitFS/install v2**; затем **M4 DWM parity** и **M6 static-first musl**. Это сохраняет видимый GUI прогресс, но не цементирует сегодняшние kernel hardcodes.
