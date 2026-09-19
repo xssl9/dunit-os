@@ -726,8 +726,8 @@ pub fn get_pid() -> u32 {
     syscall0(SYSCALL_GET_PID) as u32
 }
 
-pub fn kill(pid: u32) {
-    syscall1(SYSCALL_KILL_PROCESS, pid as usize);
+pub fn kill(pid: u32) -> isize {
+    syscall1(SYSCALL_KILL_PROCESS, pid as usize)
 }
 
 pub fn spawn(path: &str) -> isize {

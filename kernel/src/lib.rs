@@ -88,8 +88,12 @@ static mut HISTORY_LENS: [usize; 50] = [0; 50];
 static mut HISTORY_COUNT: usize = 0;
 static mut HISTORY_INDEX: usize = 0;
 static mut HISTORY_POSITION: isize = -1;
-static mut TERMINAL_CWD: [u8; 256] = [0; 256];
-static mut TERMINAL_CWD_LEN: usize = 0;
+static mut TERMINAL_CWD: [u8; 256] = {
+    let mut path = [0; 256];
+    path[0] = b'/';
+    path
+};
+static mut TERMINAL_CWD_LEN: usize = 1;
 static mut TERMINAL_DIR_ENTRIES: [fs::vfs::DirEntry; 32] = [fs::vfs::DirEntry::empty(); 32];
 
 /// Tiny fixed-capacity string builder for honest, measured boot lines.
@@ -148,9 +152,6 @@ fn terminal_set_cwd(path: &str) {
 
 fn terminal_cwd() -> &'static str {
     unsafe {
-        if TERMINAL_CWD_LEN == 0 {
-            terminal_set_cwd("/");
-        }
         core::str::from_utf8(&TERMINAL_CWD[..TERMINAL_CWD_LEN]).unwrap_or("/")
     }
 }
@@ -949,18 +950,11 @@ pub extern "C" fn kernel_main(
                                             core::str::from_utf8(&INPUT_BUFFER[..INPUT_LEN])
                                                 .unwrap_or("");
 
-                                        let commands = [
-                                            "help", "dufetch", "ls", "pwd", "cd", "mkdir", "touch",
-                                            "cat", "echo", "exec", "ps", "top", "uname", "date",
-                                            "whoami", "uptime", "free", "exit", "poweroff",
-                                            "shutdown", "devs", "blk", "blkread", "lspci", "usb",
-                                        ];
-
-                                        let mut matches: [&str; 22] = [""; 22];
+                                        let mut matches: [&str; 64] = [""; 64];
                                         let mut match_count = 0;
 
-                                        for &cmd in commands.iter() {
-                                            if cmd.starts_with(input) && match_count < 20 {
+                                        for &cmd in shell::COMMAND_NAMES {
+                                            if cmd.starts_with(input) && match_count < matches.len() {
                                                 matches[match_count] = cmd;
                                                 match_count += 1;
                                             }
@@ -1037,14 +1031,6 @@ pub extern "C" fn kernel_main(
         serial_write("[GUI-002] Framebuffer available\r\n");
         screen_log("[ OK ] Starting graphics subsystem", false);
 
-        serial_write("[GUI-003] Waiting for display stabilization\r\n");
-        for _ in 0..3000000 {
-            unsafe {
-                core::arch::asm!("pause");
-            }
-        }
-
-        serial_write("[GUI-004] Display stabilized\r\n");
         serial_write("[GUI-005] Getting framebuffer parameters\r\n");
 
         let fb_addr = fb.address as *mut u32;

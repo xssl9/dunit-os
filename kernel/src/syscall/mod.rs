@@ -1227,8 +1227,15 @@ fn sys_get_pid() -> i64 {
         .unwrap_or(0)
 }
 
-fn sys_kill_process(_pid: u32) -> i64 {
-    ENOSYS
+fn sys_kill_process(pid: u32) -> i64 {
+    if pid == 0 {
+        return EINVAL;
+    }
+    match crate::process::kill_process(crate::process::ProcessId(pid as u64), -9) {
+        Ok(true) => SMOKE_RETURN_MAGIC,
+        Ok(false) => 0,
+        Err(error) => process_error_to_errno(error),
+    }
 }
 
 fn resolve_exec_path(cwd: &str, path: &str) -> Result<String, i64> {

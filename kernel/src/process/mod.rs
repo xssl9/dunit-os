@@ -875,6 +875,49 @@ pub fn process_exists(pid: ProcessId) -> bool {
     process_record_index(table, pid).is_some()
 }
 
+/// Terminates a non-kernel process and leaves a waitable exit status for its
+/// parent. The current process uses the normal syscall escape path; a prepared
+/// or ready child can be marked dead without ever entering userspace.
+pub fn kill_process(pid: ProcessId, code: i32) -> Result<bool, ProcessError> {
+    if current_pid() == Some(pid) {
+        let process = current_process().ok_or(ProcessError::NoCurrentProcess)?;
+        if process.is_kernel {
+            return Err(ProcessError::InvalidUserContext);
+        }
+        PROCESS_EXIT_CODE.store(code, Ordering::SeqCst);
+        PROCESS_EXIT_KIND.store(0, Ordering::SeqCst);
+        PROCESS_EXIT_REQUESTED.store(true, Ordering::SeqCst);
+        return Ok(true);
+    }
+
+    let table = process_table_mut();
+    let index = process_record_index(table, pid).ok_or(ProcessError::NoSuchProcess)?;
+    let record = &mut table[index];
+    let process = record
+        .process
+        .as_mut()
+        .ok_or(ProcessError::ProcessNotPrepared)?;
+    if process.is_kernel {
+        return Err(ProcessError::InvalidUserContext);
+    }
+    if matches!(record.state, ProcessState::Dead | ProcessState::Reaped) {
+        return Err(ProcessError::NotRunnable);
+    }
+
+    let status = ProcessExitStatus::Exited(code);
+    let from = record.state;
+    process.exit(code);
+    record.state = ProcessState::Dead;
+    record.status = Some(status);
+    record.has_run = true;
+    crate::process::scheduler::remove(pid);
+    if let Some(ipc) = crate::ipc::get_ipc_manager() {
+        ipc.clear_messages(pid);
+    }
+    log_process_transition(pid, from, ProcessState::Dead, "kill");
+    Ok(false)
+}
+
 pub fn is_pid_runnable(pid: ProcessId) -> bool {
     let table = process_table_mut();
     let Some(index) = process_record_index(table, pid) else {

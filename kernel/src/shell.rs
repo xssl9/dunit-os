@@ -10,6 +10,14 @@ use crate::fs::vfs::{self, DirEntry, FileType, OpenFlags, VfsError};
 use crate::memory;
 use crate::process;
 
+/// Canonical command-name registry used by terminal discovery/autocomplete.
+pub const COMMAND_NAMES: &[&str] = &[
+    "help", "dufetch", "ls", "pwd", "cd", "mkdir", "touch", "cat", "echo", "rm",
+    "tree", "clear", "exec", "devs", "blk", "lsblk", "blkread", "blkwrite", "ahci",
+    "mkfs.dunit", "mount.dunit", "install.dunit", "lspci", "usb", "ps", "uname", "date",
+    "whoami", "uptime", "free", "top", "exit", "poweroff", "shutdown",
+];
+
 /// Output abstraction for command handlers. `write_str` is the only required
 /// method; color hints are optional and default to no-ops (the GUI line sink
 /// ignores them, the framebuffer console honours them).

@@ -247,6 +247,20 @@ fn exercise_repeated_spawn_wait() {
     libdunit::println("runtime_stress: repeated spawn OK");
 }
 
+fn exercise_kill_prepared_child() {
+    libdunit::println("runtime_stress: kill start");
+    let child = libdunit::spawn("elf_demo");
+    if child < 0 {
+        fail("spawn child for kill", 65);
+    }
+    let child = child as u32;
+    if libdunit::kill(child) != 0 {
+        fail("kill prepared child", 66);
+    }
+    wait_exited(child, -9, "wait killed child");
+    libdunit::println("runtime_stress: kill OK");
+}
+
 fn exercise_fault_after_normal_apps() {
     libdunit::println("runtime_stress: fault start");
     let child = libdunit::spawn("fault_pf");
@@ -269,6 +283,7 @@ pub extern "C" fn _start() -> ! {
     exercise_resumable_roundtrip();
     exercise_ipc_roundtrip();
     exercise_repeated_spawn_wait();
+    exercise_kill_prepared_child();
     exercise_fault_after_normal_apps();
     libdunit::println("runtime_stress: OK");
     libdunit::exit(0);

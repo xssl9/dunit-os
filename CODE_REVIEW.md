@@ -126,7 +126,7 @@
 
 ## 🟡 Костыли и затычки
 
-- [ ] **Обманный boot-лог (фейковые данные).**
+- [x] **Обманный boot-лог (фейковые данные).**
   `kernel/src/lib.rs`: `kernel_main` печатает неизмеряемые строки как факты:
   `"[ OK ] CPU features: SSE, SSE2, AVX available"`, `"Memory: 512MB RAM detected"`,
   `"Window manager: 5 applications registered"`, `"7 processes running"`. Ни одно из
@@ -168,11 +168,11 @@
   `kernel/src/memory/vmm.rs`: `map_mmio_region` только двигает `NEXT_MMIO_VIRT` вперёд
   (bump), освобождение не предусмотрено. При многократном ремапе — исчерпание диапазона.
 
-- [ ] **`terminal_cwd()` мутирует состояние в геттере.**
+- [x] **`terminal_cwd()` мутирует состояние в геттере.**
   `kernel/src/lib.rs`: функция-геттер изменяет `static mut TERMINAL_CWD`. Побочный
   эффект в геттере — источник трудноуловимых багов.
 
-- [ ] **Захардкоженный автокомплит из 22 команд.**
+- [x] **Захардкоженный автокомплит из 22 команд.**
   `kernel/src/lib.rs`: массив команд для автодополнения задан вручную и расходится с
   реальным набором команд. README сам отмечает цель «сделать команды менее
   kernel-hardcoded». Нужно: единый реестр команд.
@@ -189,7 +189,7 @@
   `Makefile`: ~30 почти идентичных блоков `cd ... cargo build ... && cp ...` на каждое
   приложение. Нужно: `foreach` по списку имён приложений.
 
-- [ ] **`sys_kill_process` = ENOSYS, но `libdunit::kill` присутствует.**
+- [x] **`sys_kill_process` = ENOSYS, но `libdunit::kill` присутствует.**
   Userspace выставляет `kill()` (`userspace/libdunit/src/lib.rs`), которого ядро не
   поддерживает — тихий no-op/ошибка для вызывающего. Согласовать ABI.
 
@@ -197,7 +197,7 @@
 
 ## ⚪ Slop, мёртвый код, шум
 
-- [ ] **`kernel/src/main.rs` — мёртвая заглушка.**
+- [x] **`kernel/src/main.rs` — мёртвая заглушка.**
   Оротанный файл: VGA-текст `"DUNIT OS WORKS!"` и пустой `#[panic_handler] fn panic()
   -> ! { loop {} }`. Реальная точка входа — `kernel_main` в `lib.rs`. Файл путает.
   Удалить.
@@ -207,15 +207,15 @@
   `draw_text_direct`, `draw_colored_text`, `draw_error_text_old`, внутреннем
   `draw_text` и `draw_char`. Нужно: единая таблица шрифта.
 
-- [ ] **Мёртвые функции отрисовки.**
+- [x] **Мёртвые функции отрисовки.**
   `kernel/src/lib.rs`: `draw_error_text_old`, `draw_char`, `draw_text`, `draw_window`
   не используются (или дублируют активные пути). Удалить.
 
-- [ ] **Отладочный серийный спам TERM-001..007.**
+- [x] **Отладочный серийный спам TERM-001..007.**
   `kernel/src/lib.rs`: маркеры `TERM-001`..`TERM-007` в серийный порт. Убрать/спрятать
   за debug-флагом.
 
-- [ ] **Busy-wait задержки `for _ in 0..500000 { pause }`.**
+- [x] **Busy-wait задержки `for _ in 0..500000 { pause }`.**
   `kernel/src/lib.rs`: «магические» циклы ожидания. Заменить на таймер/явную задержку.
 
 - [x] **Дублирование `serial_write`.**
