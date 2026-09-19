@@ -367,7 +367,13 @@ fn size_bar64(dev: PciDevice, index: u8) -> u64 {
     write_config(dev.bus, dev.device, dev.function, high_offset, 0xFFFF_FFFF);
     let probe_low = read_config(dev.bus, dev.device, dev.function, low_offset);
     let probe_high = read_config(dev.bus, dev.device, dev.function, high_offset);
-    write_config(dev.bus, dev.device, dev.function, high_offset, original_high);
+    write_config(
+        dev.bus,
+        dev.device,
+        dev.function,
+        high_offset,
+        original_high,
+    );
     write_config(dev.bus, dev.device, dev.function, low_offset, original_low);
 
     let masked = ((probe_high as u64) << 32) | ((probe_low & 0xFFFF_FFF0) as u64);
@@ -441,4 +447,3 @@ fn write_pci_addr(dev: PciDevice) {
     serial_write(".");
     write_hex(dev.function as u64, 1);
 }
-

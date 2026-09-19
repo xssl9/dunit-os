@@ -6,7 +6,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
-use crate::memory::vmm::{ActiveAddressSpace, AddressSpace, PageFlags, VirtualAddress};
+use crate::memory::vmm::{ActiveAddressSpace, AddressSpace};
+#[cfg(feature = "boot-smoke-tests")]
+use crate::memory::vmm::{PageFlags, VirtualAddress};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProcessId(pub u64);
@@ -168,7 +170,12 @@ pub struct Process {
     pub entry_envp: usize,
     fd_table: BTreeMap<ProcessFd, FdEntry>,
     next_fd: ProcessFd,
+    next_mmap_addr: usize,
 }
+
+const USER_MMAP_BASE: usize = 0x0000_0010_0000_0000;
+const USER_MMAP_END: usize = 0x0000_7000_0000_0000;
+const USER_PAGE_SIZE: usize = 4096;
 
 impl Process {
     /// Creates an isolated userspace process.
@@ -195,6 +202,7 @@ impl Process {
             entry_envp: 0,
             fd_table: BTreeMap::new(),
             next_fd: FIRST_PROCESS_FD,
+            next_mmap_addr: USER_MMAP_BASE,
         };
         process.reserve_stdio();
         process
@@ -224,6 +232,7 @@ impl Process {
             entry_envp: 0,
             fd_table: BTreeMap::new(),
             next_fd: FIRST_PROCESS_FD,
+            next_mmap_addr: USER_MMAP_BASE,
         };
         process.reserve_stdio();
         Ok(process)
@@ -330,6 +339,87 @@ impl Process {
         self.fd_table.remove(&fd).ok_or(ProcessError::InvalidFd)
     }
 
+    /// Maps zero-filled private anonymous memory into this process.
+    /// A zero address chooses a monotonically increasing, page-aligned region;
+    /// a non-zero address is treated as an exact request and must be free.
+    pub fn map_anonymous(
+        &mut self,
+        requested_addr: usize,
+        length: usize,
+        writable: bool,
+        executable: bool,
+    ) -> Result<usize, ProcessError> {
+        if self.is_kernel || length == 0 {
+            return Err(ProcessError::InvalidMemoryRange);
+        }
+        let map_length = length
+            .checked_add(USER_PAGE_SIZE - 1)
+            .map(|value| value & !(USER_PAGE_SIZE - 1))
+            .ok_or(ProcessError::InvalidMemoryRange)?;
+        let start = if requested_addr == 0 {
+            self.next_mmap_addr
+        } else {
+            if requested_addr & (USER_PAGE_SIZE - 1) != 0 {
+                return Err(ProcessError::InvalidMemoryRange);
+            }
+            requested_addr
+        };
+        let end = start
+            .checked_add(map_length)
+            .ok_or(ProcessError::InvalidMemoryRange)?;
+        if start < USER_MMAP_BASE || end > USER_MMAP_END {
+            return Err(ProcessError::InvalidMemoryRange);
+        }
+
+        let address_space = self
+            .address_space_mut()
+            .ok_or(ProcessError::NoAddressSpace)?;
+        let mut page = start;
+        while page < end {
+            match address_space
+                .translate_user_page(crate::memory::vmm::VirtualAddress::from_usize(page))
+            {
+                Ok(None) => {}
+                Ok(Some(_)) => return Err(ProcessError::AddressInUse),
+                Err(_) => return Err(ProcessError::InvalidMemoryRange),
+            }
+            page += USER_PAGE_SIZE;
+        }
+
+        let mut page_flags = crate::memory::vmm::PageFlags::empty();
+        if writable {
+            page_flags |= crate::memory::vmm::PageFlags::WRITABLE;
+        }
+        if !executable {
+            page_flags |= crate::memory::vmm::PageFlags::NO_EXECUTE;
+        }
+
+        let mut mapped_end = start;
+        while mapped_end < end {
+            if address_space
+                .map_user_page(
+                    crate::memory::vmm::VirtualAddress::from_usize(mapped_end),
+                    page_flags,
+                )
+                .is_err()
+            {
+                let mut rollback = start;
+                while rollback < mapped_end {
+                    let _ = address_space
+                        .unmap_user_page(crate::memory::vmm::VirtualAddress::from_usize(rollback));
+                    rollback += USER_PAGE_SIZE;
+                }
+                return Err(ProcessError::OutOfMemory);
+            }
+            mapped_end += USER_PAGE_SIZE;
+        }
+
+        if requested_addr == 0 {
+            self.next_mmap_addr = end;
+        }
+        Ok(start)
+    }
+
     pub fn fd_count(&self) -> usize {
         self.fd_table.len()
     }
@@ -356,6 +446,9 @@ pub enum ProcessError {
     ProcessAlreadyExists,
     NotRunnable,
     SchedulerUnavailable,
+    InvalidMemoryRange,
+    AddressInUse,
+    OutOfMemory,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1171,7 +1264,9 @@ pub fn timer_preempt_save_and_schedule(frame: &crate::interrupts::InterruptFrame
 
     {
         let table = process_table_mut();
-        let Some(index) = process_record_index(table, current) else { return; };
+        let Some(index) = process_record_index(table, current) else {
+            return;
+        };
         let record = &table[index];
         if record.state != ProcessState::Running {
             return;
@@ -1188,7 +1283,9 @@ pub fn timer_preempt_save_and_schedule(frame: &crate::interrupts::InterruptFrame
 
     {
         let table = process_table_mut();
-        let Some(index) = process_record_index(table, current) else { return; };
+        let Some(index) = process_record_index(table, current) else {
+            return;
+        };
         let record = &mut table[index];
         if let Some(process) = record.process.as_mut() {
             if !process.is_kernel {
@@ -1413,6 +1510,7 @@ const fn fault_kind_from_i32(value: i32) -> ProcessFault {
     }
 }
 
+#[cfg(feature = "boot-smoke-tests")]
 pub fn run_process_address_space_smoke() -> bool {
     crate::memory::serial_write("[PROCESS-ADDRSPACE-TEST] START\r\n");
 
@@ -1499,6 +1597,7 @@ fn serial_write_state(state: ProcessState) {
     crate::memory::serial_write(name);
 }
 
+#[cfg(feature = "boot-smoke-tests")]
 pub fn run_process_kernel_stack_smoke() -> bool {
     crate::memory::serial_write("[PROCESS-KSTACK-TEST] START\r\n");
 

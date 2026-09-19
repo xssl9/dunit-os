@@ -79,7 +79,9 @@ impl KernelAllocator {
 unsafe impl GlobalAlloc for KernelAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let payload_size = layout.size().max(1);
-        let user_align = layout.align().max(core::mem::align_of::<AllocationHeader>());
+        let user_align = layout
+            .align()
+            .max(core::mem::align_of::<AllocationHeader>());
         let header_size = core::mem::size_of::<AllocationHeader>();
         let minimum_free = core::mem::size_of::<FreeBlock>();
 
@@ -136,8 +138,8 @@ unsafe impl GlobalAlloc for KernelAllocator {
         if ptr.is_null() {
             return;
         }
-        let header = (ptr as usize - core::mem::size_of::<AllocationHeader>())
-            as *const AllocationHeader;
+        let header =
+            (ptr as usize - core::mem::size_of::<AllocationHeader>()) as *const AllocationHeader;
         let block_start = (*header).block_start;
         let size = (*header).block_size;
         let block = block_start as *mut FreeBlock;

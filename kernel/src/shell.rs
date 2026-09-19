@@ -12,10 +12,40 @@ use crate::process;
 
 /// Canonical command-name registry used by terminal discovery/autocomplete.
 pub const COMMAND_NAMES: &[&str] = &[
-    "help", "dufetch", "ls", "pwd", "cd", "mkdir", "touch", "cat", "echo", "rm",
-    "tree", "clear", "exec", "devs", "blk", "lsblk", "blkread", "blkwrite", "ahci",
-    "mkfs.dunit", "mount.dunit", "install.dunit", "lspci", "usb", "ps", "uname", "date",
-    "whoami", "uptime", "free", "top", "exit", "poweroff", "shutdown",
+    "help",
+    "dufetch",
+    "ls",
+    "pwd",
+    "cd",
+    "mkdir",
+    "touch",
+    "cat",
+    "echo",
+    "rm",
+    "tree",
+    "clear",
+    "exec",
+    "devs",
+    "blk",
+    "lsblk",
+    "blkread",
+    "blkwrite",
+    "ahci",
+    "mkfs.dunit",
+    "mount.dunit",
+    "install.dunit",
+    "lspci",
+    "usb",
+    "ps",
+    "uname",
+    "date",
+    "whoami",
+    "uptime",
+    "free",
+    "top",
+    "exit",
+    "poweroff",
+    "shutdown",
 ];
 
 /// Output abstraction for command handlers. `write_str` is the only required
@@ -827,12 +857,7 @@ fn write_file(out: &mut dyn ShellSink, cwd: &str, path: &str, text: &str, append
     }
 }
 
-fn tree_path(
-    out: &mut dyn ShellSink,
-    vfs: &mut vfs::VirtualFileSystem,
-    path: &str,
-    depth: usize,
-) {
+fn tree_path(out: &mut dyn ShellSink, vfs: &mut vfs::VirtualFileSystem, path: &str, depth: usize) {
     if depth > 16 {
         return;
     }
@@ -1111,9 +1136,7 @@ pub fn run_command(out: &mut dyn ShellSink, cwd: &mut String, line: &str) -> She
     match trimmed {
         "help" => cmd_help(out),
         "uname" => out.write_str("Dunit OS\n"),
-        "uname -a" => {
-            out.write_str("Dunit OS 1.0.0 Green Tea x86_64 kernel=monolithic-rust-hal\n")
-        }
+        "uname -a" => out.write_str("Dunit OS 1.0.0 Green Tea x86_64 kernel=monolithic-rust-hal\n"),
         "date" => out.write_str("date: RTC unavailable\n"),
         "whoami" => out.write_str("root (kernel terminal)\n"),
         "uptime" => cmd_uptime(out),
@@ -1145,9 +1168,7 @@ pub fn run_command(out: &mut dyn ShellSink, cwd: &mut String, line: &str) -> She
         "blkread" => cmd_blkread(out, ""),
         _ if trimmed.starts_with("blkread ") => cmd_blkread(out, &trimmed["blkread ".len()..]),
         "blkwrite" => cmd_blkwrite(out, ""),
-        _ if trimmed.starts_with("blkwrite ") => {
-            cmd_blkwrite(out, &trimmed["blkwrite ".len()..])
-        }
+        _ if trimmed.starts_with("blkwrite ") => cmd_blkwrite(out, &trimmed["blkwrite ".len()..]),
         _ => return ShellOutcome::NotFound,
     }
 

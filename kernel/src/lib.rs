@@ -105,7 +105,10 @@ pub(crate) struct FmtBuf {
 
 impl FmtBuf {
     pub(crate) fn new() -> Self {
-        Self { buf: [0; 96], len: 0 }
+        Self {
+            buf: [0; 96],
+            len: 0,
+        }
     }
 
     pub(crate) fn push_str(&mut self, s: &str) {
@@ -151,11 +154,8 @@ fn terminal_set_cwd(path: &str) {
 }
 
 fn terminal_cwd() -> &'static str {
-    unsafe {
-        core::str::from_utf8(&TERMINAL_CWD[..TERMINAL_CWD_LEN]).unwrap_or("/")
-    }
+    unsafe { core::str::from_utf8(&TERMINAL_CWD[..TERMINAL_CWD_LEN]).unwrap_or("/") }
 }
-
 
 fn terminal_exec(console: &mut terminal::FbConsole, cwd: &str, command_line: &str) {
     struct TerminalInput<'a> {
@@ -300,7 +300,6 @@ fn terminal_collect_foreground_input(
         }
     }
 }
-
 
 #[no_mangle]
 static mut SCREEN_LOG_FB: Option<(*mut u32, usize)> = None;
@@ -599,6 +598,7 @@ pub extern "C" fn kernel_main(
     screen_log("[ OK ] Memory management subsystem operational", false);
 
     process::init_current_kernel_process();
+    #[cfg(feature = "boot-smoke-tests")]
     process::run_process_address_space_smoke();
 
     if terminal_mode == 0 {
@@ -690,18 +690,21 @@ pub extern "C" fn kernel_main(
         screen_log("[ OK ] Mouse input driver ready", false);
     }
 
-    screen_log("[ .. ] Running process kernel stack smoke test", false);
-    if process::run_process_kernel_stack_smoke() {
-        screen_log("[ OK ] Process kernel stack smoke passed", false);
-    } else {
-        screen_log("[FAIL] Process kernel stack smoke failed", true);
-    }
+    #[cfg(feature = "boot-smoke-tests")]
+    {
+        screen_log("[ .. ] Running process kernel stack smoke test", false);
+        if process::run_process_kernel_stack_smoke() {
+            screen_log("[ OK ] Process kernel stack smoke passed", false);
+        } else {
+            screen_log("[FAIL] Process kernel stack smoke failed", true);
+        }
 
-    screen_log("[ .. ] Running userspace syscall smoke test", false);
-    if syscall::run_userspace_syscall_smoke() {
-        screen_log("[ OK ] Userspace syscall smoke passed", false);
-    } else {
-        screen_log("[FAIL] Userspace syscall smoke failed", true);
+        screen_log("[ .. ] Running userspace syscall smoke test", false);
+        if syscall::run_userspace_syscall_smoke() {
+            screen_log("[ OK ] Userspace syscall smoke passed", false);
+        } else {
+            screen_log("[FAIL] Userspace syscall smoke failed", true);
+        }
     }
 
     screen_log("[ .. ] Configuring interrupt handlers", false);
@@ -898,11 +901,8 @@ pub extern "C" fn kernel_main(
                                         let response = {
                                             let mut cwd_buf =
                                                 alloc::string::String::from(terminal_cwd());
-                                            let outcome = shell::run_command(
-                                                console,
-                                                &mut cwd_buf,
-                                                cmd_str,
-                                            );
+                                            let outcome =
+                                                shell::run_command(console, &mut cwd_buf, cmd_str);
                                             terminal_set_cwd(&cwd_buf);
                                             match outcome {
                                                 shell::ShellOutcome::Handled => "",
@@ -954,7 +954,8 @@ pub extern "C" fn kernel_main(
                                         let mut match_count = 0;
 
                                         for &cmd in shell::COMMAND_NAMES {
-                                            if cmd.starts_with(input) && match_count < matches.len() {
+                                            if cmd.starts_with(input) && match_count < matches.len()
+                                            {
                                                 matches[match_count] = cmd;
                                                 match_count += 1;
                                             }

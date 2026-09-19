@@ -3,8 +3,8 @@
 extern crate alloc;
 
 use core::alloc::{GlobalAlloc, Layout};
-use core::ptr::null_mut;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::ptr::{self, null_mut};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -14,6 +14,7 @@ pub const SYSCALL_READ: usize = 3;
 pub const SYSCALL_WRITE: usize = 4;
 pub const SYSCALL_OPEN: usize = 5;
 pub const SYSCALL_CLOSE: usize = 6;
+pub const SYSCALL_MMAP: usize = 7;
 pub const SYSCALL_SEND_MESSAGE: usize = 8;
 pub const SYSCALL_RECEIVE_MESSAGE: usize = 9;
 pub const SYSCALL_GET_FRAMEBUFFER: usize = 10;
@@ -36,6 +37,7 @@ pub const SYSCALL_READDIR: usize = 27;
 pub const SYSCALL_STAT: usize = 28;
 
 pub const EAGAIN: isize = -11;
+pub const ENOMEM: isize = -12;
 pub const EINTR: isize = -4;
 pub const EIO: isize = -5;
 pub const EBADF: isize = -9;
@@ -53,38 +55,196 @@ pub const EMSGSIZE: isize = -90;
 pub const EOPNOTSUPP: isize = -95;
 pub const ENOBUFS: isize = -105;
 
-struct BumpAllocator;
+const PAGE_SIZE: usize = 4096;
+const HEAP_GROW_CHUNK: usize = 64 * 1024;
+const PROT_READ: usize = 1 << 0;
+const PROT_WRITE: usize = 1 << 1;
+const MAP_PRIVATE: usize = 1 << 1;
+const MAP_ANONYMOUS: usize = 1 << 5;
 
-static HEAP_OFFSET: AtomicUsize = AtomicUsize::new(0);
-static mut HEAP: [u8; 64 * 1024] = [0; 64 * 1024];
+#[repr(C)]
+struct FreeBlock {
+    size: usize,
+    next: *mut FreeBlock,
+}
 
-unsafe impl GlobalAlloc for BumpAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let base = core::ptr::addr_of_mut!(HEAP) as *mut u8 as usize;
-        let size = HEAP.len();
-        let mut current = HEAP_OFFSET.load(Ordering::Relaxed);
+#[repr(C)]
+struct AllocationHeader {
+    block_start: usize,
+    block_size: usize,
+}
 
-        loop {
-            let aligned = align_up(base + current, layout.align()) - base;
-            let end = aligned.saturating_add(layout.size());
-            if end > size {
-                return null_mut();
-            }
-            match HEAP_OFFSET.compare_exchange(current, end, Ordering::SeqCst, Ordering::Relaxed) {
-                Ok(_) => return (base + aligned) as *mut u8,
-                Err(next) => current = next,
-            }
+struct RuntimeAllocator {
+    free_list: AtomicUsize,
+    locked: AtomicBool,
+}
+
+impl RuntimeAllocator {
+    const fn new() -> Self {
+        Self {
+            free_list: AtomicUsize::new(0),
+            locked: AtomicBool::new(false),
         }
     }
 
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
+    fn lock(&self) {
+        while self
+            .locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+    }
+
+    fn unlock(&self) {
+        self.locked.store(false, Ordering::Release);
+    }
+
+    unsafe fn allocate_from_free_list(&self, layout: Layout) -> *mut u8 {
+        let payload_size = layout.size().max(1);
+        let header_size = core::mem::size_of::<AllocationHeader>();
+        let user_align = layout
+            .align()
+            .max(core::mem::align_of::<AllocationHeader>());
+        let minimum_free = core::mem::size_of::<FreeBlock>();
+        let mut current_ptr = self.free_list.load(Ordering::Relaxed) as *mut FreeBlock;
+        let mut previous: *mut FreeBlock = ptr::null_mut();
+
+        while !current_ptr.is_null() {
+            let block_start = current_ptr as usize;
+            let block_end = block_start.saturating_add((*current_ptr).size);
+            let user_addr = align_up(block_start + header_size, user_align);
+            let requested_end = align_up(
+                user_addr.saturating_add(payload_size),
+                core::mem::align_of::<FreeBlock>(),
+            );
+
+            if requested_end <= block_end {
+                let remaining = block_end - requested_end;
+                let (allocated_end, replacement) = if remaining >= minimum_free {
+                    let next = requested_end as *mut FreeBlock;
+                    (*next).size = remaining;
+                    (*next).next = (*current_ptr).next;
+                    (requested_end, next)
+                } else {
+                    (block_end, (*current_ptr).next)
+                };
+
+                if previous.is_null() {
+                    self.free_list
+                        .store(replacement as usize, Ordering::Relaxed);
+                } else {
+                    (*previous).next = replacement;
+                }
+
+                let header = (user_addr - header_size) as *mut AllocationHeader;
+                (*header).block_start = block_start;
+                (*header).block_size = allocated_end - block_start;
+                return user_addr as *mut u8;
+            }
+
+            previous = current_ptr;
+            current_ptr = (*current_ptr).next;
+        }
+
+        null_mut()
+    }
+
+    unsafe fn add_free_region(&self, start: usize, size: usize) {
+        let block = start as *mut FreeBlock;
+        (*block).size = size;
+
+        let mut current = self.free_list.load(Ordering::Relaxed) as *mut FreeBlock;
+        let mut previous: *mut FreeBlock = ptr::null_mut();
+        while !current.is_null() && (current as usize) < start {
+            previous = current;
+            current = (*current).next;
+        }
+
+        (*block).next = current;
+        if previous.is_null() {
+            self.free_list.store(block as usize, Ordering::Relaxed);
+        } else {
+            (*previous).next = block;
+        }
+        coalesce_free_neighbors(self, previous, block);
+    }
+
+    unsafe fn grow(&self, minimum: usize) -> bool {
+        let requested = align_up(minimum.max(HEAP_GROW_CHUNK), PAGE_SIZE);
+        let mapped = syscall5(
+            SYSCALL_MMAP,
+            0,
+            requested,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+            0,
+        );
+        if mapped < 0 {
+            return false;
+        }
+        self.add_free_region(mapped as usize, requested);
+        true
+    }
+}
+
+unsafe fn coalesce_free_neighbors(
+    allocator: &RuntimeAllocator,
+    previous: *mut FreeBlock,
+    mut block: *mut FreeBlock,
+) {
+    if !previous.is_null() && previous as usize + (*previous).size == block as usize {
+        (*previous).size += (*block).size;
+        (*previous).next = (*block).next;
+        block = previous;
+    }
+
+    let next = (*block).next;
+    if !next.is_null() && block as usize + (*block).size == next as usize {
+        (*block).size += (*next).size;
+        (*block).next = (*next).next;
+    }
+
+    if previous.is_null() {
+        allocator.free_list.store(block as usize, Ordering::Relaxed);
+    }
+}
+
+unsafe impl GlobalAlloc for RuntimeAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        self.lock();
+        let mut result = self.allocate_from_free_list(layout);
+        if result.is_null() {
+            let required = layout
+                .size()
+                .saturating_add(layout.align())
+                .saturating_add(core::mem::size_of::<AllocationHeader>());
+            if self.grow(required) {
+                result = self.allocate_from_free_list(layout);
+            }
+        }
+        self.unlock();
+        result
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, _layout: Layout) {
+        if pointer.is_null() {
+            return;
+        }
+        self.lock();
+        let header = (pointer as usize - core::mem::size_of::<AllocationHeader>())
+            as *const AllocationHeader;
+        self.add_free_region((*header).block_start, (*header).block_size);
+        self.unlock();
+    }
 }
 
 #[global_allocator]
-static ALLOCATOR: BumpAllocator = BumpAllocator;
+static ALLOCATOR: RuntimeAllocator = RuntimeAllocator::new();
 
 fn align_up(value: usize, align: usize) -> usize {
-    (value + align - 1) & !(align - 1)
+    value.saturating_add(align - 1) & !(align - 1)
 }
 
 static mut RUNTIME_ARGC: usize = 0;
@@ -194,7 +354,8 @@ impl DirEntry {
     }
 
     pub fn name(&self) -> &str {
-        core::str::from_utf8(&self.name[..self.name_len.min(self.name.len())]).unwrap_or("<invalid>")
+        core::str::from_utf8(&self.name[..self.name_len.min(self.name.len())])
+            .unwrap_or("<invalid>")
     }
 }
 
@@ -221,7 +382,11 @@ impl GuiMessage {
     }
 
     pub fn set_data(&mut self, data: &[u8]) {
-        let len = if data.len() > GUI_MSG_DATA_CAP { GUI_MSG_DATA_CAP } else { data.len() };
+        let len = if data.len() > GUI_MSG_DATA_CAP {
+            GUI_MSG_DATA_CAP
+        } else {
+            data.len()
+        };
         let mut index = 0usize;
         while index < len {
             self.data[index] = data[index];
@@ -460,6 +625,7 @@ pub fn println(s: &str) {
 pub fn error_name(code: isize) -> &'static str {
     match code {
         EAGAIN => "EAGAIN",
+        ENOMEM => "ENOMEM",
         EINTR => "EINTR",
         EIO => "EIO",
         EBADF => "EBADF",
@@ -615,7 +781,10 @@ pub const WAIT_KIND_EXITED: i32 = 0;
 
 impl WaitStatus {
     pub const fn empty() -> Self {
-        Self { kind: WAIT_KIND_EMPTY, code: 0 }
+        Self {
+            kind: WAIT_KIND_EMPTY,
+            code: 0,
+        }
     }
 
     pub const fn spawn_prepared(&self) -> bool {
@@ -703,18 +872,34 @@ pub fn draw_pixel(x: u32, y: u32, color: u32) {
 }
 
 pub fn draw_rect(x: u32, y: u32, w: u32, h: u32, color: u32) {
-    syscall5(SYSCALL_DRAW_RECT, x as usize, y as usize, w as usize, h as usize, color as usize);
+    syscall5(
+        SYSCALL_DRAW_RECT,
+        x as usize,
+        y as usize,
+        w as usize,
+        h as usize,
+        color as usize,
+    );
 }
 
 pub fn get_key() -> Option<u8> {
     let k = syscall0(SYSCALL_GET_KEY);
-    if k < 0 { None } else { Some(k as u8) }
+    if k < 0 {
+        None
+    } else {
+        Some(k as u8)
+    }
 }
 
 pub fn get_mouse_pos() -> (u32, u32) {
     let mut x: u32 = 0;
     let mut y: u32 = 0;
-    syscall3(SYSCALL_GET_MOUSE_POS, &mut x as *mut u32 as usize, &mut y as *mut u32 as usize, 0);
+    syscall3(
+        SYSCALL_GET_MOUSE_POS,
+        &mut x as *mut u32 as usize,
+        &mut y as *mut u32 as usize,
+        0,
+    );
     (x, y)
 }
 
@@ -735,15 +920,28 @@ pub fn spawn(path: &str) -> isize {
 }
 
 pub fn wait(pid: u32, status: &mut WaitStatus) -> isize {
-    syscall2(SYSCALL_WAIT_PROCESS, pid as usize, status as *mut WaitStatus as usize)
+    syscall2(
+        SYSCALL_WAIT_PROCESS,
+        pid as usize,
+        status as *mut WaitStatus as usize,
+    )
 }
 
 pub fn ipc_send(pid: u32, data: &[u8]) -> isize {
-    syscall3(SYSCALL_SEND_MESSAGE, pid as usize, data.as_ptr() as usize, data.len())
+    syscall3(
+        SYSCALL_SEND_MESSAGE,
+        pid as usize,
+        data.as_ptr() as usize,
+        data.len(),
+    )
 }
 
 pub fn ipc_recv(buf: &mut [u8]) -> isize {
-    syscall2(SYSCALL_RECEIVE_MESSAGE, buf.as_mut_ptr() as usize, buf.len())
+    syscall2(
+        SYSCALL_RECEIVE_MESSAGE,
+        buf.as_mut_ptr() as usize,
+        buf.len(),
+    )
 }
 
 pub fn gui_send(message: &GuiMessage) -> isize {
@@ -850,21 +1048,221 @@ pub fn debug_log(code: usize) -> isize {
     syscall1(SYSCALL_DEBUG_LOG, code)
 }
 
-pub fn scancode_to_char(sc: u8) -> Option<char> {
-    match sc {
-        0x1E => Some('a'), 0x30 => Some('b'), 0x2E => Some('c'),
-        0x20 => Some('d'), 0x12 => Some('e'), 0x21 => Some('f'),
-        0x22 => Some('g'), 0x23 => Some('h'), 0x17 => Some('i'),
-        0x24 => Some('j'), 0x25 => Some('k'), 0x26 => Some('l'),
-        0x32 => Some('m'), 0x31 => Some('n'), 0x18 => Some('o'),
-        0x19 => Some('p'), 0x10 => Some('q'), 0x13 => Some('r'),
-        0x1F => Some('s'), 0x14 => Some('t'), 0x16 => Some('u'),
-        0x2F => Some('v'), 0x11 => Some('w'), 0x2D => Some('x'),
-        0x15 => Some('y'), 0x2C => Some('z'),
-        0x02 => Some('1'), 0x03 => Some('2'), 0x04 => Some('3'),
-        0x05 => Some('4'), 0x06 => Some('5'), 0x07 => Some('6'),
-        0x08 => Some('7'), 0x09 => Some('8'), 0x0A => Some('9'),
-        0x0B => Some('0'), 0x39 => Some(' '), 0x1C => Some('\n'),
-        _ => None,
+const MOD_LEFT_SHIFT: usize = 1 << 0;
+const MOD_RIGHT_SHIFT: usize = 1 << 1;
+const MOD_CAPS_LOCK: usize = 1 << 2;
+static KEYBOARD_MODIFIERS: AtomicUsize = AtomicUsize::new(0);
+
+/// Decodes PS/2 Set-1 make/break codes while retaining modifier state.
+/// Shift affects symbols, and Shift XOR Caps Lock controls letter case.
+pub fn scancode_to_char(scancode: u8) -> Option<char> {
+    match scancode {
+        0x2A => {
+            KEYBOARD_MODIFIERS.fetch_or(MOD_LEFT_SHIFT, Ordering::Relaxed);
+            return None;
+        }
+        0x36 => {
+            KEYBOARD_MODIFIERS.fetch_or(MOD_RIGHT_SHIFT, Ordering::Relaxed);
+            return None;
+        }
+        0xAA => {
+            KEYBOARD_MODIFIERS.fetch_and(!MOD_LEFT_SHIFT, Ordering::Relaxed);
+            return None;
+        }
+        0xB6 => {
+            KEYBOARD_MODIFIERS.fetch_and(!MOD_RIGHT_SHIFT, Ordering::Relaxed);
+            return None;
+        }
+        0x3A => {
+            KEYBOARD_MODIFIERS.fetch_xor(MOD_CAPS_LOCK, Ordering::Relaxed);
+            return None;
+        }
+        _ if scancode & 0x80 != 0 => return None,
+        _ => {}
+    }
+
+    let modifiers = KEYBOARD_MODIFIERS.load(Ordering::Relaxed);
+    let shifted = modifiers & (MOD_LEFT_SHIFT | MOD_RIGHT_SHIFT) != 0;
+    let upper = shifted ^ (modifiers & MOD_CAPS_LOCK != 0);
+    let character = match scancode {
+        0x02 => {
+            if shifted {
+                '!'
+            } else {
+                '1'
+            }
+        }
+        0x03 => {
+            if shifted {
+                '@'
+            } else {
+                '2'
+            }
+        }
+        0x04 => {
+            if shifted {
+                '#'
+            } else {
+                '3'
+            }
+        }
+        0x05 => {
+            if shifted {
+                '$'
+            } else {
+                '4'
+            }
+        }
+        0x06 => {
+            if shifted {
+                '%'
+            } else {
+                '5'
+            }
+        }
+        0x07 => {
+            if shifted {
+                '^'
+            } else {
+                '6'
+            }
+        }
+        0x08 => {
+            if shifted {
+                '&'
+            } else {
+                '7'
+            }
+        }
+        0x09 => {
+            if shifted {
+                '*'
+            } else {
+                '8'
+            }
+        }
+        0x0A => {
+            if shifted {
+                '('
+            } else {
+                '9'
+            }
+        }
+        0x0B => {
+            if shifted {
+                ')'
+            } else {
+                '0'
+            }
+        }
+        0x0C => {
+            if shifted {
+                '_'
+            } else {
+                '-'
+            }
+        }
+        0x0D => {
+            if shifted {
+                '+'
+            } else {
+                '='
+            }
+        }
+        0x10 => letter('q', upper),
+        0x11 => letter('w', upper),
+        0x12 => letter('e', upper),
+        0x13 => letter('r', upper),
+        0x14 => letter('t', upper),
+        0x15 => letter('y', upper),
+        0x16 => letter('u', upper),
+        0x17 => letter('i', upper),
+        0x18 => letter('o', upper),
+        0x19 => letter('p', upper),
+        0x1A => {
+            if shifted {
+                '{'
+            } else {
+                '['
+            }
+        }
+        0x1B => {
+            if shifted {
+                '}'
+            } else {
+                ']'
+            }
+        }
+        0x1E => letter('a', upper),
+        0x1F => letter('s', upper),
+        0x20 => letter('d', upper),
+        0x21 => letter('f', upper),
+        0x22 => letter('g', upper),
+        0x23 => letter('h', upper),
+        0x24 => letter('j', upper),
+        0x25 => letter('k', upper),
+        0x26 => letter('l', upper),
+        0x27 => {
+            if shifted {
+                ':'
+            } else {
+                ';'
+            }
+        }
+        0x28 => {
+            if shifted {
+                '"'
+            } else {
+                '\''
+            }
+        }
+        0x2B => {
+            if shifted {
+                '|'
+            } else {
+                '\\'
+            }
+        }
+        0x2C => letter('z', upper),
+        0x2D => letter('x', upper),
+        0x2E => letter('c', upper),
+        0x2F => letter('v', upper),
+        0x30 => letter('b', upper),
+        0x31 => letter('n', upper),
+        0x32 => letter('m', upper),
+        0x33 => {
+            if shifted {
+                '<'
+            } else {
+                ','
+            }
+        }
+        0x34 => {
+            if shifted {
+                '>'
+            } else {
+                '.'
+            }
+        }
+        0x35 => {
+            if shifted {
+                '?'
+            } else {
+                '/'
+            }
+        }
+        0x39 => ' ',
+        0x1C => '\n',
+        0x0F => '\t',
+        _ => return None,
+    };
+    Some(character)
+}
+
+fn letter(lower: char, upper: bool) -> char {
+    if upper {
+        ((lower as u8) - b'a' + b'A') as char
+    } else {
+        lower
     }
 }

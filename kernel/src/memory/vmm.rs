@@ -1,6 +1,6 @@
 use super::pmm::{get_pmm, PhysicalAddress};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 const PAGE_SIZE: usize = 4096;
 const USER_SPACE_END: usize = 0x0000_8000_0000_0000;
@@ -8,6 +8,20 @@ const PML4_KERNEL_START: usize = 256;
 const KERNEL_MMIO_BASE: usize = 0xFFFF_C000_0000_0000;
 const KERNEL_MMIO_SIZE: usize = 0x0000_0080_0000_0000;
 const UNINITIALIZED_ROOT: usize = usize::MAX;
+const MAX_MMIO_RANGES: usize = 128;
+
+#[derive(Clone, Copy)]
+struct MmioRange {
+    start: usize,
+    length: usize,
+}
+
+impl MmioRange {
+    const EMPTY: Self = Self {
+        start: 0,
+        length: 0,
+    };
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VirtualAddress(pub usize);
@@ -207,6 +221,48 @@ impl AddressSpace {
         Ok(frame)
     }
 
+    /// Removes an owned userspace page and returns its physical frame to the
+    /// PMM. Page-table pages are intentionally retained until the address
+    /// space is destroyed so subsequent mappings can reuse the hierarchy.
+    pub fn unmap_user_page(&mut self, virt: VirtualAddress) -> Result<bool, AddressSpaceError> {
+        let virt_addr = virt.as_usize();
+        if virt_addr == 0 || virt_addr >= USER_SPACE_END || (virt_addr & (PAGE_SIZE - 1)) != 0 {
+            return Err(AddressSpaceError::InvalidUserAddress);
+        }
+
+        let mapping = self.user_page_mapping(virt)?;
+        let Some((frame, _)) = mapping else {
+            return Ok(false);
+        };
+
+        unsafe {
+            let root = page_table_from_phys_mut(self.root_frame);
+            let p4 = root.get_entry(virt.p4_index());
+            let p3_table = page_table_from_phys_mut(p4.addr());
+            let p3 = p3_table.get_entry(virt.p3_index());
+            let p2_table = page_table_from_phys_mut(p3.addr());
+            let p2 = p2_table.get_entry(virt.p2_index());
+            let p1_table = page_table_from_phys_mut(p2.addr());
+            p1_table.get_entry_mut(virt.p1_index()).set_unused();
+            if read_cr3() == self.root_frame.as_usize() {
+                flush_page(virt_addr);
+            }
+        }
+
+        let frame_start = PhysicalAddress(frame.as_usize() & !(PAGE_SIZE - 1));
+        if let Some(index) = self
+            .user_frames
+            .iter()
+            .position(|owned| *owned == frame_start)
+        {
+            self.user_frames.swap_remove(index);
+            if let Some(pmm) = get_pmm() {
+                pmm.free_frame(frame_start);
+            }
+        }
+        Ok(true)
+    }
+
     pub fn map_user_frame(
         &mut self,
         virt: VirtualAddress,
@@ -330,6 +386,7 @@ pub fn active_user_page_flags(
 /// Process ELF loading should use [`AddressSpace`] so ownership remains
 /// explicit. This entry point exists for the early ring-3 syscall smoke test,
 /// which runs before a userspace process is scheduled.
+#[cfg(feature = "boot-smoke-tests")]
 pub unsafe fn map_active_user_frame(
     virt: VirtualAddress,
     phys: PhysicalAddress,
@@ -356,9 +413,8 @@ pub unsafe fn map_active_user_frame(
 
 /// Makes an existing active mapping reachable from ring 3, including every
 /// parent table entry. Huge pages are valid leaves at the P3 or P2 level.
-pub unsafe fn mark_active_mapping_user(
-    virt: VirtualAddress,
-) -> Result<(), AddressSpaceError> {
+#[cfg(feature = "boot-smoke-tests")]
+pub unsafe fn mark_active_mapping_user(virt: VirtualAddress) -> Result<(), AddressSpaceError> {
     let root = page_table_from_phys_mut(PhysicalAddress(read_cr3()));
     let p4 = root.get_entry_mut(virt.p4_index());
     mark_entry_user(p4)?;
@@ -385,6 +441,7 @@ pub unsafe fn mark_active_mapping_user(
     Ok(())
 }
 
+#[cfg(feature = "boot-smoke-tests")]
 unsafe fn ensure_active_user_table(
     entry: &mut PageTableEntry,
 ) -> Result<&'static mut PageTable, AddressSpaceError> {
@@ -407,6 +464,7 @@ unsafe fn ensure_active_user_table(
     Ok(table)
 }
 
+#[cfg(feature = "boot-smoke-tests")]
 fn mark_entry_user(entry: &mut PageTableEntry) -> Result<(), AddressSpaceError> {
     if entry.is_unused() {
         return Err(AddressSpaceError::InvalidUserAddress);
@@ -444,6 +502,7 @@ impl Drop for ActiveAddressSpace {
     }
 }
 
+#[cfg(feature = "boot-smoke-tests")]
 pub fn run_address_space_smoke() -> bool {
     super::serial_write("[ADDRSPACE-TEST] START\r\n");
 
@@ -469,15 +528,14 @@ pub fn run_address_space_smoke() -> bool {
     // Activation must refresh the complete shared kernel half before CR3 changes.
     let kernel_root_frame = KERNEL_ROOT_FRAME.load(Ordering::Acquire);
     let kernel_root = unsafe { page_table_from_phys_mut(PhysicalAddress(kernel_root_frame)) };
-    let kernel_slot = match (PML4_KERNEL_START..512)
-        .find(|idx| !kernel_root.get_entry(*idx).is_unused())
-    {
-        Some(index) => index,
-        None => {
-            super::serial_write("[ADDRSPACE-TEST] no kernel mapping found\r\n");
-            return false;
-        }
-    };
+    let kernel_slot =
+        match (PML4_KERNEL_START..512).find(|idx| !kernel_root.get_entry(*idx).is_unused()) {
+            Some(index) => index,
+            None => {
+                super::serial_write("[ADDRSPACE-TEST] no kernel mapping found\r\n");
+                return false;
+            }
+        };
     let expected_kernel_entry = kernel_root.get_entry(kernel_slot).entry;
     unsafe {
         page_table_from_phys_mut(address_space.root_frame)
@@ -508,6 +566,24 @@ pub fn run_address_space_smoke() -> bool {
         super::serial_write("[ADDRSPACE-TEST] restore failed\r\n");
         return false;
     }
+
+    let Some(first_mmio) = map_mmio_region(0xFEE0_0000, PAGE_SIZE) else {
+        super::serial_write("[MMIO-ALLOC-TEST] first map failed\r\n");
+        return false;
+    };
+    if !unmap_mmio_region(first_mmio, PAGE_SIZE) {
+        super::serial_write("[MMIO-ALLOC-TEST] unmap failed\r\n");
+        return false;
+    }
+    let Some(second_mmio) = map_mmio_region(0xFEE0_0000, PAGE_SIZE) else {
+        super::serial_write("[MMIO-ALLOC-TEST] remap failed\r\n");
+        return false;
+    };
+    if second_mmio != first_mmio || !unmap_mmio_region(second_mmio, PAGE_SIZE) {
+        super::serial_write("[MMIO-ALLOC-TEST] range was not reused\r\n");
+        return false;
+    }
+    super::serial_write("[MMIO-ALLOC-TEST] OK\r\n");
 
     super::serial_write("[ADDRSPACE-TEST] OK\r\n");
     true
@@ -556,7 +632,11 @@ pub unsafe fn switch_to_root_frame(root_frame: usize) {
 }
 static mut HHDM_OFFSET: u64 = 0;
 static KERNEL_ROOT_FRAME: AtomicUsize = AtomicUsize::new(UNINITIALIZED_ROOT);
-static NEXT_MMIO_VIRT: AtomicUsize = AtomicUsize::new(KERNEL_MMIO_BASE);
+static MMIO_LOCK: AtomicBool = AtomicBool::new(false);
+static mut MMIO_FREE_RANGES: [MmioRange; MAX_MMIO_RANGES] = [MmioRange::EMPTY; MAX_MMIO_RANGES];
+static mut MMIO_FREE_COUNT: usize = 0;
+static mut MMIO_ALLOCATIONS: [MmioRange; MAX_MMIO_RANGES] = [MmioRange::EMPTY; MAX_MMIO_RANGES];
+static mut MMIO_ALLOCATION_COUNT: usize = 0;
 
 pub fn init() {
     super::serial_write("[VMM] START\r\n");
@@ -571,6 +651,14 @@ pub fn init() {
         .is_err()
     {
         super::serial_write("[VMM] canonical kernel root already initialized\r\n");
+    }
+    unsafe {
+        MMIO_FREE_RANGES[0] = MmioRange {
+            start: KERNEL_MMIO_BASE,
+            length: KERNEL_MMIO_SIZE,
+        };
+        MMIO_FREE_COUNT = 1;
+        MMIO_ALLOCATION_COUNT = 0;
     }
     super::serial_write("[VMM] OK\r\n");
 }
@@ -602,18 +690,20 @@ pub fn map_mmio_region(phys: usize, length: usize) -> Option<usize> {
     let phys_offset = phys.saturating_sub(phys_start);
     let map_length = align_up(phys_offset.checked_add(length)?, PAGE_SIZE)?;
 
-    let virt_start = NEXT_MMIO_VIRT.fetch_add(map_length, Ordering::SeqCst);
-    if virt_start.checked_add(map_length)? > KERNEL_MMIO_BASE + KERNEL_MMIO_SIZE {
-        return None;
-    }
-
     let root_frame = KERNEL_ROOT_FRAME.load(Ordering::Acquire);
     if root_frame == UNINITIALIZED_ROOT {
         return None;
     }
+
+    lock_mmio();
+    let virt_start = unsafe { allocate_mmio_range(map_length) };
+    let Some(virt_start) = virt_start else {
+        unlock_mmio();
+        return None;
+    };
     let mut offset = 0usize;
     while offset < map_length {
-        unsafe {
+        let mapped = unsafe {
             map_kernel_page(
                 root_frame,
                 virt_start + offset,
@@ -622,20 +712,165 @@ pub fn map_mmio_region(phys: usize, length: usize) -> Option<usize> {
                     | PageFlags::NO_CACHE
                     | PageFlags::WRITE_THROUGH
                     | PageFlags::NO_EXECUTE,
-            )?;
+            )
+        };
+        if mapped.is_none() {
+            let mut rollback = 0usize;
+            while rollback < offset {
+                unsafe { unmap_kernel_page(root_frame, virt_start + rollback) };
+                rollback += PAGE_SIZE;
+            }
+            unsafe { release_mmio_range(virt_start, map_length) };
+            unlock_mmio();
+            return None;
         }
         offset += PAGE_SIZE;
     }
 
     unsafe {
         let active_root = active_root_frame();
-        sync_kernel_half_into(active_root).ok()?;
+        if sync_kernel_half_into(active_root).is_err() {
+            let mut rollback = 0usize;
+            while rollback < map_length {
+                unmap_kernel_page(root_frame, virt_start + rollback);
+                rollback += PAGE_SIZE;
+            }
+            release_mmio_range(virt_start, map_length);
+            unlock_mmio();
+            return None;
+        }
         // Reloading CR3 invalidates stale translations after installing a new
         // shared kernel hierarchy in the currently active address space.
         write_cr3(active_root);
     }
 
+    unlock_mmio();
     Some(virt_start + phys_offset)
+}
+
+/// Unmaps an MMIO allocation previously returned by [`map_mmio_region`] and
+/// returns its virtual extent to the coalescing allocator.
+pub fn unmap_mmio_region(virt: usize, length: usize) -> bool {
+    if length == 0 {
+        return false;
+    }
+    let virt_start = virt & !(PAGE_SIZE - 1);
+    let virt_offset = virt - virt_start;
+    let Some(map_length) = virt_offset
+        .checked_add(length)
+        .and_then(|value| align_up(value, PAGE_SIZE))
+    else {
+        return false;
+    };
+
+    lock_mmio();
+    let allocation_exists = unsafe {
+        (0..MMIO_ALLOCATION_COUNT).any(|index| {
+            MMIO_ALLOCATIONS[index].start == virt_start
+                && MMIO_ALLOCATIONS[index].length == map_length
+        })
+    };
+    if !allocation_exists {
+        unlock_mmio();
+        return false;
+    }
+
+    let root_frame = KERNEL_ROOT_FRAME.load(Ordering::Acquire);
+    let mut offset = 0usize;
+    while offset < map_length {
+        unsafe { unmap_kernel_page(root_frame, virt_start + offset) };
+        offset += PAGE_SIZE;
+    }
+    unsafe { release_mmio_range(virt_start, map_length) };
+
+    unsafe {
+        let active_root = active_root_frame();
+        let _ = sync_kernel_half_into(active_root);
+        write_cr3(active_root);
+    }
+    unlock_mmio();
+    true
+}
+
+fn lock_mmio() {
+    while MMIO_LOCK
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+}
+
+fn unlock_mmio() {
+    MMIO_LOCK.store(false, Ordering::Release);
+}
+
+unsafe fn allocate_mmio_range(length: usize) -> Option<usize> {
+    if MMIO_ALLOCATION_COUNT >= MAX_MMIO_RANGES {
+        return None;
+    }
+    let index = (0..MMIO_FREE_COUNT).find(|index| MMIO_FREE_RANGES[*index].length >= length)?;
+    let start = MMIO_FREE_RANGES[index].start;
+    MMIO_FREE_RANGES[index].start += length;
+    MMIO_FREE_RANGES[index].length -= length;
+    if MMIO_FREE_RANGES[index].length == 0 {
+        let mut cursor = index;
+        while cursor + 1 < MMIO_FREE_COUNT {
+            MMIO_FREE_RANGES[cursor] = MMIO_FREE_RANGES[cursor + 1];
+            cursor += 1;
+        }
+        MMIO_FREE_COUNT -= 1;
+        MMIO_FREE_RANGES[MMIO_FREE_COUNT] = MmioRange::EMPTY;
+    }
+    MMIO_ALLOCATIONS[MMIO_ALLOCATION_COUNT] = MmioRange { start, length };
+    MMIO_ALLOCATION_COUNT += 1;
+    Some(start)
+}
+
+unsafe fn release_mmio_range(start: usize, length: usize) {
+    let Some(allocation_index) = (0..MMIO_ALLOCATION_COUNT).find(|index| {
+        MMIO_ALLOCATIONS[*index].start == start && MMIO_ALLOCATIONS[*index].length == length
+    }) else {
+        return;
+    };
+    let mut cursor = allocation_index;
+    while cursor + 1 < MMIO_ALLOCATION_COUNT {
+        MMIO_ALLOCATIONS[cursor] = MMIO_ALLOCATIONS[cursor + 1];
+        cursor += 1;
+    }
+    MMIO_ALLOCATION_COUNT -= 1;
+    MMIO_ALLOCATIONS[MMIO_ALLOCATION_COUNT] = MmioRange::EMPTY;
+
+    if MMIO_FREE_COUNT >= MAX_MMIO_RANGES {
+        return;
+    }
+    let insert_at = (0..MMIO_FREE_COUNT)
+        .find(|index| MMIO_FREE_RANGES[*index].start > start)
+        .unwrap_or(MMIO_FREE_COUNT);
+    let mut move_index = MMIO_FREE_COUNT;
+    while move_index > insert_at {
+        MMIO_FREE_RANGES[move_index] = MMIO_FREE_RANGES[move_index - 1];
+        move_index -= 1;
+    }
+    MMIO_FREE_RANGES[insert_at] = MmioRange { start, length };
+    MMIO_FREE_COUNT += 1;
+
+    let mut index = 0usize;
+    while index + 1 < MMIO_FREE_COUNT {
+        let current_end = MMIO_FREE_RANGES[index].start + MMIO_FREE_RANGES[index].length;
+        if current_end == MMIO_FREE_RANGES[index + 1].start {
+            MMIO_FREE_RANGES[index].length += MMIO_FREE_RANGES[index + 1].length;
+            let mut shift = index + 1;
+            while shift + 1 < MMIO_FREE_COUNT {
+                MMIO_FREE_RANGES[shift] = MMIO_FREE_RANGES[shift + 1];
+                shift += 1;
+            }
+            MMIO_FREE_COUNT -= 1;
+            MMIO_FREE_RANGES[MMIO_FREE_COUNT] = MmioRange::EMPTY;
+        } else {
+            index += 1;
+        }
+    }
 }
 
 unsafe fn map_kernel_page(
@@ -662,6 +897,26 @@ unsafe fn map_kernel_page(
         .set(PhysicalAddress(phys), flags | PageFlags::PRESENT);
 
     Some(())
+}
+
+unsafe fn unmap_kernel_page(root_frame: usize, virt: usize) {
+    let root = page_table_from_phys_mut(PhysicalAddress(root_frame));
+    let p4 = root.get_entry((virt >> 39) & 0x1FF);
+    if p4.is_unused() || p4.flags().contains(PageFlags::HUGE) {
+        return;
+    }
+    let p3_table = page_table_from_phys_mut(p4.addr());
+    let p3 = p3_table.get_entry((virt >> 30) & 0x1FF);
+    if p3.is_unused() || p3.flags().contains(PageFlags::HUGE) {
+        return;
+    }
+    let p2_table = page_table_from_phys_mut(p3.addr());
+    let p2 = p2_table.get_entry((virt >> 21) & 0x1FF);
+    if p2.is_unused() || p2.flags().contains(PageFlags::HUGE) {
+        return;
+    }
+    let p1_table = page_table_from_phys_mut(p2.addr());
+    p1_table.get_entry_mut((virt >> 12) & 0x1FF).set_unused();
 }
 
 unsafe fn ensure_kernel_table(entry: &mut PageTableEntry) -> Option<&'static mut PageTable> {

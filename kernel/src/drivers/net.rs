@@ -171,6 +171,7 @@ fn probe_e1000(dev: PciDevice) -> Result<ProbeResult, ProbeError> {
 
     let status = read32(mmio_virt, E1000_STATUS);
     if status == 0 || status == 0xFFFF_FFFF {
+        let _ = vmm::unmap_mmio_region(mmio_virt, E1000_MMIO_MAP_SIZE);
         return Err(ProbeError::InvalidRegisters);
     }
 
@@ -185,6 +186,8 @@ fn probe_e1000(dev: PciDevice) -> Result<ProbeResult, ProbeError> {
     serial_write(" mac=");
     write_mac(ral, rah);
     serial_write(" packet-io=not-implemented\r\n");
+
+    let _ = vmm::unmap_mmio_region(mmio_virt, E1000_MMIO_MAP_SIZE);
 
     Ok(ProbeResult {
         mmio_ready: true,

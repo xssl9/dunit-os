@@ -1,6 +1,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
+#[cfg(feature = "boot-smoke-tests")]
 use core::sync::atomic::{AtomicBool, Ordering};
 
 #[repr(u64)]
@@ -27,6 +28,7 @@ pub enum Syscall {
     KillProcess = 18,
     Sleep = 19,
     DebugLog = 20,
+    #[cfg(feature = "boot-smoke-tests")]
     SmokeDone = 21,
     GetCwd = 22,
     Chdir = 23,
@@ -61,6 +63,7 @@ impl Syscall {
             18 => Some(Syscall::KillProcess),
             19 => Some(Syscall::Sleep),
             20 => Some(Syscall::DebugLog),
+            #[cfg(feature = "boot-smoke-tests")]
             21 => Some(Syscall::SmokeDone),
             22 => Some(Syscall::GetCwd),
             23 => Some(Syscall::Chdir),
@@ -89,6 +92,7 @@ pub const ENFILE: i64 = -23;
 pub const EOPNOTSUPP: i64 = -95;
 pub const ECHILD: i64 = -10;
 pub const EAGAIN: i64 = -11;
+pub const ENOMEM: i64 = -12;
 pub const EINTR: i64 = -4;
 pub const EMSGSIZE: i64 = -90;
 pub const ENOBUFS: i64 = -105;
@@ -168,26 +172,39 @@ const MAX_FD: u32 = 1024;
 const MAX_USER_COPY: usize = 64 * 1024;
 const MAX_USER_PATH: usize = 256;
 const MAX_USER_DIRENTS: usize = 64;
-const SMOKE_RETURN_MAGIC: i64 = 0x0051_5953_4341_4C4C;
+const USER_CONTEXT_RETURN_MAGIC: i64 = 0x0051_5953_4341_4C4C;
+#[cfg(feature = "boot-smoke-tests")]
 const SMOKE_USER_PAGE: usize = 0x0000_0000_0040_0000;
+#[cfg(feature = "boot-smoke-tests")]
 const SMOKE_USER_PATH: usize = SMOKE_USER_PAGE;
+#[cfg(feature = "boot-smoke-tests")]
 const SMOKE_USER_WRITE: usize = SMOKE_USER_PAGE + 64;
+#[cfg(feature = "boot-smoke-tests")]
 const SMOKE_USER_READ: usize = SMOKE_USER_PAGE + 128;
+#[cfg(feature = "boot-smoke-tests")]
 const SMOKE_USER_APPEND_A: usize = SMOKE_USER_PAGE + 192;
+#[cfg(feature = "boot-smoke-tests")]
 const SMOKE_USER_APPEND_B: usize = SMOKE_USER_PAGE + 256;
+#[cfg(feature = "boot-smoke-tests")]
 const SMOKE_USER_STDOUT: usize = SMOKE_USER_PAGE + 320;
+#[cfg(feature = "boot-smoke-tests")]
 const SMOKE_FS_PATH: &[u8] = b"/tmp/syscall-smoke.txt";
+#[cfg(feature = "boot-smoke-tests")]
 const SMOKE_FS_DATA: &[u8] = b"hello";
+#[cfg(feature = "boot-smoke-tests")]
 const SMOKE_APPEND_A: &[u8] = b"A";
+#[cfg(feature = "boot-smoke-tests")]
 const SMOKE_APPEND_B: &[u8] = b"B";
+#[cfg(feature = "boot-smoke-tests")]
 const SMOKE_STDOUT_DATA: &[u8] = b"[STDOUT-TEST] hello from userspace\n";
 const EXEC_PATH: &str = "/app";
 
+#[cfg(feature = "boot-smoke-tests")]
 static SYSCALL_SMOKE_OK: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "boot-smoke-tests")]
 static SYSCALL_FS_SMOKE_OK: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "boot-smoke-tests")]
 static SYSCALL_FS_SEMANTICS_OK: AtomicBool = AtomicBool::new(false);
-static ELF_TEST_RUNNING: AtomicBool = AtomicBool::new(false);
-static ELF_TEST_RETURNED: AtomicBool = AtomicBool::new(false);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -196,9 +213,11 @@ pub struct WaitStatus {
     pub code: i32,
 }
 
+#[cfg(feature = "boot-smoke-tests")]
 #[repr(align(4096))]
 struct UserSmokeStack([u8; 4096]);
 
+#[cfg(feature = "boot-smoke-tests")]
 static mut USER_SMOKE_STACK: UserSmokeStack = UserSmokeStack([0; 4096]);
 
 struct SyscallLogWriter;
@@ -274,8 +293,7 @@ fn validate_user_mapping(ptr: u64, size: usize, writable: bool) -> Result<(), i6
         )
         .map_err(|_| EFAULT)?
         .ok_or(EFAULT)?;
-        let required = crate::memory::vmm::PageFlags::PRESENT
-            | crate::memory::vmm::PageFlags::USER;
+        let required = crate::memory::vmm::PageFlags::PRESENT | crate::memory::vmm::PageFlags::USER;
         if !flags.contains(required)
             || (writable && !flags.contains(crate::memory::vmm::PageFlags::WRITABLE))
         {
@@ -444,6 +462,7 @@ pub extern "C" fn syscall_handler(
         Syscall::KillProcess => sys_kill_process(arg0 as u32),
         Syscall::Sleep => sys_sleep(arg0),
         Syscall::DebugLog => sys_debug_log(arg0),
+        #[cfg(feature = "boot-smoke-tests")]
         Syscall::SmokeDone => sys_smoke_done(arg0 as i32),
         Syscall::GetCwd => sys_getcwd(arg0 as *mut u8, arg1 as usize),
         Syscall::Chdir => sys_chdir(arg0 as *const u8, arg1 as usize),
@@ -463,7 +482,7 @@ pub extern "C" fn syscall_handler(
 fn sys_exit(code: i32) -> i64 {
     if let Some(pid) = crate::process::request_current_user_exit(code) {
         syscall_log!("[PROCESS-RUN] exited pid={} code={}\r\n", pid.0, code);
-        return SMOKE_RETURN_MAGIC;
+        return USER_CONTEXT_RETURN_MAGIC;
     }
 
     0
@@ -785,16 +804,36 @@ fn write_terminal_foreground(data: &[u8]) {
     }
 }
 
-fn sys_mmap(addr: usize, length: usize, _prot: u32, _flags: u32) -> i64 {
+fn sys_mmap(addr: usize, length: usize, prot: u32, flags: u32) -> i64 {
+    const PROT_READ: u32 = 1 << 0;
+    const PROT_WRITE: u32 = 1 << 1;
+    const PROT_EXEC: u32 = 1 << 2;
+    const MAP_PRIVATE: u32 = 1 << 1;
+    const MAP_ANONYMOUS: u32 = 1 << 5;
+
     if length == 0 {
         return EINVAL;
     }
-
-    if addr != 0 && !is_valid_user_pointer(addr as u64, length) {
+    if prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0
+        || flags & !(MAP_PRIVATE | MAP_ANONYMOUS) != 0
+        || flags & (MAP_PRIVATE | MAP_ANONYMOUS) != (MAP_PRIVATE | MAP_ANONYMOUS)
+    {
+        return EINVAL;
+    }
+    if addr != 0 && (addr & 0xFFF) != 0 {
         return EINVAL;
     }
 
-    ENOSYS
+    match crate::process::current_process_mut() {
+        Some(process) => {
+            match process.map_anonymous(addr, length, prot & PROT_WRITE != 0, prot & PROT_EXEC != 0)
+            {
+                Ok(mapped) => mapped as i64,
+                Err(error) => process_error_to_errno(error),
+            }
+        }
+        None => EINVAL,
+    }
 }
 
 fn open_flags_from_u32(flags: u32) -> Result<crate::fs::vfs::OpenFlags, i64> {
@@ -826,13 +865,16 @@ fn process_error_to_errno(error: crate::process::ProcessError) -> i64 {
         crate::process::ProcessError::NotRunnable => EAGAIN,
         crate::process::ProcessError::SchedulerUnavailable => EAGAIN,
         crate::process::ProcessError::ProcessAlreadyExists => EEXIST,
+        crate::process::ProcessError::AddressInUse => EEXIST,
+        crate::process::ProcessError::OutOfMemory => ENOMEM,
         crate::process::ProcessError::InvalidFd => EBADF,
         crate::process::ProcessError::FdTableFull => ENFILE,
         crate::process::ProcessError::NoAddressSpace
         | crate::process::ProcessError::AddressSpaceCreateFailed
         | crate::process::ProcessError::NoKernelStack
         | crate::process::ProcessError::InvalidUserContext
-        | crate::process::ProcessError::ProcessNotPrepared => EINVAL,
+        | crate::process::ProcessError::ProcessNotPrepared
+        | crate::process::ProcessError::InvalidMemoryRange => EINVAL,
     }
 }
 
@@ -1176,11 +1218,11 @@ fn sys_yield() -> i64 {
         .unwrap_or(crate::process::ProcessId(0));
     match crate::process::scheduler::pick_next_candidate_excluding(current_pid) {
         Some(pid) => match crate::process::save_current_user_context_for_yield(pid) {
-            Ok(_) => SMOKE_RETURN_MAGIC,
+            Ok(_) => USER_CONTEXT_RETURN_MAGIC,
             Err(error) => process_error_to_errno(error),
         },
         None => match crate::process::save_current_user_context_for_yield(current_pid) {
-            Ok(_) => SMOKE_RETURN_MAGIC,
+            Ok(_) => USER_CONTEXT_RETURN_MAGIC,
             Err(error) => process_error_to_errno(error),
         },
     }
@@ -1228,7 +1270,7 @@ fn sys_kill_process(pid: u32) -> i64 {
         return EINVAL;
     }
     match crate::process::kill_process(crate::process::ProcessId(pid as u64), -9) {
-        Ok(true) => SMOKE_RETURN_MAGIC,
+        Ok(true) => USER_CONTEXT_RETURN_MAGIC,
         Ok(false) => 0,
         Err(error) => process_error_to_errno(error),
     }
@@ -1322,22 +1364,26 @@ fn sys_sleep(ms: u64) -> i64 {
 
 fn sys_debug_log(code: u64) -> i64 {
     match code {
+        #[cfg(feature = "boot-smoke-tests")]
         1 => {
             syscall_log!("[SYSCALL-TEST] userspace syscall OK\r\n");
             SYSCALL_SMOKE_OK.store(true, Ordering::SeqCst);
             0
         }
+        #[cfg(feature = "boot-smoke-tests")]
         2 => {
             if user_fs_smoke_readback_ok() {
                 SYSCALL_FS_SMOKE_OK.store(true, Ordering::SeqCst);
             }
             0
         }
+        #[cfg(feature = "boot-smoke-tests")]
         3 => {
             SYSCALL_FS_SMOKE_OK.store(true, Ordering::SeqCst);
             SYSCALL_FS_SEMANTICS_OK.store(true, Ordering::SeqCst);
             0
         }
+        #[cfg(feature = "boot-smoke-tests")]
         4 => {
             syscall_log!("[SYSCALL-FS-SEMANTICS-TEST] failed in userspace payload\r\n");
             0
@@ -1349,6 +1395,7 @@ fn sys_debug_log(code: u64) -> i64 {
     }
 }
 
+#[cfg(feature = "boot-smoke-tests")]
 fn sys_smoke_done(exit_code: i32) -> i64 {
     if let Some(pid) = crate::process::request_current_user_exit(exit_code) {
         syscall_log!(
@@ -1356,7 +1403,7 @@ fn sys_smoke_done(exit_code: i32) -> i64 {
             pid.0,
             exit_code
         );
-        return SMOKE_RETURN_MAGIC;
+        return USER_CONTEXT_RETURN_MAGIC;
     }
 
     if SYSCALL_SMOKE_OK.load(Ordering::SeqCst) {
@@ -1365,9 +1412,10 @@ fn sys_smoke_done(exit_code: i32) -> i64 {
         syscall_log!("[SYSCALL-TEST] smoke done before debug log\r\n");
     }
 
-    SMOKE_RETURN_MAGIC
+    USER_CONTEXT_RETURN_MAGIC
 }
 
+#[cfg(feature = "boot-smoke-tests")]
 pub fn run_userspace_syscall_smoke() -> bool {
     SYSCALL_SMOKE_OK.store(false, Ordering::SeqCst);
     SYSCALL_FS_SMOKE_OK.store(false, Ordering::SeqCst);
@@ -1427,16 +1475,7 @@ pub fn run_userspace_syscall_smoke() -> bool {
     ok && fs_ok && semantics_ok
 }
 
-pub fn begin_elf_test() {
-    ELF_TEST_RETURNED.store(false, Ordering::SeqCst);
-    ELF_TEST_RUNNING.store(true, Ordering::SeqCst);
-}
-
-pub fn finish_elf_test() -> bool {
-    ELF_TEST_RUNNING.store(false, Ordering::SeqCst);
-    ELF_TEST_RETURNED.load(Ordering::SeqCst)
-}
-
+#[cfg(feature = "boot-smoke-tests")]
 extern "C" fn user_syscall_smoke_entry() -> ! {
     unsafe {
         core::arch::asm!(
@@ -1680,6 +1719,7 @@ extern "C" fn user_syscall_smoke_entry() -> ! {
     }
 }
 
+#[cfg(feature = "boot-smoke-tests")]
 unsafe fn prepare_user_fs_smoke_page() -> Result<(), ()> {
     let hhdm = crate::memory::vmm::get_hhdm_offset() as usize;
     if hhdm == 0 {
@@ -1710,6 +1750,7 @@ unsafe fn prepare_user_fs_smoke_page() -> Result<(), ()> {
     Ok(())
 }
 
+#[cfg(feature = "boot-smoke-tests")]
 fn user_fs_smoke_readback_ok() -> bool {
     for (offset, expected) in SMOKE_FS_DATA.iter().enumerate() {
         let actual = unsafe { core::ptr::read_volatile((SMOKE_USER_READ + offset) as *const u8) };

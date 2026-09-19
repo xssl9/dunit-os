@@ -237,12 +237,18 @@ fn bring_up_controller(dev: PciDevice) -> Result<(), AhciError> {
     let abar =
         vmm::map_mmio_region(abar_phys as usize, AHCI_MMIO_SIZE).ok_or(AhciError::MmioMap)?;
 
-    bios_handoff(abar)?;
+    if let Err(error) = bios_handoff(abar) {
+        let _ = vmm::unmap_mmio_region(abar, AHCI_MMIO_SIZE);
+        return Err(error);
+    }
     write32(abar, HBA_GHC, read32(abar, HBA_GHC) | GHC_AE | GHC_HR);
-    wait_until(
+    if let Err(error) = wait_until(
         || (read32(abar, HBA_GHC) & GHC_HR) == 0,
         AhciError::ResetTimeout,
-    )?;
+    ) {
+        let _ = vmm::unmap_mmio_region(abar, AHCI_MMIO_SIZE);
+        return Err(error);
+    }
     write32(abar, HBA_GHC, read32(abar, HBA_GHC) | GHC_AE);
 
     let cap = read32(abar, HBA_CAP);

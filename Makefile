@@ -21,6 +21,19 @@ BUILD_DIR = build
 ISO_DIR = $(BUILD_DIR)/iso
 USERSPACE_BUILD_DIR = $(BUILD_DIR)/userspace
 
+USERSPACE_APPS = \
+	elf_demo fs_test exit_test args_test cwd_test path_test image_demo bmp_viewer \
+	scheduler_test spawn_ready_test yield_child yield_test resumable_child resumable_test \
+	ipc_child ipc_parent runtime_stress input_test file_api_test env_test calc gui_ping \
+	gui_terminal_stub gui_calculator gui_stats gui_file_manager stdin_test fault_pf fault_ud dtop
+USERSPACE_CARGO_FLAGS = --release --target ../../../userspace/x86_64-unknown-none.json \
+	-Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
+
+KERNEL_FEATURES =
+ifneq ($(filter limine_test_terminal.conf limine_test_gui.conf,$(notdir $(LIMINE_CONFIG))),)
+KERNEL_FEATURES = --features boot-smoke-tests
+endif
+
 HAL_OBJS = $(BUILD_DIR)/boot.o $(BUILD_DIR)/boot_main.o $(BUILD_DIR)/limine.o $(BUILD_DIR)/hal.o $(BUILD_DIR)/ports.o \
            $(BUILD_DIR)/gdt.o $(BUILD_DIR)/gdt_asm.o \
            $(BUILD_DIR)/idt.o $(BUILD_DIR)/idt_asm.o $(BUILD_DIR)/interrupts.o \
@@ -78,7 +91,7 @@ $(BUILD_DIR)/hal_test.o: $(HAL_DIR)/src/hal_test.c | $(BUILD_DIR)
 hal: $(HAL_OBJS)
 
 $(BUILD_DIR)/kernel.o: hal userspace
-	cd $(KERNEL_DIR) && $(CARGO) build --release -Z build-std=core,alloc,compiler_builtins -Z build-std-features=compiler-builtins-mem -Z json-target-spec
+	cd $(KERNEL_DIR) && $(CARGO) build --release $(KERNEL_FEATURES) -Z build-std=core,alloc,compiler_builtins -Z build-std-features=compiler-builtins-mem -Z json-target-spec
 	cp $(KERNEL_DIR)/target/x86_64-unknown-none/release/libkernel.a $(BUILD_DIR)/kernel.o
 
 kernel: $(BUILD_DIR)/kernel.o
@@ -89,66 +102,11 @@ $(BUILD_DIR)/kernel.elf: kernel
 userspace:
 	mkdir -p $(USERSPACE_BUILD_DIR)
 	rm -f $(USERSPACE_BUILD_DIR)/*
-	cd $(USERSPACE_DIR)/system_apps/elf_demo && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/elf_demo/target/x86_64-unknown-none/release/elf_demo $(USERSPACE_BUILD_DIR)/elf_demo
-	cd $(USERSPACE_DIR)/system_apps/fs_test && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/fs_test/target/x86_64-unknown-none/release/fs_test $(USERSPACE_BUILD_DIR)/fs_test
-	cd $(USERSPACE_DIR)/system_apps/exit_test && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/exit_test/target/x86_64-unknown-none/release/exit_test $(USERSPACE_BUILD_DIR)/exit_test
-	cd $(USERSPACE_DIR)/system_apps/args_test && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/args_test/target/x86_64-unknown-none/release/args_test $(USERSPACE_BUILD_DIR)/args_test
-	cd $(USERSPACE_DIR)/system_apps/cwd_test && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/cwd_test/target/x86_64-unknown-none/release/cwd_test $(USERSPACE_BUILD_DIR)/cwd_test
-	cd $(USERSPACE_DIR)/system_apps/path_test && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/path_test/target/x86_64-unknown-none/release/path_test $(USERSPACE_BUILD_DIR)/path_test
-	cd $(USERSPACE_DIR)/system_apps/image_demo && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/image_demo/target/x86_64-unknown-none/release/image_demo $(USERSPACE_BUILD_DIR)/image_demo
-	cd $(USERSPACE_DIR)/system_apps/bmp_viewer && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/bmp_viewer/target/x86_64-unknown-none/release/bmp_viewer $(USERSPACE_BUILD_DIR)/bmp_viewer
-	cd $(USERSPACE_DIR)/system_apps/scheduler_test && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/scheduler_test/target/x86_64-unknown-none/release/scheduler_test $(USERSPACE_BUILD_DIR)/scheduler_test
-	cd $(USERSPACE_DIR)/system_apps/spawn_ready_test && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/spawn_ready_test/target/x86_64-unknown-none/release/spawn_ready_test $(USERSPACE_BUILD_DIR)/spawn_ready_test
-	cd $(USERSPACE_DIR)/system_apps/yield_child && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/yield_child/target/x86_64-unknown-none/release/yield_child $(USERSPACE_BUILD_DIR)/yield_child
-	cd $(USERSPACE_DIR)/system_apps/yield_test && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/yield_test/target/x86_64-unknown-none/release/yield_test $(USERSPACE_BUILD_DIR)/yield_test
-	cd $(USERSPACE_DIR)/system_apps/resumable_child && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/resumable_child/target/x86_64-unknown-none/release/resumable_child $(USERSPACE_BUILD_DIR)/resumable_child
-	cd $(USERSPACE_DIR)/system_apps/resumable_test && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/resumable_test/target/x86_64-unknown-none/release/resumable_test $(USERSPACE_BUILD_DIR)/resumable_test
-	cd $(USERSPACE_DIR)/system_apps/ipc_child && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/ipc_child/target/x86_64-unknown-none/release/ipc_child $(USERSPACE_BUILD_DIR)/ipc_child
-	cd $(USERSPACE_DIR)/system_apps/ipc_parent && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/ipc_parent/target/x86_64-unknown-none/release/ipc_parent $(USERSPACE_BUILD_DIR)/ipc_parent
-	cd $(USERSPACE_DIR)/system_apps/runtime_stress && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/runtime_stress/target/x86_64-unknown-none/release/runtime_stress $(USERSPACE_BUILD_DIR)/runtime_stress
-	cd $(USERSPACE_DIR)/system_apps/input_test && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/input_test/target/x86_64-unknown-none/release/input_test $(USERSPACE_BUILD_DIR)/input_test
-	cd $(USERSPACE_DIR)/system_apps/file_api_test && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/file_api_test/target/x86_64-unknown-none/release/file_api_test $(USERSPACE_BUILD_DIR)/file_api_test
-	cd $(USERSPACE_DIR)/system_apps/env_test && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/env_test/target/x86_64-unknown-none/release/env_test $(USERSPACE_BUILD_DIR)/env_test
-	cd $(USERSPACE_DIR)/system_apps/calc && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/calc/target/x86_64-unknown-none/release/calc $(USERSPACE_BUILD_DIR)/calc
-	cd $(USERSPACE_DIR)/system_apps/gui_ping && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/gui_ping/target/x86_64-unknown-none/release/gui_ping $(USERSPACE_BUILD_DIR)/gui_ping
-	cd $(USERSPACE_DIR)/system_apps/gui_terminal_stub && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/gui_terminal_stub/target/x86_64-unknown-none/release/gui_terminal_stub $(USERSPACE_BUILD_DIR)/gui_terminal_stub
-	cd $(USERSPACE_DIR)/system_apps/gui_calculator && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/gui_calculator/target/x86_64-unknown-none/release/gui_calculator $(USERSPACE_BUILD_DIR)/gui_calculator
-	cd $(USERSPACE_DIR)/system_apps/gui_stats && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/gui_stats/target/x86_64-unknown-none/release/gui_stats $(USERSPACE_BUILD_DIR)/gui_stats
-	cd $(USERSPACE_DIR)/system_apps/gui_file_manager && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/gui_file_manager/target/x86_64-unknown-none/release/gui_file_manager $(USERSPACE_BUILD_DIR)/gui_file_manager
-	cd $(USERSPACE_DIR)/system_apps/stdin_test && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/stdin_test/target/x86_64-unknown-none/release/stdin_test $(USERSPACE_BUILD_DIR)/stdin_test
-	cd $(USERSPACE_DIR)/system_apps/fault_pf && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/fault_pf/target/x86_64-unknown-none/release/fault_pf $(USERSPACE_BUILD_DIR)/fault_pf
-	cd $(USERSPACE_DIR)/system_apps/fault_ud && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/fault_ud/target/x86_64-unknown-none/release/fault_ud $(USERSPACE_BUILD_DIR)/fault_ud
-	cd $(USERSPACE_DIR)/system_apps/dtop && $(CARGO) build --release --target ../../../userspace/x86_64-unknown-none.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
-	cp $(USERSPACE_DIR)/system_apps/dtop/target/x86_64-unknown-none/release/dtop $(USERSPACE_BUILD_DIR)/dtop
+	@set -e; for app in $(USERSPACE_APPS); do \
+		echo "[USERSPACE] building $$app"; \
+		(cd $(USERSPACE_DIR)/system_apps/$$app && $(CARGO) build $(USERSPACE_CARGO_FLAGS)); \
+		cp $(USERSPACE_DIR)/system_apps/$$app/target/x86_64-unknown-none/release/$$app $(USERSPACE_BUILD_DIR)/$$app; \
+	done
 	@echo "Userspace programs built in $(USERSPACE_BUILD_DIR)/"
 
 iso: $(BUILD_DIR)/kernel.elf userspace

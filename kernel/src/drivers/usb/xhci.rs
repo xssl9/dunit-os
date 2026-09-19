@@ -145,6 +145,7 @@ pub fn init() {
                         serial_write("\r\n");
                     }
                 }
+                let _ = vmm::unmap_mmio_region(controller.mmio_virt, XHCI_MMIO_MAP_SIZE);
             }
             Err(error) => {
                 XHCI_LAST_ERROR.store(error.code(), Ordering::Relaxed);
@@ -182,67 +183,73 @@ fn bring_up_controller(dev: PciDevice) -> Result<XhciController, XhciError> {
 
     let mmio_virt =
         vmm::map_mmio_region(mmio_phys as usize, XHCI_MMIO_MAP_SIZE).ok_or(XhciError::MmioMap)?;
-    let cap_length = read8(mmio_virt, CAP_CAPLENGTH) as usize;
-    if cap_length < 0x20 || cap_length > 0x100 {
-        return Err(XhciError::BadCapabilityLength);
-    }
+    let result = (|| {
+        let cap_length = read8(mmio_virt, CAP_CAPLENGTH) as usize;
+        if cap_length < 0x20 || cap_length > 0x100 {
+            return Err(XhciError::BadCapabilityLength);
+        }
 
-    let raw_version = read16(mmio_virt, CAP_HCIVERSION);
-    let version = normalize_hci_version(raw_version);
-    let hcsparams1 = read32(mmio_virt, CAP_HCSPARAMS1);
-    let hcsparams2 = read32(mmio_virt, CAP_HCSPARAMS2);
-    let hccparams1 = read32(mmio_virt, CAP_HCCPARAMS1);
-    let max_slots = (hcsparams1 & 0xFF) as u8;
-    let max_ports = ((hcsparams1 >> 24) & 0xFF) as u8;
-    if version < 0x0090 && !hcsparams_look_valid(hcsparams1) {
-        serial_write("[USB:xHCI] unsupported version raw=");
-        write_hex(raw_version as u64, 4);
-        serial_write(" normalized=");
+        let raw_version = read16(mmio_virt, CAP_HCIVERSION);
+        let version = normalize_hci_version(raw_version);
+        let hcsparams1 = read32(mmio_virt, CAP_HCSPARAMS1);
+        let hcsparams2 = read32(mmio_virt, CAP_HCSPARAMS2);
+        let hccparams1 = read32(mmio_virt, CAP_HCCPARAMS1);
+        let max_slots = (hcsparams1 & 0xFF) as u8;
+        let max_ports = ((hcsparams1 >> 24) & 0xFF) as u8;
+        if version < 0x0090 && !hcsparams_look_valid(hcsparams1) {
+            serial_write("[USB:xHCI] unsupported version raw=");
+            write_hex(raw_version as u64, 4);
+            serial_write(" normalized=");
+            write_hex(version as u64, 4);
+            serial_write("\r\n");
+            return Err(XhciError::UnsupportedVersion);
+        }
+        if version < 0x0090 {
+            serial_write("[USB:xHCI] version register is non-standard raw=");
+            write_hex(raw_version as u64, 4);
+            serial_write("; continuing because HCSPARAMS1 is plausible\r\n");
+        }
+
+        let doorbell_offset = read32(mmio_virt, CAP_DBOFF) & !0x3;
+        let runtime_offset = read32(mmio_virt, CAP_RTSOFF) & !0x1F;
+
+        serial_write("[USB:xHCI] version=");
         write_hex(version as u64, 4);
+        if raw_version != version {
+            serial_write(" raw=");
+            write_hex(raw_version as u64, 4);
+        }
+        serial_write(" hcs1=");
+        write_hex(hcsparams1 as u64, 8);
+        serial_write(" hcs2=");
+        write_hex(hcsparams2 as u64, 8);
+        serial_write(" hcc1=");
+        write_hex(hccparams1 as u64, 8);
         serial_write("\r\n");
-        return Err(XhciError::UnsupportedVersion);
+
+        let op = mmio_virt + cap_length;
+        halt_controller(op)?;
+        reset_controller(op)?;
+
+        if max_slots != 0 {
+            write32(op, OP_CONFIG, max_slots as u32);
+        }
+
+        Ok(XhciController {
+            pci: dev,
+            mmio_phys,
+            mmio_virt,
+            cap_length,
+            max_slots,
+            max_ports,
+            doorbell_offset,
+            runtime_offset,
+        })
+    })();
+    if result.is_err() {
+        let _ = vmm::unmap_mmio_region(mmio_virt, XHCI_MMIO_MAP_SIZE);
     }
-    if version < 0x0090 {
-        serial_write("[USB:xHCI] version register is non-standard raw=");
-        write_hex(raw_version as u64, 4);
-        serial_write("; continuing because HCSPARAMS1 is plausible\r\n");
-    }
-
-    let doorbell_offset = read32(mmio_virt, CAP_DBOFF) & !0x3;
-    let runtime_offset = read32(mmio_virt, CAP_RTSOFF) & !0x1F;
-
-    serial_write("[USB:xHCI] version=");
-    write_hex(version as u64, 4);
-    if raw_version != version {
-        serial_write(" raw=");
-        write_hex(raw_version as u64, 4);
-    }
-    serial_write(" hcs1=");
-    write_hex(hcsparams1 as u64, 8);
-    serial_write(" hcs2=");
-    write_hex(hcsparams2 as u64, 8);
-    serial_write(" hcc1=");
-    write_hex(hccparams1 as u64, 8);
-    serial_write("\r\n");
-
-    let op = mmio_virt + cap_length;
-    halt_controller(op)?;
-    reset_controller(op)?;
-
-    if max_slots != 0 {
-        write32(op, OP_CONFIG, max_slots as u32);
-    }
-
-    Ok(XhciController {
-        pci: dev,
-        mmio_phys,
-        mmio_virt,
-        cap_length,
-        max_slots,
-        max_ports,
-        doorbell_offset,
-        runtime_offset,
-    })
+    result
 }
 
 fn find_xhci_mmio_bar(dev: PciDevice) -> Result<u64, XhciError> {
@@ -311,9 +318,11 @@ fn mmio_bar_looks_like_xhci(phys: u64) -> bool {
     write_hex(hcsparams1 as u64, 8);
     serial_write("\r\n");
 
-    (cap_length as usize) >= 0x20
+    let valid = (cap_length as usize) >= 0x20
         && (cap_length as usize) <= 0x100
-        && (version >= 0x0090 || hcsparams_look_valid(hcsparams1))
+        && (version >= 0x0090 || hcsparams_look_valid(hcsparams1));
+    let _ = vmm::unmap_mmio_region(virt, 0x1000);
+    valid
 }
 
 fn hcsparams_look_valid(hcsparams1: u32) -> bool {

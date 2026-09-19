@@ -101,7 +101,10 @@ fn init_device(dev: pci::PciDevice) -> Option<VirtioBlkDevice> {
 
     outb(io_base + REG_DEVICE_STATUS, 0);
     outb(io_base + REG_DEVICE_STATUS, STATUS_ACKNOWLEDGE);
-    outb(io_base + REG_DEVICE_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER);
+    outb(
+        io_base + REG_DEVICE_STATUS,
+        STATUS_ACKNOWLEDGE | STATUS_DRIVER,
+    );
 
     let _device_features = inl(io_base + REG_DEVICE_FEATURES);
     outl(io_base + REG_GUEST_FEATURES, 0);

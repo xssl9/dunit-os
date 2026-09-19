@@ -1,6 +1,9 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use alloc::vec::Vec;
 use core::panic::PanicInfo;
 
 const STRESS_PATH: &str = "/tmp/runtime_stress.txt";
@@ -156,6 +159,70 @@ fn exercise_vfs() {
     libdunit::println("runtime_stress: vfs OK");
 }
 
+fn exercise_allocator_and_mmap() {
+    libdunit::println("runtime_stress: allocator start");
+    const LARGE_ALLOCATION: usize = 192 * 1024;
+
+    {
+        let mut bytes = Vec::with_capacity(LARGE_ALLOCATION);
+        bytes.resize(LARGE_ALLOCATION, 0);
+        let mut index = 0usize;
+        while index < bytes.len() {
+            bytes[index] = (index as u8).wrapping_mul(31).wrapping_add(7);
+            index += 1;
+        }
+        let mut check = 0usize;
+        while check < bytes.len() {
+            let expected = (check as u8).wrapping_mul(31).wrapping_add(7);
+            if bytes[check] != expected {
+                fail("allocator data mismatch", 27);
+            }
+            check += 4093;
+        }
+    }
+
+    let mut before = libdunit::SystemStats::default();
+    if libdunit::get_system_stats(&mut before) != 0 {
+        fail("allocator stats before", 28);
+    }
+    let mut round = 0usize;
+    while round < 8 {
+        let mut bytes = Vec::with_capacity(LARGE_ALLOCATION);
+        bytes.resize(LARGE_ALLOCATION, round as u8);
+        if bytes[round * 4096] != round as u8 {
+            fail("allocator repeated data mismatch", 29);
+        }
+        drop(bytes);
+        round += 1;
+    }
+    let mut after = libdunit::SystemStats::default();
+    if libdunit::get_system_stats(&mut after) != 0 || after.pmm_free_bytes != before.pmm_free_bytes
+    {
+        fail("allocator did not reuse freed pages", 30);
+    }
+    libdunit::println("runtime_stress: allocator OK");
+}
+
+fn exercise_keyboard_decoder() {
+    libdunit::println("runtime_stress: keyboard decoder start");
+    if libdunit::scancode_to_char(0x2A).is_some()
+        || libdunit::scancode_to_char(0x1E) != Some('A')
+        || libdunit::scancode_to_char(0x02) != Some('!')
+        || libdunit::scancode_to_char(0xAA).is_some()
+        || libdunit::scancode_to_char(0x1E) != Some('a')
+        || libdunit::scancode_to_char(0x27) != Some(';')
+        || libdunit::scancode_to_char(0x3A).is_some()
+        || libdunit::scancode_to_char(0x1E) != Some('A')
+        || libdunit::scancode_to_char(0x2A).is_some()
+        || libdunit::scancode_to_char(0x1E) != Some('a')
+        || libdunit::scancode_to_char(0xAA).is_some()
+        || libdunit::scancode_to_char(0x3A).is_some()
+    {
+        fail("keyboard modifier decoding", 31);
+    }
+    libdunit::println("runtime_stress: keyboard decoder OK");
+}
+
 fn exercise_invalid_user_copies() {
     libdunit::println("runtime_stress: usercopy start");
     const UNMAPPED: usize = 0x5000_0000;
@@ -165,8 +232,7 @@ fn exercise_invalid_user_copies() {
         fail("unmapped write buffer was not rejected", 37);
     }
 
-    let write_to_invalid =
-        libdunit::syscall1(libdunit::SYSCALL_GET_SYSTEM_STATS, UNMAPPED);
+    let write_to_invalid = libdunit::syscall1(libdunit::SYSCALL_GET_SYSTEM_STATS, UNMAPPED);
     if write_to_invalid != libdunit::EFAULT {
         fail("unmapped stats buffer was not rejected", 38);
     }
@@ -278,6 +344,8 @@ fn exercise_fault_after_normal_apps() {
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     libdunit::println("runtime_stress: start");
+    exercise_allocator_and_mmap();
+    exercise_keyboard_decoder();
     exercise_vfs();
     exercise_invalid_user_copies();
     exercise_resumable_roundtrip();

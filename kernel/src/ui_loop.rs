@@ -1105,9 +1105,8 @@ fn keyboard_target_gui_app(state: &UiState) -> Option<usize> {
     {
         return Some(focused);
     }
-    gui_app_slot_by_kind(state, GuiAppKind::Terminal).filter(|index| {
-        state.gui_apps[*index].running && state.gui_apps[*index].window_id != 0
-    })
+    gui_app_slot_by_kind(state, GuiAppKind::Terminal)
+        .filter(|index| state.gui_apps[*index].running && state.gui_apps[*index].window_id != 0)
 }
 
 fn reset_sticky_modifiers(state: &mut UiState) {
@@ -1329,7 +1328,6 @@ fn gui_terminal_append_process_state(
         },
     );
 }
-
 
 /// Line-buffering sink that routes shared-shell output into a GUI terminal
 /// window. Bytes accumulate until a newline, then flush as one terminal line.
@@ -3513,13 +3511,7 @@ fn redraw_region(fb: Framebuffer, width: usize, height: usize, rect: Rect, state
                         gui_rect.height + 14,
                     ),
                 ) {
-                    draw_gui_app_window(
-                        fb,
-                        width,
-                        height,
-                        &state.gui_apps[app_index],
-                        false,
-                    );
+                    draw_gui_app_window(fb, width, height, &state.gui_apps[app_index], false);
                 }
             }
         }
@@ -4021,8 +4013,7 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
     draw_cursor(front, width, height, old_mouse_x, old_mouse_y);
 
     loop {
-        let (keyboard_full, keyboard_damage) =
-            handle_keyboard_shortcuts(&mut state, width, height);
+        let (keyboard_full, keyboard_damage) = handle_keyboard_shortcuts(&mut state, width, height);
         mouse::update();
         let (mouse_x, mouse_y) = crate::input::mouse_position();
         let buttons = crate::input::mouse_buttons();
@@ -4286,8 +4277,9 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                                     offset_x,
                                     offset_y,
                                 } => (idx, offset_x, offset_y),
-                                PointerOp::GuiAppDrag { .. }
-                                | PointerOp::GuiAppResize { .. } => unreachable!(),
+                                PointerOp::GuiAppDrag { .. } | PointerOp::GuiAppResize { .. } => {
+                                    unreachable!()
+                                }
                             };
                             let old_bounds = wm.window_bounds(idx);
                             match op {
@@ -4307,8 +4299,7 @@ pub fn run_ui_loop(fb_addr: *mut u32, width: usize, height: usize, pitch: usize)
                                         wm.resize_window(idx, target_w, target_h, width, height);
                                     }
                                 }
-                                PointerOp::GuiAppDrag { .. }
-                                | PointerOp::GuiAppResize { .. } => {}
+                                PointerOp::GuiAppDrag { .. } | PointerOp::GuiAppResize { .. } => {}
                             }
                             let new_bounds = wm.window_bounds(idx);
                             if let (Some(old_bounds), Some(new_bounds)) = (old_bounds, new_bounds) {

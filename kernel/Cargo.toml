@@ -54,6 +54,10 @@ harness = true
 bootloader = "0.9"
 bitflags = "2.11"
 
+[features]
+default = []
+boot-smoke-tests = []
+
 [dev-dependencies]
 proptest = "1.4"
 

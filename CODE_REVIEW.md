@@ -131,16 +131,15 @@
   `"Window manager: 5 applications registered"`, `"7 processes running"`. Ни одно из
   значений не измеряется. Нужно: либо измерять реально, либо убрать.
 
-- [ ] **Встроенный smoke-тест syscall прогоняется в проде на каждой загрузке.**
-  `kernel/src/syscall/mod.rs`: ~240 строк inline-asm (`user_syscall_smoke_entry`),
-  константы `SMOKE_USER_PAGE = 0x400000`, `SMOKE_RETURN_MAGIC` и ручные обходчики таблиц
-  (`map_current_user_page`, `mark_current_mapping_user`, `ensure_next_table`,
-  `set_user_bit`), запекаемые в релиз и исполняемые каждый boot. Нужно: убрать из
-  продового пути (feature-флаг/тест-таргет).
+- [x] **Встроенный smoke-тест syscall больше не попадает в production.**
+  Inline-asm payload, его syscall, стек, статика и helper-код закрыты
+  feature-флагом `boot-smoke-tests`. Makefile включает его только для
+  `limine_test_terminal.conf` и `limine_test_gui.conf`; production `limine.conf`
+  собирается без smoke-кода и маркеров.
 
-- [ ] **`ADDRSPACE-TEST` smoke также в продовом пути.**
-  `kernel/src/memory/vmm.rs`: `run_address_space_smoke()` создаёт адресное пространство,
-  маппит страницу и пишет магию при каждой загрузке. Место — не в релизе.
+- [x] **`ADDRSPACE-TEST` smoke убран из production-пути.**
+  `run_address_space_smoke`, процессные smoke-тесты и их вызовы также
+  собираются только с `boot-smoke-tests`.
 
 - [x] **Дублирование логики page-table walk.**
   Ручные обходчики удалены из ELF и syscall-модулей. Процессный userspace использует
@@ -156,9 +155,10 @@
   Неинициализируемый `VMM_INSTANCE`, `get_vmm` и весь легаси-тип удалены. Единственный
   API адресных пространств — HHDM-aware `AddressSpace` и функции `memory::vmm`.
 
-- [ ] **MMIO-виртуальный диапазон не переиспользуется.**
-  `kernel/src/memory/vmm.rs`: `map_mmio_region` только двигает `NEXT_MMIO_VIRT` вперёд
-  (bump), освобождение не предусмотрено. При многократном ремапе — исчерпание диапазона.
+- [x] **MMIO-виртуальный диапазон переиспользуется.**
+  Bump заменён на bounded allocator с учётом allocations, `unmap_mmio_region`,
+  возвратом и coalescing свободных extent-ов. Временные net/xHCI-маппинги
+  освобождаются; feature-smoke проверяет повторную выдачу того же адреса.
 
 - [x] **`terminal_cwd()` мутирует состояние в геттере.**
   `kernel/src/lib.rs`: функция-геттер изменяет `static mut TERMINAL_CWD`. Побочный
@@ -169,17 +169,19 @@
   реальным набором команд. README сам отмечает цель «сделать команды менее
   kernel-hardcoded». Нужно: единый реестр команд.
 
-- [ ] **`scancode_to_char` без Shift/регистра/символов.**
-  `userspace/libdunit/src/lib.rs`: таблица скан-кодов только нижний регистр и цифры,
-  без модификаторов. Ограничивает любой ввод в userspace-приложениях.
+- [x] **`scancode_to_char` обрабатывает модификаторы и символы.**
+  Декодер PS/2 Set-1 хранит Left/Right Shift и Caps Lock, игнорирует break-коды,
+  выдаёт верхний/нижний регистр и полный базовый US-набор знаков.
 
-- [ ] **Bump-аллокатор userspace никогда не освобождает память.**
-  `userspace/libdunit/src/lib.rs`: `dealloc` — no-op, куча фиксированные 64 KiB. Для
-  долгоживущих приложений — исчерпание. Для тест-аппов ок, но это затычка.
+- [x] **Userspace allocator освобождает и переиспользует память.**
+  Фиксированные 64 KiB и no-op `dealloc` заменены на синхронизированный free-list
+  allocator с split/coalescing. Он растёт страницами через реальный private-anonymous
+  `mmap`; ядро валидирует флаги, адреса и коллизии, а при ошибке откатывает
+  частично выделенные страницы. Это база для будущей musl libc.
 
-- [ ] **Копипаста цели `userspace:` в Makefile.**
-  `Makefile`: ~30 почти идентичных блоков `cd ... cargo build ... && cp ...` на каждое
-  приложение. Нужно: `foreach` по списку имён приложений.
+- [x] **Копипаста цели `userspace:` в Makefile удалена.**
+  Единые `USERSPACE_APPS`/`USERSPACE_CARGO_FLAGS` и fail-fast цикл собирают и
+  копируют все приложения.
 
 - [x] **`sys_kill_process` = ENOSYS, но `libdunit::kill` присутствует.**
   Userspace выставляет `kill()` (`userspace/libdunit/src/lib.rs`), которого ядро не

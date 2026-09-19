@@ -14,6 +14,7 @@ pub fn init() -> bool {
 
     vmm::init();
     crate::allocator::init();
+    #[cfg(feature = "boot-smoke-tests")]
     vmm::run_address_space_smoke();
     true
 }
