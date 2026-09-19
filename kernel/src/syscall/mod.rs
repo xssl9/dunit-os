@@ -260,10 +260,42 @@ fn validate_user_range(ptr: u64, size: usize) -> Result<(), i64> {
     Ok(())
 }
 
-/// Early user copy validation is range-only until Dunit grows per-process
-/// address spaces and recoverable page-fault handling for kernel copies.
+fn validate_user_mapping(ptr: u64, size: usize, writable: bool) -> Result<(), i64> {
+    validate_user_range(ptr, size)?;
+    if size == 0 {
+        return Ok(());
+    }
+
+    const PAGE_SIZE: u64 = 4096;
+    let first_page = ptr & !(PAGE_SIZE - 1);
+    let last_byte = ptr.checked_add(size as u64 - 1).ok_or(EFAULT)?;
+    let last_page = last_byte & !(PAGE_SIZE - 1);
+    let mut page = first_page;
+
+    loop {
+        let flags = crate::memory::vmm::active_user_page_flags(
+            crate::memory::vmm::VirtualAddress::from_usize(page as usize),
+        )
+        .map_err(|_| EFAULT)?
+        .ok_or(EFAULT)?;
+        let required = crate::memory::vmm::PageFlags::PRESENT
+            | crate::memory::vmm::PageFlags::USER;
+        if !flags.contains(required)
+            || (writable && !flags.contains(crate::memory::vmm::PageFlags::WRITABLE))
+        {
+            return Err(EFAULT);
+        }
+        if page == last_page {
+            break;
+        }
+        page = page.checked_add(PAGE_SIZE).ok_or(EFAULT)?;
+    }
+
+    Ok(())
+}
+
 pub fn user_copy_is_range_checked_only() -> bool {
-    true
+    false
 }
 
 fn is_valid_fd_number(fd: u32) -> bool {
@@ -285,7 +317,7 @@ pub fn copy_string_from_user(ptr: *const u8, max_len: usize) -> Result<String, i
         return Err(EINVAL);
     }
 
-    validate_user_range(ptr as u64, max_len)?;
+    validate_user_mapping(ptr as u64, max_len, false)?;
 
     let mut bytes = Vec::new();
     for offset in 0..max_len {
@@ -323,7 +355,7 @@ pub fn copy_string_from_user_len(
         return Err(ENAMETOOLONG);
     }
 
-    validate_user_range(ptr as u64, len)?;
+    validate_user_mapping(ptr as u64, len, false)?;
 
     let mut bytes = Vec::new();
     for offset in 0..len {
@@ -342,7 +374,7 @@ pub fn copy_buffer_from_user(ptr: *const u8, len: usize) -> Result<Vec<u8>, i64>
         return Ok(Vec::new());
     }
 
-    validate_user_range(ptr as u64, len)?;
+    validate_user_mapping(ptr as u64, len, false)?;
 
     let mut out = Vec::new();
     out.reserve(len);
@@ -359,7 +391,7 @@ pub fn copy_buffer_to_user(ptr: *mut u8, data: &[u8]) -> Result<(), i64> {
         return Ok(());
     }
 
-    validate_user_range(ptr as u64, data.len())?;
+    validate_user_mapping(ptr as u64, data.len(), true)?;
 
     for (offset, byte) in data.iter().enumerate() {
         unsafe {

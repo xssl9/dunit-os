@@ -156,6 +156,24 @@ fn exercise_vfs() {
     libdunit::println("runtime_stress: vfs OK");
 }
 
+fn exercise_invalid_user_copies() {
+    libdunit::println("runtime_stress: usercopy start");
+    const UNMAPPED: usize = 0x5000_0000;
+
+    let read_from_invalid = libdunit::syscall3(libdunit::SYSCALL_WRITE, 1, UNMAPPED, 16);
+    if read_from_invalid != libdunit::EFAULT {
+        fail("unmapped write buffer was not rejected", 37);
+    }
+
+    let write_to_invalid =
+        libdunit::syscall1(libdunit::SYSCALL_GET_SYSTEM_STATS, UNMAPPED);
+    if write_to_invalid != libdunit::EFAULT {
+        fail("unmapped stats buffer was not rejected", 38);
+    }
+
+    libdunit::println("runtime_stress: usercopy OK");
+}
+
 fn exercise_resumable_roundtrip() {
     libdunit::println("runtime_stress: resumable start");
     let child = libdunit::spawn("resumable_child");
@@ -247,6 +265,7 @@ fn exercise_fault_after_normal_apps() {
 pub extern "C" fn _start() -> ! {
     libdunit::println("runtime_stress: start");
     exercise_vfs();
+    exercise_invalid_user_copies();
     exercise_resumable_roundtrip();
     exercise_ipc_roundtrip();
     exercise_repeated_spawn_wait();

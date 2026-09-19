@@ -177,50 +177,7 @@ impl AddressSpace {
         &self,
         virt: VirtualAddress,
     ) -> Result<Option<(PhysicalAddress, PageFlags)>, AddressSpaceError> {
-        let virt_addr = virt.as_usize();
-        if virt_addr >= USER_SPACE_END {
-            return Err(AddressSpaceError::InvalidUserAddress);
-        }
-
-        unsafe {
-            let root = page_table_from_phys_mut(self.root_frame);
-            let p4 = root.get_entry(virt.p4_index());
-            if p4.is_unused() {
-                return Ok(None);
-            }
-            if p4.flags().contains(PageFlags::HUGE) {
-                return Err(AddressSpaceError::HugePageInPath);
-            }
-
-            let p3_table = page_table_from_phys_mut(p4.addr());
-            let p3 = p3_table.get_entry(virt.p3_index());
-            if p3.is_unused() {
-                return Ok(None);
-            }
-            if p3.flags().contains(PageFlags::HUGE) {
-                return Err(AddressSpaceError::HugePageInPath);
-            }
-
-            let p2_table = page_table_from_phys_mut(p3.addr());
-            let p2 = p2_table.get_entry(virt.p2_index());
-            if p2.is_unused() {
-                return Ok(None);
-            }
-            if p2.flags().contains(PageFlags::HUGE) {
-                return Err(AddressSpaceError::HugePageInPath);
-            }
-
-            let p1_table = page_table_from_phys_mut(p2.addr());
-            let p1 = p1_table.get_entry(virt.p1_index());
-            if p1.is_unused() {
-                return Ok(None);
-            }
-
-            Ok(Some((
-                PhysicalAddress(p1.addr().as_usize() + virt.offset()),
-                p1.flags(),
-            )))
-        }
+        user_page_mapping_from_root(self.root_frame, virt)
     }
 
     pub fn map_user_page(
@@ -303,6 +260,64 @@ impl AddressSpace {
         self.page_table_frames.push(frame);
         Ok(table)
     }
+}
+
+fn user_page_mapping_from_root(
+    root_frame: PhysicalAddress,
+    virt: VirtualAddress,
+) -> Result<Option<(PhysicalAddress, PageFlags)>, AddressSpaceError> {
+    if virt.as_usize() >= USER_SPACE_END {
+        return Err(AddressSpaceError::InvalidUserAddress);
+    }
+
+    unsafe {
+        let root = page_table_from_phys_mut(root_frame);
+        let p4 = root.get_entry(virt.p4_index());
+        if p4.is_unused() {
+            return Ok(None);
+        }
+        if p4.flags().contains(PageFlags::HUGE) {
+            return Err(AddressSpaceError::HugePageInPath);
+        }
+
+        let p3_table = page_table_from_phys_mut(p4.addr());
+        let p3 = p3_table.get_entry(virt.p3_index());
+        if p3.is_unused() {
+            return Ok(None);
+        }
+        if p3.flags().contains(PageFlags::HUGE) {
+            return Err(AddressSpaceError::HugePageInPath);
+        }
+
+        let p2_table = page_table_from_phys_mut(p3.addr());
+        let p2 = p2_table.get_entry(virt.p2_index());
+        if p2.is_unused() {
+            return Ok(None);
+        }
+        if p2.flags().contains(PageFlags::HUGE) {
+            return Err(AddressSpaceError::HugePageInPath);
+        }
+
+        let p1_table = page_table_from_phys_mut(p2.addr());
+        let p1 = p1_table.get_entry(virt.p1_index());
+        if p1.is_unused() {
+            return Ok(None);
+        }
+
+        Ok(Some((
+            PhysicalAddress(p1.addr().as_usize() + virt.offset()),
+            p1.flags(),
+        )))
+    }
+}
+
+/// Returns the flags for a user page in the currently active address space.
+/// This is used by syscall copy helpers before touching an untrusted pointer.
+pub fn active_user_page_flags(
+    virt: VirtualAddress,
+) -> Result<Option<PageFlags>, AddressSpaceError> {
+    let root = unsafe { PhysicalAddress(read_cr3()) };
+    user_page_mapping_from_root(root, virt).map(|mapping| mapping.map(|(_, flags)| flags))
 }
 
 impl Drop for AddressSpace {

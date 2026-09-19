@@ -30,7 +30,7 @@
   (Сейчас замаскировано тем, что `PREEMPTION_ENABLED = false`, но это и есть причина,
   по которой преемпшн нельзя включить.)
 
-- [ ] **Нет page-fault recovery при копировании user-памяти → краш ядра.**
+- [x] **Нет page-fault recovery при копировании user-памяти → краш ядра.**
   `kernel/src/syscall/mod.rs`: `copy_buffer_from_user` / `copy_buffer_to_user` /
   `copy_string_from_user` делают сырые `read_volatile`/`write_volatile` по
   пользовательскому указателю. Если страница не отображена — падает само ядро,
