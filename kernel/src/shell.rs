@@ -718,6 +718,27 @@ fn cmd_ps(out: &mut dyn ShellSink, aux: bool) {
     }
 }
 
+fn cmd_uptime(out: &mut dyn ShellSink) {
+    let ticks = crate::interrupts::timer_ticks();
+    let hz = crate::interrupts::TIMER_HZ;
+    let total_secs = ticks / hz;
+    let hours = total_secs / 3600;
+    let minutes = (total_secs % 3600) / 60;
+    let seconds = total_secs % 60;
+
+    out.write_str("up ");
+    write_u64(out, hours);
+    out.write_str("h ");
+    write_u64(out, minutes);
+    out.write_str("m ");
+    write_u64(out, seconds);
+    out.write_str("s (");
+    write_u64(out, ticks);
+    out.write_str(" ticks @ ");
+    write_u64(out, hz);
+    out.write_str(" Hz)\n");
+}
+
 fn cmd_free(out: &mut dyn ShellSink) {
     if let Some(pmm) = memory::pmm::get_pmm() {
         let total_kib = pmm.total_memory() / 1024;
@@ -1087,9 +1108,7 @@ pub fn run_command(out: &mut dyn ShellSink, cwd: &mut String, line: &str) -> She
         }
         "date" => out.write_str("date: RTC unavailable\n"),
         "whoami" => out.write_str("root (kernel terminal)\n"),
-        "uptime" => {
-            out.write_str("uptime unavailable: timer tick source is not active in terminal mode\n")
-        }
+        "uptime" => cmd_uptime(out),
         "free" => cmd_free(out),
         "ps" => cmd_ps(out, false),
         "ps aux" => cmd_ps(out, true),

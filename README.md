@@ -16,7 +16,7 @@ userspace child scheduling.
 
 What works today:
 
-- Limine boot with Terminal Mode first and GUI Mode still available.ч
+- Limine boot with Terminal Mode first and GUI Mode still available.
 - HAL in C/NASM: GDT, IDT, interrupt entry, syscall entry, context switch stubs,
   port I/O, and low-level boot handoff.
 - Rust `no_std` kernel with PMM, VMM, heap, address-space setup, and basic fault

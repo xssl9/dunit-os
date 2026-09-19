@@ -958,8 +958,10 @@ fn sys_get_system_stats(info: *mut SystemStats) -> i64 {
         fs_directories: fs.directories,
         fs_bytes: fs.bytes,
         fs_open_handles: fs.open_handles,
-        uptime_ticks: 0,
-        uptime_available: 0,
+        uptime_ticks: crate::interrupts::timer_ticks(),
+        uptime_available: 1,
+        // Discovery-only: these counts reflect PCI NIC probing, not a working
+        // network stack (there is no packet I/O yet). See drivers::net.
         net_total_nics: net.total_nics as u64,
         net_supported_nics: net.supported_nics as u64,
         net_mmio_ready_nics: net.mmio_ready_nics as u64,

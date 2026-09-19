@@ -165,7 +165,16 @@ fn draw_network(stats: &libdunit::SystemStats) {
     append_label_u64(&mut b, &mut blen, b"mmio", stats.net_mmio_ready_nics);
     append_bytes(&mut b, &mut blen, b"  mac ");
     append_u64(&mut b, &mut blen, stats.net_mac_ready_nics);
-    draw_card_two(14, 232, 436, 60, MUTED, "Network", line(&a, len), line(&b, blen));
+    draw_card_two(
+        14,
+        232,
+        436,
+        60,
+        MUTED,
+        "Network (discovery only)",
+        line(&a, len),
+        line(&b, blen),
+    );
 }
 
 fn draw_card(x: i32, y: i32, w: u32, h: u32, accent: u32, title: &str, body: &str) {
