@@ -7,6 +7,12 @@ struct FreeBlock {
     next: *mut FreeBlock,
 }
 
+#[repr(C)]
+struct AllocationHeader {
+    block_start: usize,
+    block_size: usize,
+}
+
 pub struct KernelAllocator {
     heap_start: AtomicUsize,
     heap_size: AtomicUsize,
@@ -72,8 +78,10 @@ impl KernelAllocator {
 
 unsafe impl GlobalAlloc for KernelAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let size = layout.size().max(core::mem::size_of::<FreeBlock>());
-        let size = Self::align_up(size, layout.align());
+        let payload_size = layout.size().max(1);
+        let user_align = layout.align().max(core::mem::align_of::<AllocationHeader>());
+        let header_size = core::mem::size_of::<AllocationHeader>();
+        let minimum_free = core::mem::size_of::<FreeBlock>();
 
         let mut current_ptr = self.free_list.load(Ordering::SeqCst) as *mut FreeBlock;
         let mut prev_ptr: *mut FreeBlock = ptr::null_mut();
@@ -81,34 +89,40 @@ unsafe impl GlobalAlloc for KernelAllocator {
         while !current_ptr.is_null() {
             let current = &mut *current_ptr;
 
-            if current.size >= size {
-                let block_addr = current_ptr as usize;
-                let aligned_addr = Self::align_up(block_addr, layout.align());
-                let padding = aligned_addr - block_addr;
+            let block_start = current_ptr as usize;
+            let block_end = match block_start.checked_add(current.size) {
+                Some(end) => end,
+                None => return ptr::null_mut(),
+            };
+            let user_addr = Self::align_up(block_start + header_size, user_align);
+            let requested_end = match user_addr.checked_add(payload_size) {
+                Some(end) => Self::align_up(end, core::mem::align_of::<FreeBlock>()),
+                None => return ptr::null_mut(),
+            };
 
-                if current.size >= size + padding {
-                    if current.size >= size + padding + core::mem::size_of::<FreeBlock>() {
-                        let remaining_size = current.size - size - padding;
-                        let new_block = (aligned_addr + size) as *mut FreeBlock;
-                        (*new_block).size = remaining_size;
-                        (*new_block).next = current.next;
+            if requested_end <= block_end {
+                let remaining_size = block_end - requested_end;
+                let (allocated_end, replacement) = if remaining_size >= minimum_free {
+                    let next = requested_end as *mut FreeBlock;
+                    (*next).size = remaining_size;
+                    (*next).next = current.next;
+                    (requested_end, next)
+                } else {
+                    // A tail too small to hold a FreeBlock belongs to this
+                    // allocation and is recovered through AllocationHeader.
+                    (block_end, current.next)
+                };
 
-                        if prev_ptr.is_null() {
-                            self.free_list.store(new_block as usize, Ordering::SeqCst);
-                        } else {
-                            (*prev_ptr).next = new_block;
-                        }
-                    } else {
-                        if prev_ptr.is_null() {
-                            self.free_list
-                                .store(current.next as usize, Ordering::SeqCst);
-                        } else {
-                            (*prev_ptr).next = current.next;
-                        }
-                    }
-
-                    return aligned_addr as *mut u8;
+                if prev_ptr.is_null() {
+                    self.free_list.store(replacement as usize, Ordering::SeqCst);
+                } else {
+                    (*prev_ptr).next = replacement;
                 }
+
+                let header = (user_addr - header_size) as *mut AllocationHeader;
+                (*header).block_start = block_start;
+                (*header).block_size = allocated_end - block_start;
+                return user_addr as *mut u8;
             }
 
             prev_ptr = current_ptr;
@@ -118,24 +132,28 @@ unsafe impl GlobalAlloc for KernelAllocator {
         ptr::null_mut()
     }
 
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        let size = layout.size().max(core::mem::size_of::<FreeBlock>());
-        let size = Self::align_up(size, layout.align());
-
-        let block = ptr as *mut FreeBlock;
+    unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
+        if ptr.is_null() {
+            return;
+        }
+        let header = (ptr as usize - core::mem::size_of::<AllocationHeader>())
+            as *const AllocationHeader;
+        let block_start = (*header).block_start;
+        let size = (*header).block_size;
+        let block = block_start as *mut FreeBlock;
         (*block).size = size;
 
         let mut current_ptr = self.free_list.load(Ordering::SeqCst) as *mut FreeBlock;
         let mut prev_ptr: *mut FreeBlock = ptr::null_mut();
 
-        while !current_ptr.is_null() && (current_ptr as usize) < (ptr as usize) {
+        while !current_ptr.is_null() && (current_ptr as usize) < block_start {
             prev_ptr = current_ptr;
             current_ptr = (*current_ptr).next;
         }
 
         if !prev_ptr.is_null() {
             let prev_end = (prev_ptr as usize) + (*prev_ptr).size;
-            if prev_end == ptr as usize {
+            if prev_end == block_start {
                 (*prev_ptr).size += size;
 
                 if !current_ptr.is_null() {
@@ -153,7 +171,7 @@ unsafe impl GlobalAlloc for KernelAllocator {
         (*block).next = current_ptr;
 
         if !current_ptr.is_null() {
-            let block_end = (ptr as usize) + size;
+            let block_end = block_start + size;
             if block_end == current_ptr as usize {
                 (*block).size += (*current_ptr).size;
                 (*block).next = (*current_ptr).next;
@@ -177,14 +195,17 @@ pub fn init_heap(heap_start: usize, heap_size: usize) {
     ALLOCATOR.init(heap_start, heap_size);
 }
 
-static mut KERNEL_HEAP: [u8; 2 * 1024 * 1024] = [0; 2 * 1024 * 1024];
+#[repr(align(4096))]
+struct AlignedHeap([u8; 2 * 1024 * 1024]);
+
+static mut KERNEL_HEAP: AlignedHeap = AlignedHeap([0; 2 * 1024 * 1024]);
 
 pub fn init() {
     crate::memory::serial_write("[HEAP] START\r\n");
 
     unsafe {
-        let heap_start = KERNEL_HEAP.as_ptr() as usize;
-        let heap_size = core::mem::size_of_val(&KERNEL_HEAP);
+        let heap_start = KERNEL_HEAP.0.as_ptr() as usize;
+        let heap_size = core::mem::size_of_val(&KERNEL_HEAP.0);
         init_heap(heap_start, heap_size);
     }
 

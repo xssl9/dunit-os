@@ -57,6 +57,7 @@ pub enum ElfError {
     InvalidType,
     InvalidProgramHeader,
     TooManyProgramHeaders,
+    ProcessCreateFailed,
 }
 
 pub struct ElfParser<'a> {
@@ -260,7 +261,7 @@ impl<'a> ElfLoader<'a> {
     ) -> Result<Process, ElfError> {
         let entry_point = self.load(vmm, pmm)?;
 
-        let mut process = Process::new(pid);
+        let mut process = Process::new(pid).map_err(|_| ElfError::ProcessCreateFailed)?;
         process.context.rip = entry_point;
         process.context.rsp = USER_STACK_TOP as u64;
         process.context.rflags = 0x202;

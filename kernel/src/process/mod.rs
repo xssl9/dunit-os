@@ -171,11 +171,12 @@ pub struct Process {
 }
 
 impl Process {
-    pub fn new(pid: ProcessId) -> Self {
-        match Self::new_user(pid) {
-            Ok(process) => process,
-            Err(_) => Self::new_without_address_space(pid, false),
-        }
+    /// Creates an isolated userspace process.
+    ///
+    /// Address-space allocation failure is part of the API contract: callers
+    /// must handle it instead of receiving a process that only looks usable.
+    pub fn new(pid: ProcessId) -> Result<Self, ProcessError> {
+        Self::new_user(pid)
     }
 
     fn new_without_address_space(pid: ProcessId, is_kernel: bool) -> Self {

@@ -583,7 +583,9 @@ pub extern "C" fn kernel_main(
     screen_log("[ .. ] Initializing memory management", false);
     screen_log("[ .. ] Starting Physical Memory Manager", false);
     serial_write("[KERNEL] memory START\r\n");
-    memory::init();
+    if !memory::init() {
+        panic!("memory initialization failed");
+    }
     serial_write("[KERNEL] memory OK\r\n");
     {
         let (total, _free) = memory::pmm::stats_bytes();
@@ -1101,4 +1103,3 @@ fn draw_colored_text(fb: *mut u32, width: usize, x: usize, y: usize, text: &str)
 fn draw_error_text(fb: *mut u32, width: usize, x: usize, y: usize, text: &str) {
     draw_text_direct(fb, width, x, y, text, 0xff0000);
 }
-

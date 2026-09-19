@@ -196,9 +196,8 @@ pub fn init() {
         serial_write("\r\n");
 
         match bring_up_controller(dev) {
-            Ok(disks) => {
+            Ok(()) => {
                 AHCI_INITIALIZED.fetch_add(1, Ordering::Relaxed);
-                AHCI_DISK_COUNT.fetch_add(disks, Ordering::Relaxed);
             }
             Err(error) => {
                 AHCI_LAST_ERROR.store(error.code(), Ordering::Relaxed);
@@ -228,7 +227,7 @@ pub fn status() -> AhciStatus {
     }
 }
 
-fn bring_up_controller(dev: PciDevice) -> Result<usize, AhciError> {
+fn bring_up_controller(dev: PciDevice) -> Result<(), AhciError> {
     pci::enable_mmio_bus_master(dev);
     let abar_phys = match pci::read_bar_decoded(dev, AHCI_ABAR_INDEX) {
         PciBar::Memory32(address) if address != 0 => address as u64,
@@ -259,10 +258,9 @@ fn bring_up_controller(dev: PciDevice) -> Result<usize, AhciError> {
     serial_write(if supports_64bit { "yes" } else { "no" });
     serial_write("\r\n");
 
-    let mut added = 0usize;
     for port_number in 0..32u8 {
         if (implemented & (1 << port_number)) == 0
-            || AHCI_DISK_COUNT.load(Ordering::Relaxed) + added >= MAX_DISKS
+            || AHCI_DISK_COUNT.load(Ordering::Relaxed) >= MAX_DISKS
         {
             continue;
         }
@@ -272,9 +270,12 @@ fn bring_up_controller(dev: PciDevice) -> Result<usize, AhciError> {
         }
         match setup_disk(port, port_number, supports_64bit) {
             Ok(disk) => {
-                let index = AHCI_DISK_COUNT.load(Ordering::Relaxed) + added;
+                // Keep the occupied slot count and DISKS in sync immediately.
+                // Controller discovery is serialized, so publishing the disk
+                // before advancing the count makes 0..count always contiguous.
+                let index = AHCI_DISK_COUNT.load(Ordering::Relaxed);
                 unsafe { DISKS[index] = Some(disk) };
-                added += 1;
+                AHCI_DISK_COUNT.store(index + 1, Ordering::Relaxed);
                 serial_write("[AHCI] SATA disk port=");
                 write_dec(port_number as u64);
                 serial_write(" sectors=");
@@ -297,7 +298,7 @@ fn bring_up_controller(dev: PciDevice) -> Result<usize, AhciError> {
             }
         }
     }
-    Ok(added)
+    Ok(())
 }
 
 fn bios_handoff(abar: usize) -> Result<(), AhciError> {
@@ -783,4 +784,3 @@ fn write_pci_addr(dev: PciDevice) {
     serial_write(".");
     write_hex(dev.function as u64, 1);
 }
-
