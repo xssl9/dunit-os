@@ -76,19 +76,19 @@
 
 ## 🟠 Явные ошибки (bugs)
 
-- [ ] **`sys_sleep` — busy-wait с риском переполнения.**
+- [x] **`sys_sleep` — busy-wait с риском переполнения.**
   `kernel/src/syscall/mod.rs`: `sys_sleep(ms)` = `for _ in 0..ms*1000 { pause }`.
   Жжёт CPU целиком, не отдаёт управление, `ms*1000` может переполниться, а длительность
   никак не привязана к реальному времени. Нужно: сон через таймер/расписание, отдачей
   управления планировщику.
 
-- [ ] **`copy_string_from_user` трактует байты как Latin-1, а не UTF-8.**
+- [x] **`copy_string_from_user` трактует байты как Latin-1, а не UTF-8.**
   `kernel/src/syscall/mod.rs`: `out.push(byte as char)` — некорректно для многобайтового
   UTF-8 (каждый байт становится отдельным codepoint). То же в userspace:
   `userspace/libdunit/src/lib.rs` — `read_line`/`read_to_string` (`out.push(*byte as char)`).
   Нужно: собирать `Vec<u8>` и валидировать через `from_utf8`.
 
-- [ ] **`MemFs::readdir` молча обрезает список до 32 записей.**
+- [x] **`MemFs::readdir` молча обрезает список до 32 записей.**
   `kernel/src/fs/memfs.rs`: `readdir` использует фиксированный буфер `[DirEntry; 32]`,
   хотя результат отдаётся `Vec`. В `/app` уже ~33 бинарника + ассеты → часть записей
   теряется. Нужно: динамический сбор без фиксированного лимита.
@@ -115,11 +115,11 @@
   указатель как начало блока. Padding-байты до выровненного адреса теряются
   (не возвращаются во free-list). Нужно: хранить/восстанавливать реальное начало блока.
 
-- [ ] **`uptime_ticks` / `uptime_available` захардкожены в 0.**
+- [x] **`uptime_ticks` / `uptime_available` захардкожены в 0.**
   `kernel/src/syscall/mod.rs`: в `SystemStats` поля времени всегда 0 → `dtop`/`dufetch`
   показывают неверный аптайм. Нужно: реальный счётчик тиков таймера.
 
-- [ ] **Опечатка в README.**
+- [x] **Опечатка в README.**
   `README.md:19`: `"...GUI Mode still available.ч"` — лишняя кириллическая «ч».
 
 ---
@@ -202,7 +202,7 @@
   -> ! { loop {} }`. Реальная точка входа — `kernel_main` в `lib.rs`. Файл путает.
   Удалить.
 
-- [ ] **Четыре копии таблиц глиф-битмапов в `lib.rs`.**
+- [x] **Четыре копии таблиц глиф-битмапов в `lib.rs`.**
   `kernel/src/lib.rs`: одинаковые `match`-таблицы глифов продублированы в
   `draw_text_direct`, `draw_colored_text`, `draw_error_text_old`, внутреннем
   `draw_text` и `draw_char`. Нужно: единая таблица шрифта.
@@ -218,20 +218,20 @@
 - [ ] **Busy-wait задержки `for _ in 0..500000 { pause }`.**
   `kernel/src/lib.rs`: «магические» циклы ожидания. Заменить на таймер/явную задержку.
 
-- [ ] **Дублирование `serial_write`.**
+- [x] **Дублирование `serial_write`.**
   `serial_write` объявлен/дублирован в нескольких местах (`kernel/src/lib.rs`,
   `kernel/src/memory/mod.rs`, `kernel/src/fs/vfs.rs` через `extern`). Свести к одному
   модулю логирования.
 
-- [ ] **Тяжёлое серийное логирование на горячих путях процессов.**
+- [x] **Тяжёлое серийное логирование на горячих путях процессов.**
   `kernel/src/process/mod.rs`: обильные `serial_write` на путях планирования/переключения.
   Замедляет и зашумляет. Спрятать за уровнем логирования.
 
-- [ ] **Дублированные `write_hex`/`write_dec`/`write_mac` по драйверам.**
+- [x] **Дублированные `write_hex`/`write_dec`/`write_mac` по драйверам.**
   `kernel/src/drivers/ahci.rs`, `kernel/src/drivers/net.rs` содержат собственные копии
   хелперов форматирования. Вынести в общий util.
 
-- [ ] **`net_*` поля в `SystemStats`/dufetch при отсутствии стека.**
+- [x] **`net_*` поля в `SystemStats`/dufetch при отсутствии стека.**
   `kernel/src/drivers/net.rs` — только discovery (`stack=not-implemented`). Поля
   `net_total_nics`/`supported`/`mmio_ready`/`mac_ready` пробрасываются в
   `SystemStats` (`userspace/libdunit/src/lib.rs`). Риск ввести в заблуждение о
