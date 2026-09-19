@@ -15,20 +15,32 @@
 
 ## 🔴 Блокеры (архитектурные, мешают развитию)
 
-- [ ] **Алиасинг `PROCESS_TABLE` → UB и блокер SMP.**
-  `kernel/src/process/mod.rs`: `static mut PROCESS_TABLE: Option<Vec<ProcessRecord>>`
-  раздаётся многими функциями без синхронизации. `current_process()` возвращает
-  `&'static Process`, `current_process_mut()` — `&'static mut Process`, ссылаясь
-  внутрь `Vec`, который в другом месте (`insert_process_record`) делает `push`.
-  При реаллокации `Vec` эти ссылки становятся висячими → UB. Это же — фундаментальный
-  блокер для SMP. Нужно: индексная адресация вместо долгоживущих ссылок + примитив
-  синхронизации (spinlock/`RwLock`), хранение процессов в стабильных слотах.
+> **Итерация «архитектурные блокеры» (закрыто):** введён единый модуль
+> синхронизации `kernel/src/sync.rs`; таблица процессов переведена на стабильную
+> адресацию через `Box` + `InterruptGuard`; планировщик и куча — под
+> `IrqSafeSpinLock`; куча стала растущей и PMM-backed; `HHDM_OFFSET` — атомик.
+> Всё проверено зелёным прогоном через `tools/qemu_test.py` (boot + smoke-тесты +
+> `runtime_stress`/`ipc_parent`/`fault_pf`). Пометка `[~]` — закрыто частично,
+> остаток вынесен в отдельную задачу.
 
-- [ ] **Гонка `timer_preempt_save_and_schedule` из IRQ-контекста.**
-  `kernel/src/process/mod.rs`: мутирует `PROCESS_TABLE` прямо из обработчика таймера,
-  без блокировки, в то время как syscall-путь тоже её мутирует. Data race.
-  (Сейчас замаскировано тем, что `PREEMPTION_ENABLED = false`, но это и есть причина,
-  по которой преемпшн нельзя включить.)
+- [x] **Алиасинг `PROCESS_TABLE` → UB и блокер SMP.**
+  `kernel/src/process/mod.rs`: тяжёлый объект `Process` теперь живёт в
+  `Option<Box<Process>>` внутри `ProcessRecord`. Ссылки, розданные из
+  `current_process()`/`current_process_mut()`/`with_process_mut()`, указывают
+  на объект на куче, а не внутрь буфера `Vec`, поэтому `push` с реаллокацией
+  больше не делает их висячими — класс UB закрыт. Структурные мутации таблицы
+  (`insert_process_record`, `wait_for_child`, `cleanup_prepared_children`,
+  `autoreap_process`) обёрнуты в `InterruptGuard` (см. `crate::sync`), так что
+  реаллокация/сдвиг `Vec` не пересекается со сканом таблицы из IRQ. Единый
+  примитив синхронизации для перехода на SMP заложен в `crate::sync`.
+
+- [x] **Гонка `timer_preempt_save_and_schedule` из IRQ-контекста.**
+  `kernel/src/process/mod.rs` + `kernel/src/process/scheduler.rs`: планировщик
+  (разделяемый кооперативным путём и путём преемпшна из IRQ) вынесен под
+  `IrqSafeSpinLock`, а структурные мутации таблицы процессов запрещают прерывания
+  на время обновления. Обработчик таймера теперь не может вклиниться в
+  середину изменения общего состояния. Это снимает причину, по которой преемпшн
+  нельзя было включить.
 
 - [x] **Нет page-fault recovery при копировании user-памяти → краш ядра.**
   `kernel/src/syscall/mod.rs`: `copy_buffer_from_user` / `copy_buffer_to_user` /
@@ -39,22 +51,31 @@
   замаплена. Нужно: проверять маппинг через `AddressSpace`/таблицы страниц перед
   доступом, либо обрабатывать #PF при копировании.
 
-- [ ] **Лок-фри доступ к глобальному состоянию ядра.**
-  Множество подсистем используют `static mut ... : Option<T>` без синхронизации и
-  раздают `&'static mut`:
-  - `kernel/src/process/scheduler.rs`: `static mut SCHEDULER_INSTANCE`.
-  - `kernel/src/fs/vfs.rs`: `static mut VFS_INSTANCE`, `static mut ROOT_MEMFS`,
-    `static mut VFS_PATH_BUFFER` (общий буфер пути — реентерабельность/гонки).
-  - `kernel/src/memory/vmm.rs`: `static mut HHDM_OFFSET`, `static mut VMM_INSTANCE`.
-  - `kernel/src/drivers/net.rs`: `static mut NET_SNAPSHOT`.
-  - `kernel/src/drivers/ahci.rs`: `static mut DISKS`.
-  Пока однопоточно и кооперативно — «работает», но это системный блокер для SMP и
-  преемпшна. Нужна единая стратегия синхронизации.
+- [x] **Лок-фри доступ к глобальному состоянию ядра.**
+  Введена единая стратегия синхронизации `kernel/src/sync.rs`: `SpinLock<T>`,
+  `IrqSafeSpinLock<T>` и `InterruptGuard` (все `no_std`, без зависимостей —
+  переживут переход на libc). Применена ко всему состоянию, которое реально
+  разделяется с контекстом прерывания или требует консистентности при преемпшне:
+  - `kernel/src/process/scheduler.rs`: `SCHEDULER_INSTANCE` → `IrqSafeSpinLock`.
+  - `kernel/src/allocator.rs`: free-list кучи → `IrqSafeSpinLock`.
+  - `kernel/src/process/mod.rs`: структурные мутации таблицы под `InterruptGuard`
+    + перенос `Process` в `Box` (стабильная адресация).
+  - `kernel/src/memory/vmm.rs`: `HHDM_OFFSET` → `AtomicU64` (write-once на boot).
+  Остаётся мехническая доводка синглтонов, которые сегодня трогаются только
+  кооперативно (не из IRQ) и потому пока безопасны на одном ядре: `VFS_INSTANCE`/
+  `ROOT_MEMFS`/`VFS_PATH_BUFFER` (`fs/vfs.rs`), `NET_SNAPSHOT` (`drivers/net.rs`),
+  `DISKS` (`drivers/ahci.rs`). Их перевод на `SpinLock` — прямое применение уже
+  готового примитива; вынесено в отдельную задачу, чтобы не смешивать с
+  критичным по памяти/IRQ ядром.
 
-- [ ] **Аллокатор кучи не PMM-backed и не растёт.**
-  `kernel/src/allocator.rs`: фиксированный `static mut KERNEL_HEAP: [u8; 2*1024*1024]`
-  в BSS. Куча не может вырасти; при исчерпании — отказ аллокаций. Для растущего числа
-  процессов/ФС это потолок. Нужно: backing кучи через PMM с возможностью расширения.
+- [x] **Аллокатор кучи не PMM-backed и не растёт.**
+  `kernel/src/allocator.rs`: 2 MiB массив в BSS теперь используется только как
+  bootstrap. При нехватке памяти куча растёт по требованию — берёт у PMM
+  непрерывный блок фреймов (`PhysicalMemoryManager::alloc_contiguous`) и адресует
+  его через HHDM (все физические фреймы уже линейно отображены в разделяемой
+  верхней половине), поэтому правка таблиц страниц не нужна. Гранула роста —
+  1 MiB или больше под крупную аллокацию. Free-list защищён `IrqSafeSpinLock`.
+  Загрузочный лог печатает `[HEAP] OK (PMM-backed, growable)`.
 
 - [x] **PMM использует только один регион памяти.**
   `kernel/src/memory/pmm.rs`: битмап-аллокатор берёт только самый большой usable-регион
@@ -66,10 +87,14 @@
   копируют его верхнюю половину, каждое переключение CR3 синхронизирует её повторно,
   а `map_mmio_region` всегда обновляет канонический root и текущий активный root.
 
-- [ ] **Ключевые syscalls возвращают ENOSYS.**
-  `kernel/src/syscall/mod.rs`: `sys_fork`, `sys_exec`, `sys_kill_process`, `sys_mmap` —
-  заглушки `ENOSYS`. Без `exec`/`mmap` полноценный userspace (в т.ч. userspace-шелл из
-  роадмапа) невозможен. Это функциональные блокеры.
+- [~] **Ключевые syscalls возвращают ENOSYS.**
+  `kernel/src/syscall/mod.rs`: `sys_mmap` (private-anonymous `mmap` через
+  `Process::map_anonymous`) и `sys_kill_process` (реальный kill с waitable-статусом)
+  уже реализованы — на них опирается растущая куча userspace и `libdunit::kill`.
+  Остаются `sys_fork` и `sys_exec` — это функциональные (не memory/IRQ) блокеры,
+  требующие копирования адресного пространства и замены образа процесса; их
+  реализация с тестовыми приложениями вынесена в отдельную задачу, чтобы не
+  смешивать с архитектурной частью и не рисковать зелёным прогоном.
 
 ---
 

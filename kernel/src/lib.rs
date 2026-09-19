@@ -26,6 +26,7 @@ pub mod process;
 pub mod serial;
 pub mod shell;
 pub mod storage;
+pub mod sync;
 pub mod syscall;
 pub mod terminal;
 pub mod ui_loop;

@@ -134,6 +134,56 @@ impl PhysicalMemoryManager {
         None
     }
 
+    /// Аллоцирует `count` подряд идущих свободных фреймов и возвращает адрес
+    /// первого. Растущая куча ядра опирается на это: непрерывные физические
+    /// фреймы дают непрерывный виртуальный диапазон через HHDM без правки
+    /// таблиц страниц. Скан O(total_frames), но вызывается лишь при росте кучи.
+    pub fn alloc_contiguous(&self, count: usize) -> Option<PhysicalAddress> {
+        if count == 0 {
+            return None;
+        }
+        if count == 1 {
+            return self.alloc_frame();
+        }
+
+        let bitmap = unsafe { &mut *self.bitmap.get() };
+        let mut run_start: Option<usize> = None;
+        let mut run_len = 0usize;
+
+        for frame_idx in 0..self.total_frames {
+            let byte_idx = frame_idx / 8;
+            let bit_idx = frame_idx % 8;
+            let mask = 1u8 << bit_idx;
+            let free = byte_idx < bitmap.len() && (bitmap[byte_idx] & mask) == 0;
+
+            if free {
+                if run_start.is_none() {
+                    run_start = Some(frame_idx);
+                    run_len = 1;
+                } else {
+                    run_len += 1;
+                }
+
+                if run_len == count {
+                    let start = run_start.unwrap();
+                    for idx in start..start + count {
+                        let b = idx / 8;
+                        let m = 1u8 << (idx % 8);
+                        bitmap[b] |= m;
+                    }
+                    self.free_frames.fetch_sub(count, Ordering::SeqCst);
+                    let addr = self.base_addr + start * PAGE_SIZE;
+                    return Some(PhysicalAddress(addr));
+                }
+            } else {
+                run_start = None;
+                run_len = 0;
+            }
+        }
+
+        None
+    }
+
     pub fn free_frame(&self, addr: PhysicalAddress) {
         if addr.0 < self.base_addr {
             return;

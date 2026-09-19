@@ -1,5 +1,6 @@
 pub mod scheduler;
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec;
@@ -7,6 +8,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
 use crate::memory::vmm::{ActiveAddressSpace, AddressSpace};
+use crate::sync::InterruptGuard;
 #[cfg(feature = "boot-smoke-tests")]
 use crate::memory::vmm::{PageFlags, VirtualAddress};
 
@@ -74,7 +76,13 @@ pub struct ProcessRecord {
     pub has_run: bool,
     pub waitable: bool,
     pub path: String,
-    process: Option<Process>,
+    /// Тяжёлый объект процесса живёт в `Box`, а не прямо в `Vec`. Это важно:
+    /// `current_process()`/`with_process_mut()` раздают `&'static Process`,
+    /// указывающие внутрь этого объекта. Если бы `Process` лежал прямо в
+    /// элементе `Vec`, то `push` с реаллокацией буфера сделал бы такие ссылки
+    /// висячими (UB). Указатель в `Box` при реаллокации `Vec` перемещается, а
+    /// сам объект на куче остаётся на месте — ссылки остаются валидными.
+    process: Option<Box<Process>>,
 }
 
 #[derive(Debug, Clone)]
@@ -755,6 +763,13 @@ pub fn insert_process_record(
     has_run: bool,
     process: Option<Process>,
 ) {
+    // Тяжёлый объект процесса переносится на кучу: ссылки, розданные из таблицы,
+    // должны переживать реаллокацию буфера `Vec` при `push`.
+    let process = process.map(Box::new);
+    // Прерывания запрещены на время структурной мутации таблицы: реаллокация
+    // буфера `Vec` не должна перекрыться с чтением таблицы из IRQ таймера
+    // (путь преемпшна).
+    let _irq = InterruptGuard::new();
     let table = process_table_mut();
     if let Some(index) = process_record_index(table, pid) {
         let record = &mut table[index];
@@ -826,7 +841,7 @@ pub fn with_process_mut<R>(
         .process
         .as_mut()
         .ok_or(ProcessError::ProcessNotPrepared)?;
-    f(process)
+    f(&mut **process)
 }
 
 pub fn mark_process_prepared_as_ready(pid: ProcessId) -> Result<(), ProcessError> {
@@ -1077,7 +1092,11 @@ pub fn wait_for_child(requested_pid: ProcessId) -> Result<WaitRecord, ProcessErr
     if let Some(ipc) = crate::ipc::get_ipc_manager() {
         ipc.clear_messages(pid);
     }
+    // Удаление сдвигает буфер `Vec`: запрещаем прерывания, чтобы скан таблицы
+    // из IRQ таймера не увидел таблицу в промежуточном состоянии.
+    let irq = InterruptGuard::new();
     let mut record = table.remove(index);
+    drop(irq);
     if let Some(mut process) = record.process.take() {
         let closed = process.cleanup_fds();
         if closed > 0 {
@@ -1104,7 +1123,9 @@ pub fn cleanup_prepared_children(parent_pid: ProcessId) -> usize {
             let pid = table[index].pid;
             let from = table[index].state;
             log_process_transition(pid, from, ProcessState::Reaped, "parent-exit");
+            let irq = InterruptGuard::new();
             let mut record = table.remove(index);
+            drop(irq);
             if let Some(mut process) = record.process.take() {
                 let _ = process.cleanup_fds();
             }
@@ -1129,7 +1150,9 @@ pub fn autoreap_process(pid: ProcessId, reason: &str) -> Result<(), ProcessError
     if let Some(ipc) = crate::ipc::get_ipc_manager() {
         ipc.clear_messages(pid);
     }
+    let irq = InterruptGuard::new();
     let mut record = table.remove(index);
+    drop(irq);
     if let Some(mut process) = record.process.take() {
         let _ = process.cleanup_fds();
     }
@@ -1176,14 +1199,14 @@ pub fn current_process() -> Option<&'static Process> {
     let pid = current_pid()?;
     let table = process_table_mut();
     let index = process_record_index(table, pid)?;
-    table[index].process.as_ref()
+    table[index].process.as_ref().map(|boxed| &**boxed)
 }
 
 pub fn current_process_mut() -> Option<&'static mut Process> {
     let pid = current_pid()?;
     let table = process_table_mut();
     let index = process_record_index(table, pid)?;
-    table[index].process.as_mut()
+    table[index].process.as_mut().map(|boxed| &mut **boxed)
 }
 
 pub fn allocate_fd(entry: FdEntry) -> Result<ProcessFd, ProcessError> {

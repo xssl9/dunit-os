@@ -1,6 +1,6 @@
 use super::pmm::{get_pmm, PhysicalAddress};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 const PAGE_SIZE: usize = 4096;
 const USER_SPACE_END: usize = 0x0000_8000_0000_0000;
@@ -630,7 +630,10 @@ pub unsafe fn switch_to_root_frame(root_frame: usize) {
     }
     write_cr3(root_frame);
 }
-static mut HHDM_OFFSET: u64 = 0;
+/// Смещение HHDM (higher-half direct map) задаётся один раз при загрузке и
+/// затем только читается на горячих путях (`phys_to_virt`). Атомик убирает
+/// `static mut` без накладных расходов относительно прежнего сырого доступа.
+static HHDM_OFFSET: AtomicU64 = AtomicU64::new(0);
 static KERNEL_ROOT_FRAME: AtomicUsize = AtomicUsize::new(UNINITIALIZED_ROOT);
 static MMIO_LOCK: AtomicBool = AtomicBool::new(false);
 static mut MMIO_FREE_RANGES: [MmioRange; MAX_MMIO_RANGES] = [MmioRange::EMPTY; MAX_MMIO_RANGES];
@@ -664,21 +667,19 @@ pub fn init() {
 }
 
 pub fn set_hhdm_offset(offset: u64) {
-    unsafe {
-        HHDM_OFFSET = offset;
-    }
+    HHDM_OFFSET.store(offset, Ordering::Relaxed);
 }
 
 pub fn get_hhdm_offset() -> u64 {
-    unsafe { HHDM_OFFSET }
+    HHDM_OFFSET.load(Ordering::Relaxed)
 }
 
 pub fn phys_to_virt(phys: usize) -> usize {
-    phys + (unsafe { HHDM_OFFSET } as usize)
+    phys + (HHDM_OFFSET.load(Ordering::Relaxed) as usize)
 }
 
 pub fn virt_to_phys(virt: usize) -> usize {
-    virt - (unsafe { HHDM_OFFSET } as usize)
+    virt - (HHDM_OFFSET.load(Ordering::Relaxed) as usize)
 }
 
 pub fn map_mmio_region(phys: usize, length: usize) -> Option<usize> {

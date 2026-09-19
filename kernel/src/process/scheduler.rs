@@ -1,4 +1,5 @@
 use super::{ProcessError, ProcessId};
+use crate::sync::IrqSafeSpinLock;
 use alloc::vec::Vec;
 
 pub struct Scheduler {
@@ -70,23 +71,25 @@ impl Scheduler {
     }
 }
 
-static mut SCHEDULER_INSTANCE: Option<Scheduler> = None;
+/// Планировщик разделяется между кооперативными путями ядра и IRQ таймера
+/// (путь преемпшна вызывает `pick_next`/`enqueue`), поэтому он защищён
+/// IRQ-safe локом. Методы планировщика обращаются к таблице процессов, но
+/// никогда не берут этот же лок повторно, так что вложенных дедлоков нет.
+static SCHEDULER: IrqSafeSpinLock<Option<Scheduler>> = IrqSafeSpinLock::new(None);
 
 pub fn init() {
-    unsafe {
-        SCHEDULER_INSTANCE = Some(Scheduler::new());
-    }
+    *SCHEDULER.lock() = Some(Scheduler::new());
     crate::memory::serial_write(
         "[SCHED] foundation init: cooperative only, timer-preemption=off smp=off\r\n",
     );
 }
 
 fn with_scheduler_mut<R>(f: impl FnOnce(&mut Scheduler) -> R) -> Option<R> {
-    unsafe { SCHEDULER_INSTANCE.as_mut().map(f) }
+    SCHEDULER.lock().as_mut().map(f)
 }
 
 fn with_scheduler<R>(f: impl FnOnce(&Scheduler) -> R) -> Option<R> {
-    unsafe { SCHEDULER_INSTANCE.as_ref().map(f) }
+    SCHEDULER.lock().as_ref().map(f)
 }
 
 pub fn enqueue_ready(pid: ProcessId) -> Result<(), ProcessError> {
