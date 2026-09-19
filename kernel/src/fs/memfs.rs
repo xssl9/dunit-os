@@ -326,12 +326,31 @@ impl FileSystem for MemFs {
     }
 
     fn readdir(&mut self, path: &str) -> Result<Vec<DirEntry>> {
-        let mut buffer = [DirEntry::empty(); 32];
-        let count = self.readdir_into(path, &mut buffer)?;
+        let clean = Self::clean(path);
         let mut entries = Vec::new();
-        for entry in buffer.iter().take(count) {
-            entries.push(*entry);
+
+        if clean.is_empty() {
+            for base_dir in BASE_DIRS.iter() {
+                entries.push(DirEntry::new(base_dir, FileType::Directory));
+            }
+            for node in self.nodes.iter() {
+                if Self::is_direct_child("", &node.path) && !Self::is_base_dir(&node.path) {
+                    entries.push(DirEntry::new(Self::basename(&node.path), node.file_type));
+                }
+            }
+            return Ok(entries);
         }
+
+        if self.node_type(clean) != Some(FileType::Directory) {
+            return Err(VfsError::NotADirectory);
+        }
+
+        for node in self.nodes.iter() {
+            if Self::is_direct_child(clean, &node.path) {
+                entries.push(DirEntry::new(Self::basename(&node.path), node.file_type));
+            }
+        }
+
         Ok(entries)
     }
 

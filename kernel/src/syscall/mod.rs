@@ -287,13 +287,13 @@ pub fn copy_string_from_user(ptr: *const u8, max_len: usize) -> Result<String, i
 
     validate_user_range(ptr as u64, max_len)?;
 
-    let mut out = String::new();
+    let mut bytes = Vec::new();
     for offset in 0..max_len {
         let byte = unsafe { core::ptr::read_volatile(ptr.add(offset)) };
         if byte == 0 {
-            return Ok(out);
+            return String::from_utf8(bytes).map_err(|_| EINVAL);
         }
-        out.push(byte as char);
+        bytes.push(byte);
     }
 
     syscall_log!(
@@ -325,16 +325,16 @@ pub fn copy_string_from_user_len(
 
     validate_user_range(ptr as u64, len)?;
 
-    let mut out = String::new();
+    let mut bytes = Vec::new();
     for offset in 0..len {
         let byte = unsafe { core::ptr::read_volatile(ptr.add(offset)) };
         if byte == 0 {
             return Err(EINVAL);
         }
-        out.push(byte as char);
+        bytes.push(byte);
     }
 
-    Ok(out)
+    String::from_utf8(bytes).map_err(|_| EINVAL)
 }
 
 pub fn copy_buffer_from_user(ptr: *const u8, len: usize) -> Result<Vec<u8>, i64> {
@@ -1242,12 +1242,46 @@ fn read_vfs_file(cwd: &str, path: &str) -> Result<Vec<u8>, crate::fs::vfs::VfsEr
 }
 
 fn sys_sleep(ms: u64) -> i64 {
-    let iters = ms * 1000;
-    for _ in 0..iters {
+    if ms == 0 {
+        return 0;
+    }
+
+    let hz = crate::interrupts::TIMER_HZ;
+    // Round up to at least one tick so short sleeps still wait. Saturating
+    // math avoids the `ms * 1000` overflow of the old busy-wait.
+    let wait_ticks = ms.saturating_mul(hz).saturating_add(999) / 1000;
+    let wait_ticks = wait_ticks.max(1);
+
+    let start = crate::interrupts::timer_ticks();
+    let deadline = start.saturating_add(wait_ticks);
+
+    // The timer IRQ only advances ticks while interrupts are enabled. Enable
+    // them for the wait, then restore the caller's prior IF state.
+    let prev_if: u64;
+    unsafe {
+        core::arch::asm!("pushfq; pop {}", out(reg) prev_if, options(nomem));
+        core::arch::asm!("sti", options(nomem, nostack));
+    }
+
+    // Bound the spin so a stalled timer can never hang the kernel forever.
+    let mut guard: u64 = wait_ticks.saturating_mul(20_000_000).max(20_000_000);
+    while crate::interrupts::timer_ticks() < deadline {
         unsafe {
-            core::arch::asm!("pause");
+            core::arch::asm!("pause", options(nomem, nostack));
+        }
+        guard -= 1;
+        if guard == 0 {
+            break;
         }
     }
+
+    // Restore IF if it was clear on entry.
+    if (prev_if & (1 << 9)) == 0 {
+        unsafe {
+            core::arch::asm!("cli", options(nomem, nostack));
+        }
+    }
+
     0
 }
 

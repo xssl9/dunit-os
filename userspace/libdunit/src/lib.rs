@@ -7,6 +7,7 @@ use core::ptr::null_mut;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 pub const SYSCALL_EXIT: usize = 0;
 pub const SYSCALL_READ: usize = 3;
@@ -480,7 +481,7 @@ pub fn error_name(code: isize) -> &'static str {
 }
 
 pub fn read_line() -> Result<String, isize> {
-    let mut out = String::new();
+    let mut bytes = Vec::new();
     let mut buf = [0u8; 64];
     loop {
         let read = read(0, &mut buf);
@@ -495,13 +496,13 @@ pub fn read_line() -> Result<String, isize> {
             return Err(read);
         }
         if read == 0 {
-            return Ok(out);
+            return String::from_utf8(bytes).map_err(|_| EINVAL);
         }
         for byte in &buf[..read as usize] {
             if *byte == b'\n' {
-                return Ok(out);
+                return String::from_utf8(bytes).map_err(|_| EINVAL);
             }
-            out.push(*byte as char);
+            bytes.push(*byte);
         }
     }
 }
@@ -512,7 +513,7 @@ pub fn read_to_string(path: &str) -> Result<String, isize> {
         return Err(fd);
     }
 
-    let mut out = String::new();
+    let mut bytes = Vec::new();
     let mut buf = [0u8; 128];
     loop {
         let read = read(fd as usize, &mut buf);
@@ -523,16 +524,14 @@ pub fn read_to_string(path: &str) -> Result<String, isize> {
         if read == 0 {
             break;
         }
-        for byte in &buf[..read as usize] {
-            out.push(*byte as char);
-        }
+        bytes.extend_from_slice(&buf[..read as usize]);
     }
 
     let closed = close(fd as usize);
     if closed < 0 {
         return Err(closed);
     }
-    Ok(out)
+    String::from_utf8(bytes).map_err(|_| EINVAL)
 }
 
 fn write_string_with_flags(path: &str, data: &str, flags: usize) -> Result<(), isize> {
