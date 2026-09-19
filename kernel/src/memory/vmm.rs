@@ -7,6 +7,7 @@ const USER_SPACE_END: usize = 0x0000_8000_0000_0000;
 const PML4_KERNEL_START: usize = 256;
 const KERNEL_MMIO_BASE: usize = 0xFFFF_C000_0000_0000;
 const KERNEL_MMIO_SIZE: usize = 0x0000_0080_0000_0000;
+const UNINITIALIZED_ROOT: usize = usize::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VirtualAddress(pub usize);
@@ -122,6 +123,7 @@ pub enum AddressSpaceError {
     OutOfMemory,
     InvalidUserAddress,
     HugePageInPath,
+    KernelRootNotInitialized,
 }
 
 pub struct AddressSpace {
@@ -137,7 +139,10 @@ impl AddressSpace {
         let root_table = unsafe { page_table_from_phys_mut(root_frame) };
         root_table.zero();
 
-        copy_kernel_half_from_active(root_table)?;
+        if let Err(error) = unsafe { sync_kernel_half_into(root_frame.as_usize()) } {
+            pmm.free_frame(root_frame);
+            return Err(error);
+        }
 
         let mut page_table_frames = Vec::new();
         page_table_frames.push(root_frame);
@@ -231,7 +236,7 @@ impl AddressSpace {
 
     pub unsafe fn activate(&self) -> ActiveAddressSpace {
         let previous_cr3 = read_cr3();
-        write_cr3(self.root_frame.as_usize());
+        switch_to_root_frame(self.root_frame.as_usize());
         ActiveAddressSpace { previous_cr3 }
     }
 
@@ -320,6 +325,100 @@ pub fn active_user_page_flags(
     user_page_mapping_from_root(root, virt).map(|mapping| mapping.map(|(_, flags)| flags))
 }
 
+/// Maps a frame into the user half of the currently active address space.
+///
+/// Process ELF loading should use [`AddressSpace`] so ownership remains
+/// explicit. This entry point exists for the early ring-3 syscall smoke test,
+/// which runs before a userspace process is scheduled.
+pub unsafe fn map_active_user_frame(
+    virt: VirtualAddress,
+    phys: PhysicalAddress,
+    flags: PageFlags,
+) -> Result<(), AddressSpaceError> {
+    let virt_addr = virt.as_usize();
+    if virt_addr == 0
+        || virt_addr >= USER_SPACE_END
+        || (virt_addr & (PAGE_SIZE - 1)) != 0
+        || (phys.as_usize() & (PAGE_SIZE - 1)) != 0
+    {
+        return Err(AddressSpaceError::InvalidUserAddress);
+    }
+
+    let root = page_table_from_phys_mut(PhysicalAddress(read_cr3()));
+    let p3 = ensure_active_user_table(root.get_entry_mut(virt.p4_index()))?;
+    let p2 = ensure_active_user_table(p3.get_entry_mut(virt.p3_index()))?;
+    let p1 = ensure_active_user_table(p2.get_entry_mut(virt.p2_index()))?;
+    p1.get_entry_mut(virt.p1_index())
+        .set(phys, flags | PageFlags::PRESENT | PageFlags::USER);
+    flush_page(virt_addr);
+    Ok(())
+}
+
+/// Makes an existing active mapping reachable from ring 3, including every
+/// parent table entry. Huge pages are valid leaves at the P3 or P2 level.
+pub unsafe fn mark_active_mapping_user(
+    virt: VirtualAddress,
+) -> Result<(), AddressSpaceError> {
+    let root = page_table_from_phys_mut(PhysicalAddress(read_cr3()));
+    let p4 = root.get_entry_mut(virt.p4_index());
+    mark_entry_user(p4)?;
+
+    let p3_table = page_table_from_phys_mut(p4.addr());
+    let p3 = p3_table.get_entry_mut(virt.p3_index());
+    mark_entry_user(p3)?;
+    if p3.flags().contains(PageFlags::HUGE) {
+        flush_page(virt.as_usize());
+        return Ok(());
+    }
+
+    let p2_table = page_table_from_phys_mut(p3.addr());
+    let p2 = p2_table.get_entry_mut(virt.p2_index());
+    mark_entry_user(p2)?;
+    if p2.flags().contains(PageFlags::HUGE) {
+        flush_page(virt.as_usize());
+        return Ok(());
+    }
+
+    let p1_table = page_table_from_phys_mut(p2.addr());
+    mark_entry_user(p1_table.get_entry_mut(virt.p1_index()))?;
+    flush_page(virt.as_usize());
+    Ok(())
+}
+
+unsafe fn ensure_active_user_table(
+    entry: &mut PageTableEntry,
+) -> Result<&'static mut PageTable, AddressSpaceError> {
+    if !entry.is_unused() {
+        if entry.flags().contains(PageFlags::HUGE) {
+            return Err(AddressSpaceError::HugePageInPath);
+        }
+        entry.entry |= (PageFlags::USER | PageFlags::WRITABLE).bits();
+        return Ok(page_table_from_phys_mut(entry.addr()));
+    }
+
+    let pmm = get_pmm().ok_or(AddressSpaceError::NoPhysicalMemoryManager)?;
+    let frame = pmm.alloc_frame().ok_or(AddressSpaceError::OutOfMemory)?;
+    let table = page_table_from_phys_mut(frame);
+    table.zero();
+    entry.set(
+        frame,
+        PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER,
+    );
+    Ok(table)
+}
+
+fn mark_entry_user(entry: &mut PageTableEntry) -> Result<(), AddressSpaceError> {
+    if entry.is_unused() {
+        return Err(AddressSpaceError::InvalidUserAddress);
+    }
+    entry.entry |= PageFlags::USER.bits();
+    Ok(())
+}
+
+unsafe fn flush_page(virt: usize) {
+    core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
+}
+
 impl Drop for AddressSpace {
     fn drop(&mut self) {
         if let Some(pmm) = get_pmm() {
@@ -340,7 +439,7 @@ pub struct ActiveAddressSpace {
 impl Drop for ActiveAddressSpace {
     fn drop(&mut self) {
         unsafe {
-            write_cr3(self.previous_cr3);
+            switch_to_root_frame(self.previous_cr3);
         }
     }
 }
@@ -366,9 +465,36 @@ pub fn run_address_space_smoke() -> bool {
         return false;
     }
 
+    // Emulate an address space created before a new kernel PML4 slot appears.
+    // Activation must refresh the complete shared kernel half before CR3 changes.
+    let kernel_root_frame = KERNEL_ROOT_FRAME.load(Ordering::Acquire);
+    let kernel_root = unsafe { page_table_from_phys_mut(PhysicalAddress(kernel_root_frame)) };
+    let kernel_slot = match (PML4_KERNEL_START..512)
+        .find(|idx| !kernel_root.get_entry(*idx).is_unused())
+    {
+        Some(index) => index,
+        None => {
+            super::serial_write("[ADDRSPACE-TEST] no kernel mapping found\r\n");
+            return false;
+        }
+    };
+    let expected_kernel_entry = kernel_root.get_entry(kernel_slot).entry;
+    unsafe {
+        page_table_from_phys_mut(address_space.root_frame)
+            .get_entry_mut(kernel_slot)
+            .set_unused();
+    }
+
     unsafe {
         let _active = address_space.activate();
         super::serial_write("[ADDRSPACE-TEST] switched\r\n");
+
+        let active_root = page_table_from_phys_mut(address_space.root_frame);
+        if active_root.get_entry(kernel_slot).entry != expected_kernel_entry {
+            super::serial_write("[ADDRSPACE-TEST] kernel half refresh failed\r\n");
+            return false;
+        }
+        super::serial_write("[ADDRSPACE-TEST] kernel half refreshed\r\n");
 
         let ptr = user_page.as_usize() as *mut u64;
         core::ptr::write_volatile(ptr, 0x4455_4E49_544F_5341);
@@ -387,10 +513,19 @@ pub fn run_address_space_smoke() -> bool {
     true
 }
 
-fn copy_kernel_half_from_active(new_root: &mut PageTable) -> Result<(), AddressSpaceError> {
-    let active_root = unsafe { page_table_from_phys_mut(PhysicalAddress(read_cr3())) };
+unsafe fn sync_kernel_half_into(root_frame: usize) -> Result<(), AddressSpaceError> {
+    let kernel_root_frame = KERNEL_ROOT_FRAME.load(Ordering::Acquire);
+    if kernel_root_frame == UNINITIALIZED_ROOT {
+        return Err(AddressSpaceError::KernelRootNotInitialized);
+    }
+    if root_frame == kernel_root_frame {
+        return Ok(());
+    }
+
+    let kernel_root = &*(phys_to_virt(kernel_root_frame) as *const PageTable);
+    let root = page_table_from_phys_mut(PhysicalAddress(root_frame));
     for idx in PML4_KERNEL_START..512 {
-        new_root.entries[idx] = active_root.entries[idx];
+        root.entries[idx] = kernel_root.entries[idx];
     }
     Ok(())
 }
@@ -414,118 +549,29 @@ pub unsafe fn active_root_frame() -> usize {
 }
 
 pub unsafe fn switch_to_root_frame(root_frame: usize) {
+    if sync_kernel_half_into(root_frame).is_err() {
+        panic!("VMM canonical kernel root is unavailable during address-space switch");
+    }
     write_cr3(root_frame);
 }
-
-pub struct VirtualMemoryManager {
-    page_table: &'static mut PageTable,
-}
-
-impl VirtualMemoryManager {
-    pub fn new(page_table: &'static mut PageTable) -> Self {
-        page_table.zero();
-        Self { page_table }
-    }
-
-    pub fn map_page(&mut self, virt: VirtualAddress, phys: PhysicalAddress, flags: PageFlags) {
-        let p4_index = virt.p4_index();
-        let p3_index = virt.p3_index();
-        let p2_index = virt.p2_index();
-        let p1_index = virt.p1_index();
-
-        let p4_entry = self.page_table.get_entry_mut(p4_index);
-        if p4_entry.is_unused() {
-            return;
-        }
-
-        let p3_table = unsafe { &mut *(p4_entry.addr().as_usize() as *mut PageTable) };
-        let p3_entry = p3_table.get_entry_mut(p3_index);
-        if p3_entry.is_unused() {
-            return;
-        }
-
-        let p2_table = unsafe { &mut *(p3_entry.addr().as_usize() as *mut PageTable) };
-        let p2_entry = p2_table.get_entry_mut(p2_index);
-        if p2_entry.is_unused() {
-            return;
-        }
-
-        let p1_table = unsafe { &mut *(p2_entry.addr().as_usize() as *mut PageTable) };
-        let p1_entry = p1_table.get_entry_mut(p1_index);
-
-        p1_entry.set(phys, flags | PageFlags::PRESENT);
-    }
-
-    pub fn unmap_page(&mut self, virt: VirtualAddress) {
-        let p4_index = virt.p4_index();
-        let p3_index = virt.p3_index();
-        let p2_index = virt.p2_index();
-        let p1_index = virt.p1_index();
-
-        let p4_entry = self.page_table.get_entry_mut(p4_index);
-        if p4_entry.is_unused() {
-            return;
-        }
-
-        let p3_table = unsafe { &mut *(p4_entry.addr().as_usize() as *mut PageTable) };
-        let p3_entry = p3_table.get_entry_mut(p3_index);
-        if p3_entry.is_unused() {
-            return;
-        }
-
-        let p2_table = unsafe { &mut *(p3_entry.addr().as_usize() as *mut PageTable) };
-        let p2_entry = p2_table.get_entry_mut(p2_index);
-        if p2_entry.is_unused() {
-            return;
-        }
-
-        let p1_table = unsafe { &mut *(p2_entry.addr().as_usize() as *mut PageTable) };
-        let p1_entry = p1_table.get_entry_mut(p1_index);
-
-        p1_entry.set_unused();
-    }
-
-    pub fn translate(&self, virt: VirtualAddress) -> Option<PhysicalAddress> {
-        let p4_index = virt.p4_index();
-        let p3_index = virt.p3_index();
-        let p2_index = virt.p2_index();
-        let p1_index = virt.p1_index();
-        let offset = virt.offset();
-
-        let p4_entry = self.page_table.get_entry(p4_index);
-        if p4_entry.is_unused() {
-            return None;
-        }
-
-        let p3_table = unsafe { &*(p4_entry.addr().as_usize() as *const PageTable) };
-        let p3_entry = p3_table.get_entry(p3_index);
-        if p3_entry.is_unused() {
-            return None;
-        }
-
-        let p2_table = unsafe { &*(p3_entry.addr().as_usize() as *const PageTable) };
-        let p2_entry = p2_table.get_entry(p2_index);
-        if p2_entry.is_unused() {
-            return None;
-        }
-
-        let p1_table = unsafe { &*(p2_entry.addr().as_usize() as *const PageTable) };
-        let p1_entry = p1_table.get_entry(p1_index);
-
-        if p1_entry.is_unused() {
-            return None;
-        }
-
-        Some(PhysicalAddress(p1_entry.addr().as_usize() + offset))
-    }
-}
-
-static mut VMM_INSTANCE: Option<VirtualMemoryManager> = None;
 static mut HHDM_OFFSET: u64 = 0;
+static KERNEL_ROOT_FRAME: AtomicUsize = AtomicUsize::new(UNINITIALIZED_ROOT);
 static NEXT_MMIO_VIRT: AtomicUsize = AtomicUsize::new(KERNEL_MMIO_BASE);
 
 pub fn init() {
     super::serial_write("[VMM] START\r\n");
+    let active_root = unsafe { read_cr3() };
+    if KERNEL_ROOT_FRAME
+        .compare_exchange(
+            UNINITIALIZED_ROOT,
+            active_root,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_err()
+    {
+        super::serial_write("[VMM] canonical kernel root already initialized\r\n");
+    }
     super::serial_write("[VMM] OK\r\n");
 }
 
@@ -537,10 +583,6 @@ pub fn set_hhdm_offset(offset: u64) {
 
 pub fn get_hhdm_offset() -> u64 {
     unsafe { HHDM_OFFSET }
-}
-
-pub fn get_vmm() -> Option<&'static mut VirtualMemoryManager> {
-    unsafe { VMM_INSTANCE.as_mut() }
 }
 
 pub fn phys_to_virt(phys: usize) -> usize {
@@ -565,7 +607,10 @@ pub fn map_mmio_region(phys: usize, length: usize) -> Option<usize> {
         return None;
     }
 
-    let root_frame = unsafe { active_root_frame() };
+    let root_frame = KERNEL_ROOT_FRAME.load(Ordering::Acquire);
+    if root_frame == UNINITIALIZED_ROOT {
+        return None;
+    }
     let mut offset = 0usize;
     while offset < map_length {
         unsafe {
@@ -580,6 +625,14 @@ pub fn map_mmio_region(phys: usize, length: usize) -> Option<usize> {
             )?;
         }
         offset += PAGE_SIZE;
+    }
+
+    unsafe {
+        let active_root = active_root_frame();
+        sync_kernel_half_into(active_root).ok()?;
+        // Reloading CR3 invalidates stale translations after installing a new
+        // shared kernel hierarchy in the currently active address space.
+        write_cr3(active_root);
     }
 
     Some(virt_start + phys_offset)
@@ -608,7 +661,6 @@ unsafe fn map_kernel_page(
         .get_entry_mut(p1)
         .set(PhysicalAddress(phys), flags | PageFlags::PRESENT);
 
-    core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
     Some(())
 }
 

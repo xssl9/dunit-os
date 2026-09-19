@@ -169,10 +169,6 @@ const MAX_USER_COPY: usize = 64 * 1024;
 const MAX_USER_PATH: usize = 256;
 const MAX_USER_DIRENTS: usize = 64;
 const SMOKE_RETURN_MAGIC: i64 = 0x0051_5953_4341_4C4C;
-const PAGE_PRESENT: u64 = 1 << 0;
-const PAGE_WRITABLE: u64 = 1 << 1;
-const PAGE_USER: u64 = 1 << 2;
-const PAGE_HUGE: u64 = 1 << 7;
 const SMOKE_USER_PAGE: usize = 0x0000_0000_0040_0000;
 const SMOKE_USER_PATH: usize = SMOKE_USER_PAGE;
 const SMOKE_USER_WRITE: usize = SMOKE_USER_PAGE + 64;
@@ -1385,12 +1381,20 @@ pub fn run_userspace_syscall_smoke() -> bool {
 
     unsafe {
         for offset in [0usize, 4096, 8192] {
-            if mark_current_mapping_user(entry + offset).is_err() {
+            if crate::memory::vmm::mark_active_mapping_user(
+                crate::memory::vmm::VirtualAddress::from_usize(entry + offset),
+            )
+            .is_err()
+            {
                 syscall_log!("[SYSCALL-TEST] failed to mark smoke entry user-accessible\r\n");
                 return false;
             }
         }
-        if mark_current_mapping_user(stack_top - 1).is_err() {
+        if crate::memory::vmm::mark_active_mapping_user(
+            crate::memory::vmm::VirtualAddress::from_usize(stack_top - 1),
+        )
+        .is_err()
+        {
             syscall_log!("[SYSCALL-TEST] failed to mark smoke stack user-accessible\r\n");
             return false;
         }
@@ -1697,7 +1701,12 @@ unsafe fn prepare_user_fs_smoke_page() -> Result<(), ()> {
         SMOKE_STDOUT_DATA.len(),
     );
 
-    map_current_user_page(SMOKE_USER_PAGE, page_frame)?;
+    crate::memory::vmm::map_active_user_frame(
+        crate::memory::vmm::VirtualAddress::from_usize(SMOKE_USER_PAGE),
+        crate::memory::pmm::PhysicalAddress(page_frame),
+        crate::memory::vmm::PageFlags::WRITABLE,
+    )
+    .map_err(|_| ())?;
     Ok(())
 }
 
@@ -1715,114 +1724,4 @@ fn user_fs_smoke_readback_ok() -> bool {
         }
     }
     true
-}
-
-unsafe fn map_current_user_page(virt: usize, phys: usize) -> Result<(), ()> {
-    if virt & 0xfff != 0 || phys & 0xfff != 0 {
-        return Err(());
-    }
-
-    let hhdm = crate::memory::vmm::get_hhdm_offset() as usize;
-    if hhdm == 0 {
-        return Err(());
-    }
-
-    let mut cr3: usize;
-    core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
-    let pml4 = ((cr3 & !0xfff) + hhdm) as *mut u64;
-
-    let p4 = (virt >> 39) & 0x1ff;
-    let p3 = (virt >> 30) & 0x1ff;
-    let p2 = (virt >> 21) & 0x1ff;
-    let p1 = (virt >> 12) & 0x1ff;
-
-    let pdpt = ensure_next_table(pml4.add(p4), hhdm)?;
-    let pd = ensure_next_table(pdpt.add(p3), hhdm)?;
-    let pt = ensure_next_table(pd.add(p2), hhdm)?;
-    let pte = pt.add(p1);
-
-    core::ptr::write_volatile(
-        pte,
-        (phys as u64) | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER,
-    );
-    flush_user_mapping(virt);
-    Ok(())
-}
-
-unsafe fn ensure_next_table(entry: *mut u64, hhdm: usize) -> Result<*mut u64, ()> {
-    let mut value = core::ptr::read_volatile(entry);
-    if value & PAGE_PRESENT != 0 {
-        if value & PAGE_HUGE != 0 {
-            return Err(());
-        }
-        if value & PAGE_USER == 0 || value & PAGE_WRITABLE == 0 {
-            value |= PAGE_USER | PAGE_WRITABLE;
-            core::ptr::write_volatile(entry, value);
-        }
-        return Ok((((value as usize) & !0xfff) + hhdm) as *mut u64);
-    }
-
-    let pmm = crate::memory::pmm::get_pmm().ok_or(())?;
-    let frame = pmm.alloc_frame().ok_or(())?.as_usize();
-    let table = (frame + hhdm) as *mut u64;
-    core::ptr::write_bytes(table as *mut u8, 0, 4096);
-    core::ptr::write_volatile(
-        entry,
-        (frame as u64) | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER,
-    );
-    Ok(table)
-}
-
-unsafe fn mark_current_mapping_user(virt: usize) -> Result<(), ()> {
-    let hhdm = crate::memory::vmm::get_hhdm_offset() as usize;
-    if hhdm == 0 {
-        return Err(());
-    }
-
-    let mut cr3: usize;
-    core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
-    let pml4 = ((cr3 & !0xfff) + hhdm) as *mut u64;
-
-    let p4 = (virt >> 39) & 0x1ff;
-    let p3 = (virt >> 30) & 0x1ff;
-    let p2 = (virt >> 21) & 0x1ff;
-    let p1 = (virt >> 12) & 0x1ff;
-
-    let pml4e = pml4.add(p4);
-    set_user_bit(pml4e)?;
-    let pdpt = (((*pml4e as usize) & !0xfff) + hhdm) as *mut u64;
-
-    let pdpte = pdpt.add(p3);
-    set_user_bit(pdpte)?;
-    if *pdpte & PAGE_HUGE != 0 {
-        flush_user_mapping(virt);
-        return Ok(());
-    }
-
-    let pd = (((*pdpte as usize) & !0xfff) + hhdm) as *mut u64;
-    let pde = pd.add(p2);
-    set_user_bit(pde)?;
-    if *pde & PAGE_HUGE != 0 {
-        flush_user_mapping(virt);
-        return Ok(());
-    }
-
-    let pt = (((*pde as usize) & !0xfff) + hhdm) as *mut u64;
-    let pte = pt.add(p1);
-    set_user_bit(pte)?;
-    flush_user_mapping(virt);
-    Ok(())
-}
-
-unsafe fn set_user_bit(entry: *mut u64) -> Result<(), ()> {
-    let value = core::ptr::read_volatile(entry);
-    if value & PAGE_PRESENT == 0 {
-        return Err(());
-    }
-    core::ptr::write_volatile(entry, value | PAGE_USER);
-    Ok(())
-}
-
-unsafe fn flush_user_mapping(virt: usize) {
-    core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
 }

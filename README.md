@@ -162,7 +162,7 @@ Not implemented yet:
 - Journaling and recovery for the disk-backed filesystem.
 - Network stack.
 - Userspace terminal/shell process.
-- Full libc.
+- musl libc port and the syscall/ABI surface it requires.
 - ACPI/QEMU shutdown.
 - Real RTC/date source.
 

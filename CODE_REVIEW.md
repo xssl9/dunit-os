@@ -61,11 +61,10 @@
   из memory map, игнорируя остальные usable-регионы → теряется доступная RAM. Нужно:
   учитывать все usable-регионы.
 
-- [ ] **MMIO-маппинг не попадает в уже созданные адресные пространства.**
-  `kernel/src/memory/vmm.rs`: `map_kernel_page` правит только активный root. Kernel-half
-  копируется в `AddressSpace` в момент создания (`copy_kernel_half_from_active`), поэтому
-  MMIO, замапленный после создания процесса, в его адресном пространстве не виден. Нужно:
-  общая (shared) верхняя половина PML4 между всеми адресными пространствами.
+- [x] **MMIO-маппинг не попадает в уже созданные адресные пространства.**
+  `kernel/src/memory/vmm.rs`: добавлен канонический kernel root. Новые `AddressSpace`
+  копируют его верхнюю половину, каждое переключение CR3 синхронизирует её повторно,
+  а `map_mmio_region` всегда обновляет канонический root и текущий активный root.
 
 - [ ] **Ключевые syscalls возвращают ENOSYS.**
   `kernel/src/syscall/mod.rs`: `sys_fork`, `sys_exec`, `sys_kill_process`, `sys_mmap` —
@@ -143,26 +142,19 @@
   `kernel/src/memory/vmm.rs`: `run_address_space_smoke()` создаёт адресное пространство,
   маппит страницу и пишет магию при каждой загрузке. Место — не в релизе.
 
-- [ ] **Дублирование логики page-table walk.**
-  Ручные обходчики таблиц страниц скопированы в трёх местах вместо использования
-  `AddressSpace`/VMM API:
-  - `kernel/src/syscall/mod.rs` (`map_current_user_page` и др.),
-  - `kernel/src/elf/mod.rs` (`load_into_current_address_space`, `load_segment_current`,
-    `current_mapping_phys`, `map_current_user_page`, `ensure_next_table`),
-  - `kernel/src/memory/vmm.rs` (`map_kernel_page`, `ensure_kernel_table`).
-  Нужно: единый API маппинга.
+- [x] **Дублирование логики page-table walk.**
+  Ручные обходчики удалены из ELF и syscall-модулей. Процессный userspace использует
+  `AddressSpace`, а ограниченные операции раннего ring-3 smoke-теста и kernel/MMIO
+  mapping централизованы в `memory::vmm`.
 
-- [ ] **Два параллельных пути загрузки ELF.**
-  `kernel/src/elf/mod.rs`: `load_into_process_address_space` (правильный, через
-  `AddressSpace`) и `load_into_current_address_space` (ручные обходы таблиц). Плюс
-  легаси `ElfLoader::load`/`create_process`, использующие никогда не инициализируемый
-  `VirtualMemoryManager`. Нужно: оставить один путь, легаси удалить.
+- [x] **Два параллельных пути загрузки ELF.**
+  Оставлен один production-путь: `prepare_process_elf` →
+  `load_into_process_address_space` → `AddressSpace`. Ручной current-CR3 loader и
+  неиспользуемый `ElfLoader` удалены.
 
-- [ ] **`VirtualMemoryManager` — мёртвый/сломанный путь.**
-  `kernel/src/memory/vmm.rs`: `map_page`/`translate` используют сырой phys как `*mut
-  PageTable` (без HHDM), а `VMM_INSTANCE` вообще никогда не инициализируется
-  (`init()` только печатает START/OK). Любой код, зависящий от `get_vmm()`, нерабочий.
-  Нужно: удалить либо привести к HHDM и инициализировать.
+- [x] **`VirtualMemoryManager` — мёртвый/сломанный путь.**
+  Неинициализируемый `VMM_INSTANCE`, `get_vmm` и весь легаси-тип удалены. Единственный
+  API адресных пространств — HHDM-aware `AddressSpace` и функции `memory::vmm`.
 
 - [ ] **MMIO-виртуальный диапазон не переиспользуется.**
   `kernel/src/memory/vmm.rs`: `map_mmio_region` только двигает `NEXT_MMIO_VIRT` вперёд
