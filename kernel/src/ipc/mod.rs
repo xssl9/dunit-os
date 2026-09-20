@@ -202,13 +202,17 @@ impl IpcManager {
 
 static mut IPC_MANAGER_INSTANCE: Option<IpcManager> = None;
 
-pub fn init() {
+/// Initialize the IPC manager and return its measured startup stats. At init
+/// there are no message queues (they are created lazily per target PID on the
+/// first `send`) and no shared-memory regions, so the boot log can report the
+/// real counts instead of claiming queues/shared memory were pre-created.
+pub fn init() -> IpcStats {
     unsafe {
         IPC_MANAGER_INSTANCE = Some(IpcManager::new());
     }
-    crate::memory::serial_write("[IPC] manager ready: message-queue smoke only\r\n");
-    // Временно пропускаем инициализацию IPC
-    // TODO: инициализировать после настройки аллокатора
+    let stats = ipc_stats();
+    crate::memory::serial_write("[IPC] manager ready: bounded byte message queues (lazy per-PID)\r\n");
+    stats
 }
 
 pub fn get_ipc_manager() -> Option<&'static mut IpcManager> {

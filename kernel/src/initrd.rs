@@ -30,14 +30,31 @@ impl Initrd {
     pub fn list_files(&self) -> impl Iterator<Item = &str> {
         self.files.iter().map(|f| f.name.as_str())
     }
+
+    pub fn file_count(&self) -> usize {
+        self.files.len()
+    }
 }
 
 static mut INITRD_INSTANCE: Option<Initrd> = None;
 
-pub fn init() {
+/// Initialize the initrd store and return the number of files it actually
+/// holds. No initrd archive is wired into the boot path yet, so this currently
+/// returns 0; the boot log reports that measured count instead of claiming an
+/// archive was located and unpacked.
+pub fn init() -> usize {
     unsafe {
         INITRD_INSTANCE = Some(Initrd::new());
+        INITRD_INSTANCE
+            .as_ref()
+            .map(Initrd::file_count)
+            .unwrap_or(0)
     }
+}
+
+/// Number of files currently held by the initrd store, or 0 before init.
+pub fn file_count() -> usize {
+    unsafe { INITRD_INSTANCE.as_ref().map(Initrd::file_count).unwrap_or(0) }
 }
 
 pub fn get_initrd() -> Option<&'static mut Initrd> {

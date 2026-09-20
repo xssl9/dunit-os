@@ -484,6 +484,67 @@ pub extern "C" fn screen_log_c(text: *const u8, is_error: bool) {
     }
 }
 
+/// Report the *measured* context-switch capability instead of a hardcoded
+/// caveat. Cooperative context switching (CPU-context save/restore driven by
+/// `yield`/`wait`) is real and exercised by the userspace runtime; timer-driven
+/// preemption is an experimental hook that is off by default.
+fn report_context_switch_state(screen_log: &impl Fn(&str, bool)) {
+    screen_log(
+        "[ OK ] Scheduler: cooperative context switch ready (save/restore + yield)",
+        false,
+    );
+    if process::preemption_enabled() {
+        screen_log(
+            "[ OK ] Scheduler: timer preemption enabled (experimental)",
+            false,
+        );
+    } else {
+        screen_log(
+            "[ .. ] Scheduler: timer preemption off (cooperative only)",
+            false,
+        );
+    }
+}
+
+/// Report the IPC subsystem's real startup state. Queues are created lazily per
+/// target PID on first send, and shared memory is a prototype with no syscall
+/// surface yet, so the log states the measured counts rather than claiming
+/// queues and a shared-memory manager were pre-created.
+fn report_ipc_state(screen_log: &impl Fn(&str, bool), stats: ipc::IpcStats) {
+    let mut buf = FmtBuf::new();
+    buf.push_str("[ OK ] IPC: byte message queues ready (");
+    buf.push_u64(stats.queue_count);
+    buf.push_str(" active, ");
+    buf.push_u64(stats.queued_messages);
+    buf.push_str(" queued)");
+    screen_log(buf.as_str(), false);
+
+    let mut buf = FmtBuf::new();
+    buf.push_str("[ .. ] IPC: shared memory prototype (");
+    buf.push_u64(stats.shared_regions);
+    buf.push_str(" regions, no syscall surface yet)");
+    screen_log(buf.as_str(), false);
+}
+
+/// Report the measured initrd file count. No initrd archive is wired into the
+/// boot path yet, so this normally reports that none was provided and that the
+/// embedded `/app` and `/assets` trees are used instead of falsely claiming an
+/// archive was located and unpacked.
+fn report_initrd_state(screen_log: &impl Fn(&str, bool), file_count: usize) {
+    if file_count == 0 {
+        screen_log(
+            "[ .. ] Initrd: no archive provided; using embedded /app and /assets",
+            false,
+        );
+    } else {
+        let mut buf = FmtBuf::new();
+        buf.push_str("[ OK ] Initrd: ");
+        buf.push_u64(file_count as u64);
+        buf.push_str(" file(s) available");
+        screen_log(buf.as_str(), false);
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn kernel_main(
     fb_ptr: *const LimineFramebuffer,
@@ -613,17 +674,15 @@ pub extern "C" fn kernel_main(
             false,
         );
         screen_log("[ OK ] Scheduler: PID ready queue initialized", false);
-        screen_log("[ .. ] Scheduler: context switching unavailable", false);
+        report_context_switch_state(&screen_log);
         screen_log("[ OK ] Process management ready", false);
 
         screen_log("[ .. ] Initializing Inter-Process Communication", false);
         screen_log("[ .. ] Setting up message passing", false);
         serial_write("[IPC] Calling ipc::init()...\r\n");
-        ipc::init();
+        let ipc_stats = ipc::init();
         serial_write("[IPC] ipc::init() returned\r\n");
-        screen_log("[ OK ] IPC: Message queues created", false);
-        screen_log("[ OK ] IPC: Shared memory manager ready", false);
-        screen_log("[ OK ] IPC subsystem operational", false);
+        report_ipc_state(&screen_log, ipc_stats);
 
         screen_log("[ .. ] Initializing Virtual File System", false);
         screen_log("[ .. ] Mounting root filesystem", false);
@@ -642,10 +701,9 @@ pub extern "C" fn kernel_main(
 
         screen_log("[ .. ] Loading initial ramdisk", false);
         serial_write("[INITRD] Calling initrd::init()...\r\n");
-        initrd::init();
+        let initrd_files = initrd::init();
         serial_write("[INITRD] initrd::init() returned\r\n");
-        screen_log("[ OK ] Initrd: Archive located", false);
-        screen_log("[ OK ] Initrd: Files extracted to /", false);
+        report_initrd_state(&screen_log, initrd_files);
 
         screen_log("[ .. ] Initializing input drivers", false);
         screen_log("[ .. ] Initializing PS/2 controller", false);
@@ -667,11 +725,12 @@ pub extern "C" fn kernel_main(
 
         screen_log("[ .. ] Initializing scheduler foundation", false);
         process::scheduler::init();
-        screen_log("[ OK ] Scheduler foundation ready (not active)", false);
+        screen_log("[ OK ] Scheduler: cooperative foundation initialized", false);
+        report_context_switch_state(&screen_log);
 
         screen_log("[ .. ] Initializing IPC", false);
-        ipc::init();
-        screen_log("[ OK ] IPC ready", false);
+        let ipc_stats = ipc::init();
+        report_ipc_state(&screen_log, ipc_stats);
 
         screen_log("[ .. ] Initializing VFS", false);
         match fs::vfs::init() {
@@ -680,8 +739,8 @@ pub extern "C" fn kernel_main(
         }
 
         screen_log("[ .. ] Loading initial ramdisk", false);
-        initrd::init();
-        screen_log("[ OK ] Initrd ready", false);
+        let initrd_files = initrd::init();
+        report_initrd_state(&screen_log, initrd_files);
 
         screen_log("[ .. ] Initializing input drivers", false);
         serial_write("[DRV] Calling drivers::init()...\r\n");
