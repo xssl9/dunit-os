@@ -25,7 +25,10 @@ jobs:
             lld \
             xorriso \
             mtools \
-            git
+            git \
+            qemu-system-x86 \
+            parted \
+            dosfstools
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@master
@@ -58,6 +61,19 @@ jobs:
 
       - name: Build ISO
         run: bash build_iso.sh
+
+      # --- M0 CI budget: warnings must not grow, boot markers must hold ---
+      - name: Compiler-warnings budget
+        run: python3 tools/check_warnings.py
+
+      - name: Boot marker budget (QEMU, TCG)
+        run: |
+          python3 tools/qemu_test.py --build \
+            --markers-file tools/boot_markers.json \
+            --accel tcg \
+            --boot-timeout 180 \
+            --cmd-timeout 60 \
+            --timeout 420
 
       - name: Create Release
         uses: softprops/action-gh-release@v2

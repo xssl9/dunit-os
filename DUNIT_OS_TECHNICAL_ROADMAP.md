@@ -338,9 +338,9 @@ Dunit DWM — отдельный policy shell поверх GUI Server:
 
 ### M0 — зафиксировать контракты и убрать ложный статус (must-have)
 
-- [ ] Написать `docs/architecture/current-state.md` и Dunit ABI v1 table.
-- [ ] Исправить boot logs initrd/shared-memory/context-switch, чтобы они отражали измеренное состояние.
-- [ ] Сделать compiler warnings и QEMU markers частью CI budget.
+- [x] Написать `docs/architecture/current-state.md` и Dunit ABI v1 table.
+- [x] Исправить boot logs initrd/shared-memory/context-switch, чтобы они отражали измеренное состояние.
+- [x] Сделать compiler warnings и QEMU markers частью CI budget.
 
 **Цель/причина:** создать честный baseline; без него нельзя отличить integration от файла-заготовки. **Подсистемы:** boot, docs, tests. **Зависимости:** нет. **Результат:** versioned snapshot. **Готовность:** каждый WORKING claim имеет QEMU test. **Тесты:** Terminal/GUI/BIOS/UEFI matrix. **Риск:** документация снова устареет; снижать executable status report.
 

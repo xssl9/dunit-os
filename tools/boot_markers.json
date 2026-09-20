@@ -1,0 +1,50 @@
+{
+  "description": "Executable link between WORKING claims in docs/architecture/current-state.md and the serial markers that prove them. tools/qemu_test.py --markers-file tools/boot_markers.json fails the run if any required marker is missing or any forbidden marker appears. This is the M0 CI budget: a status claim is only allowed to say WORKING if a marker here traces it to a real boot.",
+  "run": {
+    "config": "limine_test_terminal.conf",
+    "cmd": ["exec runtime_stress", "exec ipc_parent"]
+  },
+  "required": [
+    { "marker": "[KERNEL] START", "claim": "boot/kernel handoff", "source": "kernel/src/lib.rs" },
+    { "marker": "GDT loaded", "claim": "GDT", "source": "hal/src/gdt.c" },
+    { "marker": "IDT loaded with 256 entries", "claim": "IDT + exception handlers", "source": "kernel/src/lib.rs" },
+    { "marker": "Exception handlers registered", "claim": "exception handlers", "source": "kernel/src/lib.rs" },
+    { "marker": "[PMM] OK", "claim": "Physical Memory Manager", "source": "kernel/src/memory/pmm.rs" },
+    { "marker": "[VMM] OK", "claim": "Virtual Memory Manager", "source": "kernel/src/memory/vmm.rs" },
+    { "marker": "[HEAP] OK (PMM-backed, growable)", "claim": "kernel heap", "source": "kernel/src/memory/heap.rs" },
+    { "marker": "[ADDRSPACE-TEST] OK", "claim": "address-space switching", "source": "kernel/src/memory" },
+    { "marker": "[MMIO-ALLOC-TEST] OK", "claim": "MMIO allocator", "source": "kernel/src/memory" },
+    { "marker": "[PROCESS-ADDRSPACE-TEST] OK", "claim": "per-process address space", "source": "kernel/src/process/mod.rs" },
+    { "marker": "Scheduler: cooperative context switch ready", "claim": "context switch (save/restore + yield)", "source": "kernel/src/lib.rs" },
+    { "marker": "[IPC] manager ready: bounded byte message queues (lazy per-PID)", "claim": "byte message queues", "source": "kernel/src/ipc/mod.rs" },
+    { "marker": "[MEMFS] mounted as /", "claim": "VFS + MemFS as /", "source": "kernel/src/fs" },
+    { "marker": "[VFS] init OK", "claim": "VFS ready", "source": "kernel/src/fs/vfs.rs" },
+    { "marker": "Initrd: no archive provided; using embedded /app and /assets", "claim": "initrd honest status (MISSING archive)", "source": "kernel/src/initrd.rs" },
+    { "marker": "Keyboard driver ready", "claim": "PS/2 keyboard", "source": "kernel/src/drivers" },
+    { "marker": "Mouse input driver ready", "claim": "PS/2 mouse", "source": "kernel/src/drivers" },
+    { "marker": "IRQ 0: PIT timer enabled (~100 Hz)", "claim": "PIT timer", "source": "kernel/src/lib.rs" },
+    { "marker": "[SYSCALL-TEST] userspace syscall OK", "claim": "userspace syscall path", "source": "kernel/src/process" },
+    { "marker": "[SYSCALL-FS-TEST] OK", "claim": "FS syscalls", "source": "kernel/src/syscall/mod.rs" },
+    { "marker": "[SYSCALL-FS-SEMANTICS-TEST] OK", "claim": "FS syscall semantics", "source": "kernel/src/syscall/mod.rs" },
+    { "marker": "[PROCESS-KSTACK-TEST] OK", "claim": "process kernel stack smoke", "source": "kernel/src/process/mod.rs" },
+    { "marker": "Dunit OS (Green Tea) ready", "claim": "system init complete", "source": "kernel/src/lib.rs" },
+    { "marker": "[TERM-007] Starting main loop", "claim": "terminal / tty", "source": "kernel/src/lib.rs" },
+    { "marker": "[ELF-TEST] userspace app started", "claim": "ELF load and run", "source": "kernel/src/command.rs" },
+    { "marker": "[SPAWN] ready pid=", "claim": "spawn child process", "source": "kernel/src/syscall/mod.rs" },
+    { "marker": "runtime_stress: resumable OK", "claim": "resumable child", "source": "userspace/system_apps/runtime_stress" },
+    { "marker": "runtime_stress: ipc OK", "claim": "send/receive between processes", "source": "userspace/system_apps/runtime_stress" },
+    { "marker": "runtime_stress: repeated spawn OK", "claim": "repeated spawn", "source": "userspace/system_apps/runtime_stress" },
+    { "marker": "runtime_stress: kill OK", "claim": "kill process", "source": "userspace/system_apps/runtime_stress" },
+    { "marker": "reason=page-fault", "claim": "user-fault handling (page fault)", "source": "kernel/src/interrupts.rs" },
+    { "marker": "runtime_stress: fault OK", "claim": "fault delivered to waiter", "source": "userspace/system_apps/runtime_stress" },
+    { "marker": "runtime_stress: OK", "claim": "runtime_stress full pass (the do-not-break bar)", "source": "userspace/system_apps/runtime_stress" },
+    { "marker": "[PROCESS-RUN] VFS handles clean", "claim": "no VFS handle leak after exec", "source": "kernel/src/command.rs" },
+    { "marker": "exec: /app/runtime_stress returned code=0", "claim": "runtime_stress clean exit", "source": "kernel/src/command.rs" },
+    { "marker": "ipc_parent: OK", "claim": "ipc_parent full pass", "source": "userspace/system_apps/ipc_parent" },
+    { "marker": "exec: /app/ipc_parent returned code=0", "claim": "ipc_parent clean exit", "source": "kernel/src/command.rs" }
+  ],
+  "forbidden": [
+    { "marker": "[PANIC]", "why": "kernel panic (covers double-fault/invalid-TSS, which panic!)", "source": "kernel/src/lib.rs" },
+    { "marker": "[PROCESS-RUN] VFS handles leaked", "why": "VFS handle leak after a process exits", "source": "kernel/src/command.rs" }
+  ]
+}

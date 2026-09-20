@@ -70,6 +70,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # loop. Once we see it, keystrokes will be accepted.
 DEFAULT_READY_MARKER = "[TERM-007] Starting main loop"
 
+# Default LIMINE_CONFIG for --build. A markers manifest may override it.
+DEFAULT_CONFIG = "limine_test_terminal.conf"
+
 # ---------------------------------------------------------------------------
 # ASCII -> QEMU qcode mapping for send-key. Values are (qcode, needs_shift).
 # ---------------------------------------------------------------------------
@@ -125,6 +128,11 @@ class RunResult:
     screenshot: str | None = None
     full_serial_len: int = 0
     exit_code: int | None = None
+    # Marker budget (M0): required markers that were missing and forbidden
+    # markers that showed up. Empty lists mean the marker budget passed.
+    markers_checked: bool = False
+    missing_markers: list[str] = field(default_factory=list)
+    forbidden_hits: list[str] = field(default_factory=list)
 
 
 class Qmp:
@@ -259,6 +267,30 @@ class SerialTail:
         return self._data[start_len:]
 
 
+def load_markers(markers_file: str | None,
+                 require: list[str] | None,
+                 forbid: list[str] | None) -> tuple[list[str], list[str], dict]:
+    """Merge a markers manifest file with CLI --require/--forbid markers.
+
+    Returns (required, forbidden, run_defaults). `run_defaults` carries an
+    optional {"config", "cmd"} block from the manifest so a single file both
+    describes how to boot and what must be observed.
+    """
+    required: list[str] = []
+    forbidden: list[str] = []
+    run_defaults: dict = {}
+    if markers_file:
+        data = json.loads(Path(markers_file).read_text(encoding="utf-8"))
+        for entry in data.get("required", []):
+            required.append(entry["marker"] if isinstance(entry, dict) else entry)
+        for entry in data.get("forbidden", []):
+            forbidden.append(entry["marker"] if isinstance(entry, dict) else entry)
+        run_defaults = data.get("run", {}) or {}
+    required.extend(require or [])
+    forbidden.extend(forbid or [])
+    return required, forbidden, run_defaults
+
+
 def build_iso(config: str) -> Path:
     """Build the ISO via the Makefile. Returns the ISO path."""
     if shutil.which("make") is None:
@@ -350,6 +382,15 @@ def build_qemu_command(image: Path, is_disk: bool, accel: str, mem: str,
 def run(args: argparse.Namespace) -> RunResult:
     workdir = Path(args.workdir) if args.workdir else REPO_ROOT / "build"
     workdir.mkdir(parents=True, exist_ok=True)
+
+    required, forbidden, run_defaults = load_markers(
+        args.markers_file, args.require_marker, args.forbid_marker)
+    # A markers manifest may define how to boot (config + commands). CLI flags
+    # win; the manifest fills gaps so `--markers-file` alone is enough.
+    if run_defaults.get("config") and args.config == DEFAULT_CONFIG and args.build:
+        args.config = run_defaults["config"]
+    if run_defaults.get("cmd") and not args.cmd:
+        args.cmd = list(run_defaults["cmd"])
 
     is_disk = False
     if args.build:
@@ -478,6 +519,24 @@ def run(args: argparse.Namespace) -> RunResult:
         except Exception:
             pass
 
+        # Marker budget (M0): required markers must all appear and forbidden
+        # markers must not. This is what ties a WORKING claim to real evidence.
+        if required or forbidden:
+            result.markers_checked = True
+            text = serial.text
+            result.missing_markers = [m for m in required if m not in text]
+            result.forbidden_hits = [m for m in forbidden if m in text]
+            if result.missing_markers or result.forbidden_hits:
+                marker_reason = (
+                    f"marker budget failed: {len(result.missing_markers)} missing, "
+                    f"{len(result.forbidden_hits)} forbidden")
+                # Keep an existing failure reason (e.g. boot failure) primary.
+                if result.ok:
+                    result.reason = marker_reason
+                else:
+                    result.reason = f"{result.reason}; {marker_reason}"
+                result.ok = False
+
     return result
 
 
@@ -487,6 +546,15 @@ def print_human(result: RunResult) -> None:
     print(f"Booted    : {result.booted}")
     print(f"Result    : {'OK' if result.ok else 'FAIL'} ({result.reason})")
     print(f"Serial log: build/qemu-serial.full.log ({result.full_serial_len} bytes)")
+    if result.markers_checked:
+        if not result.missing_markers and not result.forbidden_hits:
+            print("Markers   : OK (marker budget satisfied)")
+        else:
+            print("Markers   : FAIL")
+            for m in result.missing_markers:
+                print(f"  MISSING required: {m!r}")
+            for m in result.forbidden_hits:
+                print(f"  FORBIDDEN seen  : {m!r}")
     if result.screenshot:
         print(f"Screenshot: {result.screenshot}")
     if not result.booted:
@@ -545,6 +613,13 @@ def main() -> int:
                         help="extra raw argument passed to qemu (repeatable)")
     parser.add_argument("--json", action="store_true",
                         help="print the result as JSON instead of human text")
+    parser.add_argument("--markers-file", metavar="FILE.json",
+                        help="markers manifest (required/forbidden serial markers + run defaults); "
+                             "run FAILS if any required marker is missing or any forbidden one appears")
+    parser.add_argument("--require-marker", action="append", metavar="TEXT",
+                        help="serial substring that must appear (repeatable); merged with --markers-file")
+    parser.add_argument("--forbid-marker", action="append", metavar="TEXT",
+                        help="serial substring that must NOT appear (repeatable); merged with --markers-file")
     args = parser.parse_args()
 
     if (not args.build and not args.build_disk and not args.iso and not args.disk
