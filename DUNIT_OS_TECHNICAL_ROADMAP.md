@@ -346,7 +346,8 @@ Dunit DWM — отдельный policy shell поверх GUI Server:
 
 ### M1 — kernel runtime prerequisites (must-have, перед GUI migration)
 
-- [ ] Включить и стабилизировать preemptive round-robin на PIT, затем abstraction clocksource/timer.
+- [x] Доказать, что preemptive round-robin на PIT реально вытесняет CPU-bound child без `yield` (smoke-хук `[PREEMPT-TEST] OK`, вытеснение off по умолчанию, сохраняются только GPR).
+- [ ] Включить round-robin по умолчанию, сохранять FPU/SSE-состояние и добавить abstraction clocksource/timer.
 - [ ] Сделать schedulable threads: TID, per-thread context/kernel stack/FPU state, process-owned address space.
 - [ ] Добавить wait queues и blocking sleep/IPC/event; убрать polling GUI apps.
 - [ ] Реализовать `munmap`, `mprotect`, shared VM object, guard pages и correct teardown.

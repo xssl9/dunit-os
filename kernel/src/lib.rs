@@ -799,6 +799,19 @@ pub extern "C" fn kernel_main(
     }
     screen_log("[ OK ] Hardware interrupts configured", false);
 
+    #[cfg(feature = "boot-smoke-tests")]
+    {
+        // Timer preemption proof (M1). Must run AFTER the PIT/IRQ0 are live,
+        // otherwise no timer tick can fire. Enables preemption only for this one
+        // exec, then restores the cooperative default.
+        screen_log("[ .. ] Running timer preemption smoke test", false);
+        if command::run_preemption_smoke() {
+            screen_log("[ OK ] Timer preemption smoke passed", false);
+        } else {
+            screen_log("[FAIL] Timer preemption smoke failed", true);
+        }
+    }
+
     screen_log("[ OK ] System initialization complete", false);
     screen_log("[ OK ] Dunit OS (Green Tea) ready", false);
 

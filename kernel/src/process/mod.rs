@@ -33,6 +33,10 @@ static TERMINAL_FOREGROUND_PID: AtomicU64 = AtomicU64::new(0);
 static FOREGROUND_OUTPUT_SINK: AtomicU64 = AtomicU64::new(ProcessOutputSink::SerialOnly as u64);
 static TERMINAL_STDIN_WAITING_PID: AtomicU64 = AtomicU64::new(0);
 static PREEMPT_SWITCH_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// Count of committed timer-driven context switches. Only advanced when
+/// `timer_preempt_save_and_schedule` actually hands the CPU to another process,
+/// so a non-zero value is proof that preemption fired (see M1 [PREEMPT-TEST]).
+static PREEMPTION_COUNT: AtomicU64 = AtomicU64::new(0);
 // Timer-driven preemption is experimental and OFF by default. The userspace
 // runtime contract (spawn/yield/wait) is cooperative: a spawned child stays
 // Ready until the parent explicitly yields. Letting the PIT run Ready children
@@ -1345,9 +1349,20 @@ pub fn timer_preempt_save_and_schedule(frame: &crate::interrupts::InterruptFrame
 
     let _ = crate::process::scheduler::enqueue_ready(current);
 
+    PREEMPTION_COUNT.fetch_add(1, Ordering::SeqCst);
     PROCESS_YIELD_REQUESTED.store(true, Ordering::SeqCst);
     PROCESS_SCHEDULE_HINT.store(next.0, Ordering::SeqCst);
     PREEMPT_SWITCH_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+/// Number of timer-driven context switches committed so far.
+pub fn preemption_count() -> u64 {
+    PREEMPTION_COUNT.load(Ordering::SeqCst)
+}
+
+/// Reset the preemption counter (used to bracket a smoke-test window).
+pub fn reset_preemption_count() {
+    PREEMPTION_COUNT.store(0, Ordering::SeqCst);
 }
 
 fn take_process_exit_request() -> Option<(i32, ProcessExitStatus)> {

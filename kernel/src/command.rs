@@ -185,6 +185,46 @@ pub fn run_foreground_exec(
     Ok((normalized, exit))
 }
 
+/// M1 preemption proof. Enables timer preemption for exactly one foreground
+/// exec of `preempt_test`, which spawns a CPU-bound child and never yields. If
+/// the child runs to completion (exit code 0 from the parent) and the kernel
+/// committed at least one timer-driven context switch, preemption is proven to
+/// work. Preemption is disabled again before returning, so the default
+/// cooperative contract (relied on by runtime_stress) is untouched.
+#[cfg(feature = "boot-smoke-tests")]
+pub fn run_preemption_smoke() -> bool {
+    crate::serial_write("[PREEMPT-TEST] START\r\n");
+
+    process::reset_preemption_count();
+    process::set_preemption_enabled(true);
+
+    let mut input = NoExecInput;
+    let result = run_foreground_exec("/", "preempt_test", ProcessOutputSink::SerialOnly, &mut input);
+
+    process::set_preemption_enabled(false);
+
+    let preempts = process::preemption_count();
+
+    let ok = match result {
+        Ok((_, exit)) => {
+            let _ = process::autoreap_process(exit.pid, "preempt-smoke");
+            matches!(exit.status, process::ProcessExitStatus::Exited(0)) && preempts > 0
+        }
+        Err(_) => false,
+    };
+
+    if ok {
+        crate::serial_write("[PREEMPT-TEST] OK preempts=");
+        serial_write_u32(preempts as u32);
+        crate::serial_write("\r\n");
+    } else {
+        crate::serial_write("[PREEMPT-TEST] FAIL preempts=");
+        serial_write_u32(preempts as u32);
+        crate::serial_write("\r\n");
+    }
+    ok
+}
+
 fn serial_write_i32(value: i32) {
     if value < 0 {
         crate::serial_write("-");

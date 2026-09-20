@@ -25,7 +25,8 @@ USERSPACE_APPS = \
 	elf_demo fs_test exit_test args_test cwd_test path_test image_demo bmp_viewer \
 	scheduler_test spawn_ready_test yield_child yield_test resumable_child resumable_test \
 	ipc_child ipc_parent runtime_stress input_test file_api_test env_test calc gui_ping \
-	gui_terminal_stub gui_calculator gui_stats gui_file_manager stdin_test fault_pf fault_ud dtop
+	gui_terminal_stub gui_calculator gui_stats gui_file_manager stdin_test fault_pf fault_ud dtop \
+	preempt_child preempt_test
 USERSPACE_CARGO_FLAGS = --release --target ../../../userspace/x86_64-unknown-none.json \
 	-Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
 

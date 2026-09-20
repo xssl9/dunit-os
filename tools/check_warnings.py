@@ -40,7 +40,7 @@ USERSPACE_APPS = [
     "ipc_child", "ipc_parent", "runtime_stress", "input_test", "file_api_test",
     "env_test", "calc", "gui_ping", "gui_terminal_stub", "gui_calculator",
     "gui_stats", "gui_file_manager", "stdin_test", "fault_pf", "fault_ud",
-    "dtop",
+    "dtop", "preempt_child", "preempt_test",
 ]
 
 KERNEL_BUILD = [

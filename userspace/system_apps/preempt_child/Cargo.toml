@@ -1,0 +1,11 @@
+[package]
+name = "preempt_child"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libdunit = { path = "../../libdunit" }
+
+[[bin]]
+name = "preempt_child"
+path = "src/main.rs"
