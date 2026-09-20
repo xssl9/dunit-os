@@ -3,6 +3,9 @@
 > Полный design document из `.kiro/specs/microkernel-os/design.md`
 > Это архивный документ — актуальный план в [[../ROADMAP|ROADMAP]]
 
+> [!warning] Не использовать как implementation contract
+> Memory layout, IPC enum, VFS tree и egui compositing ниже описывают ранний замысел. Текущие контракты определяются кодом, [[../STATUS|STATUS]], task nodes и [техническим roadmap](../../../DUNIT_OS_TECHNICAL_ROADMAP.md).
+
 ---
 
 ## Языковые границы

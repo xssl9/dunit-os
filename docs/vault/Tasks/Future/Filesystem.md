@@ -1,50 +1,56 @@
-# Persistent dunitFS / Block-backed Filesystem
+# DunitFS v2 и persistence
 
-**Status:** Future  
-**Depends on:** [[../Completed/VFS-MemFS|VFS + MemFS Runtime Layer]] · [[../Completed/Block-Storage-v1|Block Storage v1]]
+**Status:** V1 PROTOTYPE / V2 PLANNED
+**Depends on:** [[../Completed/VFS-MemFS|VFS + MemFS]] · [[../Completed/Block-Storage-v1|Block Storage]]
+**Related:** [[Installed-System|Normal Installed System]]
 
----
+## Current state
 
-## What Is Already Done
+- VFS/MemFS является текущим root filesystem.
+- AHCI и legacy VirtIO block devices существуют.
+- DunitFS v1 автоматически монтируется как `/persist`.
+- V1 имеет superblock/CRC metadata, fixed 64 nodes и contiguous allocation.
+- Persistence существования файла подтверждена после полного reboot.
 
-The first runtime filesystem stage is complete:
+Это полезный prototype, но не безопасный system/user filesystem: нет полноценных directories, rename/unlink, permissions, timestamps, fsync contract, journal/metadata COW и fsck.
 
-- VFS contract.
-- Root MemFS mounted as `/`.
-- Runtime file/directory operations.
-- Kernel terminal filesystem commands through VFS.
-- Userspace `open/read/write/close` syscalls through VFS.
-- Block device abstraction with `ramblk0` and QEMU legacy virtio-blk `vd0`.
-- Automated read/write sector regression through `build_and_run_multipass.py
-  --disk virtio`.
+## DunitFS v2 scope
 
-See [[../Completed/VFS-MemFS|VFS + MemFS Runtime Layer]] and [[../Completed/Userspace-VFS-Syscalls|Userspace VFS Syscalls]].
+- [ ] Versioned superblock, backup/generation and feature flags.
+- [ ] Allocation bitmap/extents и безопасное disk-full поведение.
+- [ ] Directories, stable identifiers, rename/unlink and orphan cleanup.
+- [ ] Timestamps, ownership/permissions and executable metadata.
+- [ ] Explicit `fsync`/flush ordering contract.
+- [ ] Journal или metadata COW с bounded recovery.
+- [ ] `fsck.dunit`, read-only degraded mount и recovery report.
+- [ ] Mount table and clear root/system/data policies.
 
----
+## Target hierarchy
 
-## What This Future Node Means Now
+```text
+/system/bin        trusted programs
+/system/lib        libc/runtime, shared libraries later
+/system/share      themes, UI definitions, icons, defaults
+/system/services   service manifests
+/apps/<id>         application bundles
+/users/<uid>/home  documents
+/users/<uid>/config
+/users/<uid>/data
+/var/log           bounded logs
+/var/lib           service state
+/run               volatile state
+```
 
-This node is no longer "filesystem from zero". It now tracks persistent storage work:
+## Acceptance
 
-- persistent dunitFS design on top of `vd0`
-- on-disk inode/node format
-- mount table beyond root MemFS
-- file permissions
-- symlinks
-- optional ext2/FAT32 research
+- Write + fsync + full VM stop/start + remount + content hash.
+- Directory/rename/unlink correctness across reboot.
+- Disk-full and corrupted metadata produce bounded errors/recovery.
+- Interrupted metadata update recovers old or new state, not arbitrary mixture.
+- BIOS/UEFI × AHCI/VirtIO installed images pass persistence matrix.
 
----
+## Non-goals for first v2
 
-## Blockers
-
-- No mountable on-disk dunitFS yet.
-- No persistent allocation model.
-- No crash/recovery story.
-
----
-
-## Non-goals For Next Step
-
-- Do not replace MemFS.
-- Do not add journaling yet.
-- Do not implement ext2/FAT32 before block device basics.
+- POSIX completeness, snapshots and distributed/network FS.
+- ext2/FAT root compatibility as a substitute for DunitFS correctness.
+- Using DunitFS v1 as the only copy of important user data.

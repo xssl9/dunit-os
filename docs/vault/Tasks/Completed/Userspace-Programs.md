@@ -1,59 +1,16 @@
-# Userspace Program Builds
+# Userspace Program Build and Execution
 
-**Status:** Done / build pipeline works  
-**Links:** [[../../STATUS|STATUS]] · [[Userspace-VFS-Syscalls|Userspace VFS Syscalls]]
+**Status:** WORKING FOUNDATION
 
----
+## Current reality
 
-## Programs Built Into The ISO
+The build produces many Rust `no_std` ELF programs under `build/userspace`, including runtime/process/IPC/file/input/fault tests and GUI clients such as terminal, calculator, stats, file manager and image viewer. They run through the current ELF/process/syscall stack rather than being build-only placeholders.
 
-| Program | Build status | Runtime status |
-|---|---|---|
-| `plank` | builds | GUI/runtime integration is experimental |
-| `terminal` | builds | not yet the main shell |
-| `file_manager` | builds | UI/demo stage |
-| `text_editor` | builds | UI/demo stage |
-| `settings` | builds | UI/demo stage |
-| `system_monitor` | builds | UI/demo stage |
+## Boundary
 
----
+- Programs are currently assembled into the image and exposed through embedded `/app` content.
+- They are not yet loaded from a normal installed `/system/bin` or `/apps` hierarchy.
+- GUI clients use the legacy bridge, not final GUI Server protocol.
+- C programs wait for [[../Future/Libc-Musl|Dunit musl]].
 
-## Runtime Foundation Now Available
-
-Userspace has more than just builds now:
-
-- libdunit syscall wrappers.
-- hardened syscall register ABI.
-- userspace `open/read/write/close`.
-- userspace stdout/stderr helpers.
-- CPL3 smoke path that returns to kernel.
-
-See:
-
-- [[Syscall-ABI|Syscall ABI + Safe User Copy]]
-- [[Userspace-VFS-Syscalls|Userspace VFS Syscalls]]
-- [[Stdio-FD|Minimal Stdio FDs]]
-
----
-
-## Target
-
-All binaries build for:
-
-```text
-userspace/x86_64-unknown-none.json
-```
-
-Output directory:
-
-```text
-build/userspace/
-```
-
----
-
-## Not Done
-
-- Real ELF exec flow for these apps.
-- Per-process address spaces.
-- Full userspace terminal.
+Target remains `userspace/x86_64-unknown-none.json` until a versioned Dunit target/SDK is introduced.

@@ -2,6 +2,9 @@
 
 > Это начальная точка проекта. Из этого документа вырос [[../ROADMAP|ROADMAP]].
 
+> [!warning] Архив, не текущая спецификация
+> Имена `egui`, `relibc`, `smoltcp` и `NetSurf` ниже сохраняются как история исходной идеи. Актуальные решения: собственный GUI Server + DUI/DSS/TOML runtime, основной libc — [[../Tasks/Future/Libc-Musl|musl fork]], сеть — kernel NIC backend + userspace [[../Tasks/Future/Network-Stack|netd]], браузерный engine не фиксирован заранее.
+
 **Источник:** `.kiro/specs/microkernel-os/` (design document)
 
 ---
@@ -78,3 +81,4 @@
 - [[DESIGN|📐 DESIGN]] — полный design document с кодом
 - [[REQUIREMENTS|📋 REQUIREMENTS]] — все требования
 - [[../ROADMAP|🚦 ROADMAP]] — как это трансформировалось в реальный план
+- [Полный технический roadmap](../../../DUNIT_OS_TECHNICAL_ROADMAP.md) — актуальная архитектура

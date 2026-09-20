@@ -1,35 +1,21 @@
-# Syscall ABI + Safe User Copy
+# Syscall ABI Foundation
 
-**Status:** Done / foundation working  
-**Links:** [[../../STATUS|STATUS]] · [[Process-FD-Model|Process FD Model]] · [[Userspace-VFS-Syscalls|Userspace VFS Syscalls]]
+**Status:** WORKING / NOT YET FROZEN
+**Related:** [[../InProgress/Kernel-Runtime-Prerequisites|Kernel Runtime]] · [[../Future/Libc-Musl|musl]]
 
----
+## Current register ABI
 
-## ABI
+- `rax` — syscall number/result.
+- `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9` — six arguments.
+- `rcx`, `r11` — clobbered by `syscall`.
 
-- `rax` = syscall number
-- `rdi` = arg0
-- `rsi` = arg1
-- `rdx` = arg2
-- `r10` = arg3
-- `r8` = arg4
-- `r9` = arg5
-- `rax` = return value
-- `rcx` and `r11` are clobbered by `syscall`.
+## Delivered
 
----
+- CPL3 syscall entry/return and Rust dispatch.
+- Mapped userspace range validation/copy helpers.
+- File, process, cwd, stat/readdir, input, IPC, GUI and system-info operations.
+- Invalid pointer/unknown syscall regression coverage.
 
-## What Works
+## Boundary
 
-- syscall entry path from CPL3 to kernel and return.
-- Rust syscall handler dispatch.
-- invalid syscall diagnostics.
-- bounded user string and buffer copy helpers.
-- userspace smoke test enters CPL3 and returns.
-- smoke verifies VFS syscalls and stdout.
-
----
-
-## Limitation
-
-Safe-copy is still range-check-only. It does not yet validate per-process page tables and does not recover from page faults during kernel copies.
+Register convention works, but public ABI still needs versioned number/error manifests, handle rights, process-entry/auxv, clocks, VM, events, threads/TLS and capability discovery before musl/third-party SDK freeze.

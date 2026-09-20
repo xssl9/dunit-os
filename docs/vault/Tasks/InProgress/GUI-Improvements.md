@@ -1,54 +1,30 @@
-# GUI Improvements
+# GUI Mode — legacy maintenance and migration
 
-**Status:** PARTIAL / in progress  
-**Roadmap:** [[../../ROADMAP|ROADMAP]]  
-**See also:** [[../Future/GUI-Architecture|GUI Architecture]]
+**Status:** FUNCTIONAL LEGACY / MIGRATION TARGET
+**Target:** [[../Future/GUI-Architecture|GUI Server + UI Runtime + Dunit DWM]]
 
----
+## Current state
 
-## Current State
+GUI Mode boots and provides desktop visuals, windows, panel/dock/launcher/system elements, notifications/quick settings and a GUI terminal functionally corresponding to Terminal Mode. Userspace GUI applications exist and are launched through the current bridge.
 
-Dunit OS can initialize the framebuffer and has an experimental GUI path. The reliable interactive mode today is still **kernel terminal mode**, not GUI mode.
+The architecture is not final: high-level desktop/compositor/WM/layout logic remains concentrated in kernel GUI code, with hardcoded geometry/colors/application wiring and broad drawing/input syscalls.
 
-The GUI should be treated as an experimental surface until Userspace Runtime v1,
-IPC, input routing, and a display-server model are hardened.
+## Allowed work before rewrite
 
----
+- Fix regressions that block current GUI boot or terminal parity.
+- Preserve automated GUI boot/screenshot markers.
+- Extract pure layout/protocol/data structures and tests when reusable.
+- Do not expand final ABI around legacy drawing calls.
+- Do not add more permanent widgets/policy to kernel.
 
-## Working
+## Migration gates
 
-- Framebuffer is available.
-- Boot UI and terminal rendering work on top of framebuffer output.
-- GUI code exists as an experimental direction.
-- Some GUI-oriented userspace apps are built and embedded under `/app`.
+- M1 kernel runtime: preemption, events, shared VM and rights handles.
+- M2 GUI protocol/headless state-machine tests.
+- M3 userspace GUI Server vertical slice with two clients.
+- M4 DWM/UI parity and persistent config.
+- Remove legacy GUI from normal boot only after terminal/panel/dock/launcher/notifications/quick settings parity.
 
----
+## Success
 
-## Not Ready Yet
-
-- Window manager is still a skeleton.
-- GUI applications are not on a stable app/runtime contract yet.
-- No persistent userspace display server.
-- GUI IPC messages exist experimentally, but the contract is not final.
-- No window/event protocol.
-- No persistent user configuration for themes/settings.
-
----
-
-## Future Work
-
-- Window create/destroy primitives.
-- Input focus and event routing.
-- Basic compositor and z-order.
-- Context menus and notifications.
-- Theme/settings storage after persistent filesystem exists.
-
----
-
-## Dependencies
-
-- [[../Completed/Syscall-ABI|Syscall ABI]]
-- [[../Completed/Process-FD-Model|Process + FD Model]]
-- [[Userspace-Runtime-v1|Userspace Runtime v1]]
-- [[../Future/GUI-Architecture|GUI Architecture]]
-- IPC foundation before real userspace GUI apps.
+Normal GUI boot no longer executes kernel desktop loop; appearance/structure changes through TOML/DUI/DSS; application crash cannot damage compositor/kernel.

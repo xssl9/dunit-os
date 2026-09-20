@@ -1,43 +1,15 @@
 # Userspace VFS Syscalls
 
-**Status:** Done / smoke-tested  
-**Links:** [[../../STATUS|STATUS]] · [[VFS-MemFS|VFS + MemFS]] · [[Syscall-ABI|Syscall ABI]]
+**Status:** WORKING FOUNDATION
 
----
+## Implemented surface
 
-## Implemented
+- Open/read/write/close.
+- cwd/chdir.
+- stat/readdir and related file API wrappers.
+- Process-local descriptors and safe user-buffer transfer.
+- Access/truncate/append/error semantics covered by smoke/stress programs.
 
-- `Open(5)`
-- `Read(3)`
-- `Write(4)`
-- `Close(6)`
+## Boundary
 
----
-
-## Behavior
-
-- `open(path_ptr, path_len, flags)` uses process cwd for relative paths.
-- `open` returns a process-local fd.
-- `read` copies data from VFS into a user buffer.
-- `write` copies user buffer into kernel memory before writing.
-- `close` closes the VFS handle before removing the process fd.
-
----
-
-## Smoke Coverage
-
-The CPL3 smoke test checks:
-
-- create/write/read/close success path
-- read from write-only fd fails
-- write to read-only fd fails
-- truncate clears old content
-- append writes at EOF
-- invalid close fails
-
-Expected serial evidence:
-
-```text
-[SYSCALL-FS-TEST] OK
-[SYSCALL-FS-SEMANTICS-TEST] OK
-```
+The API serves current MemFS and `/persist` paths, but stable libc-quality contracts still need seek/metadata completeness, pipes/dup, fsync, permissions, poll/events and versioned errno/ABI documentation.

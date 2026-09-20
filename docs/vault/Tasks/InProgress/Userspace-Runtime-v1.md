@@ -1,65 +1,47 @@
-# Userspace Runtime v1
+# Userspace Runtime
 
-**Status:** ACTIVE / stabilization milestone  
+**Status:** WORKING FOUNDATION / NEEDS V2 RUNTIME PRIMITIVES
 **Roadmap:** [[../../ROADMAP|ROADMAP]]
 
----
+## Working contract
 
-## Goal
+- Embedded `/app` ELF programs run in ring 3 with args/environment.
+- Per-process address-space records, kernel stacks, cwd and fd tables exist.
+- Exit and recoverable user faults become wait statuses.
+- Cooperative spawn/yield/wait works for regression scenarios.
+- File/stat/readdir/cwd/stdin/stdout/process/sysinfo/input/IPC wrappers exist in `libdunit`.
+- Parent/child IPC round trips and runtime stress are automated.
 
-Turn the current userspace runtime from a working foundation into a stable
-contract that future shell, GUI, filesystem, and networking work can rely on.
+## Current limits
 
-This milestone is about runtime reliability, not a new feature surface.
+- Applications are embedded into current image/root, not loaded from normal installed filesystem.
+- Scheduler remains cooperative; long-running independent services are not hardened.
+- No userspace threads/TLS, shared VM object model, general events/poll or rights-bearing handles.
+- Process entry/ABI is not yet frozen for musl/toolchain compatibility.
+- GUI services and shell/session are not yet ordinary supervised services.
 
----
+## Next contract
 
-## Current Working Contract
+Work moves through [[Kernel-Runtime-Prerequisites|Kernel Runtime Prerequisites]]:
 
-- Userspace ELF binaries are embedded under `/app` and loaded through VFS.
-- `exec` can launch a foreground userspace program and report exit/fault status.
-- `spawn` prepares a child process as Ready.
-- `yield` can transfer execution to Ready children and resume the parent.
-- `wait` observes real child exit/fault status after the child has run.
-- Recoverable userspace faults are converted into process fault statuses.
-- Process-local fd tables back VFS file IO and stdio.
-- Foreground terminal stdin can feed interactive userspace programs.
-- Basic IPC send/receive supports parent/child round trips.
+- preemption and thread lifecycle;
+- blocking events/wait queues;
+- shared VM and handle rights;
+- stable process entry/auxv/ELF/TLS ABI;
+- spawn/exec-image inheritance and installed-disk loading;
+- service supervision/restart.
 
----
-
-## Definition Of Done
-
-- `runtime_stress` is the canonical regression application for this milestone.
-- The only supported autonomous launch/test entrypoint is
-  `build_and_run_multipass.py`.
-- A terminal-mode automated run must build the ISO, boot QEMU, inject
-  `exec runtime_stress`, parse the serial log, and require:
-  - `runtime_stress: OK`
-  - `exec: /app/runtime_stress returned code=0`
-- README, STATUS, ROADMAP, and AI context describe the same runtime state.
-- Host-side kernel tests are either fixed or clearly documented as not the
-  runtime verification path.
-
----
-
-## Canonical Test Command
+## Canonical regression
 
 ```bash
-python3 build_and_run_multipass.py \
-  --mode test-terminal \
-  --qemu-timeout 60 \
-  --qemu-log qemu_runtime_stress.log \
-  --qemu-test-commands "exec runtime_stress" \
-  --expect-log "runtime_stress: OK" \
-  --expect-log "exec: /app/runtime_stress returned code=0"
+python3 tools/qemu_test.py \
+  --build \
+  --config limine_test_terminal.conf \
+  --cmd "exec runtime_stress" \
+  --timeout 120 \
+  --cmd-timeout 20 \
+  --settle 2 \
+  --json
 ```
 
----
-
-## Follow-up Work After v1
-
-- Move the kernel terminal toward a userspace shell.
-- Add blocking or pollable wait/input semantics instead of manual yield loops.
-- Tighten syscall errno documentation and libdunit wrappers.
-- Decide whether timer preemption remains experimental or becomes a v2 target.
+Required evidence includes successful boot, `runtime_stress: OK`, exit code `0` and clean VFS handles.

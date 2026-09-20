@@ -1,26 +1,18 @@
-# ✅ HAL — Hardware Abstraction Layer
+# HAL Foundation
 
-**Статус:** ✅ Выполнено  
-**Из плана:** [[../../Origin/VISION|VISION]] → [[../../ROADMAP|ROADMAP]]  
-**Требования:** [[../../Origin/REQUIREMENTS|REQ-1, REQ-2, REQ-3]]
+**Status:** COMPLETED FOUNDATION
+**Current state:** [[../../STATUS|STATUS]]
 
----
+## Delivered
 
-## Что сделано
+- C/NASM boot boundary and Rust FFI.
+- GDT with ring 0/ring 3 segments.
+- IDT/ISR stubs and exception paths.
+- Port I/O and interrupt setup.
+- Syscall entry/return assembly.
+- Context-switch assembly foundation.
+- Limine handoff integration.
 
-- [x] `boot.asm` — entry point, Long Mode check, стек, вызов `hal_init()`
-- [x] `gdt.c / gdt.asm` — GDT с Ring 0 и Ring 3 сегментами
-- [x] `idt.c / idt.asm` — IDT с 256 обработчиками
-- [x] `interrupts.asm` — ISR stubs с сохранением всех регистров
-- [x] `ports.c` — `inb/outb/inw/outw/inl/outl`
-- [x] `context_switch.asm` — переключение контекста
-- [x] `syscall.asm` — точка входа системных вызовов
-- [x] FFI граница с Rust через `extern "C"`
+## Boundary
 
-## Скриншоты / Артефакты
-
-> Перетащи скрин сюда (Obsidian поддерживает drag & drop)
-
-## Заметки
-
-_Место для заметок команды_
+HAL foundation is working, but APIC/SMP, complete FPU/SIMD thread switching, modern interrupt routing and broad hardware abstraction remain later work. Existence of context-switch/preemption code is not proof of default-on preemptive scheduling.

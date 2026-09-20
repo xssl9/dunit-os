@@ -1,22 +1,14 @@
-# ✅ Keyboard Driver
+# Keyboard Input Foundation
 
-**Статус:** ✅ Выполнено  
-**Из плана:** [[../../ROADMAP|ROADMAP]]  
-**Требования:** [[../../Origin/REQUIREMENTS|REQ-3]]
+**Status:** COMPLETED PS/2 FOUNDATION
 
----
+## Delivered
 
-## Что сделано
+- IRQ1 PS/2 keyboard path.
+- Scancode decoding for terminal input and common special keys.
+- Input path used by Terminal Mode and automated QEMU command injection.
+- Userspace/GUI input bridges built on current kernel input model.
 
-- [x] IRQ1 обработчик (keyboard interrupt)
-- [x] Scancode → символ трансляция
-- [x] Передача событий в Terminal
-- [x] Специальные клавиши (Enter, Backspace, стрелки)
+## Boundary
 
-## Скриншоты
-
-> Место для скринов
-
-## Заметки
-
-_Место для заметок_
+This is not general keyboard support. USB xHCI enumeration/HID transfers, layouts, text composition, IME and final GUI Server routing remain unfinished. Target input ownership is capability-gated delivery through GUI Server/session services.

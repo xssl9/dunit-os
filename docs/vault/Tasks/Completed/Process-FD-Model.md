@@ -1,37 +1,15 @@
-# Current Process + FD Table
+# Process and FD Foundation
 
-**Status:** Done / minimal foundation  
-**Links:** [[../../STATUS|STATUS]] · [[Syscall-ABI|Syscall ABI]] · [[Userspace-VFS-Syscalls|Userspace VFS Syscalls]]
+**Status:** WORKING FOUNDATION / RUNTIME EXPANSION REQUIRED
 
----
+## Delivered
 
-## What Works
+- PID and parent/child records.
+- Per-process cwd and fd table with reserved `0/1/2`.
+- Per-process address-space objects and kernel syscall stacks.
+- Ready/running/dead/fault state and wait/reap reporting.
+- Cleanup paths exercised by repeated spawn/fault/kill runtime tests.
 
-- PID allocation.
-- Minimal current process state.
-- Process cwd initialized to `/`.
-- Process-local fd table.
-- fd allocation starts at `3`.
-- fd `0`, `1`, and `2` are reserved for stdio.
-- APIs exist:
-  - `current_process()`
-  - `current_process_mut()`
-  - `allocate_fd()`
-  - `get_fd()`
-  - `close_fd()`
+## Boundary
 
----
-
-## Scope
-
-This is not a full scheduler/process model. It is the smallest current-process layer needed for VFS syscalls and future userspace work.
-
----
-
-## Not Done
-
-- Per-process address spaces.
-- Per-process kernel stacks.
-- Full scheduler integration.
-- Process lifecycle/exit cleanup.
-- Real process cwd syscalls.
+Execution remains cooperative and is not a production scheduler. There are no full userspace threads/TLS, process groups, blocking events, generic handle rights or complete exec-image inheritance. See [[../InProgress/Kernel-Runtime-Prerequisites|Kernel Runtime Prerequisites]].

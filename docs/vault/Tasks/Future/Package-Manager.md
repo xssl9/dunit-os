@@ -1,43 +1,37 @@
-# Package Manager
+# Application and Package Model
 
-**Status:** PLANNED  
-**Roadmap:** [[../../ROADMAP|ROADMAP]]  
-**Depends on:** [[../Future/Filesystem|Persistent dunitFS]], [[../Future/Network-Stack|Network Stack]]
+**Status:** PLANNED
+**Depends on:** [[Installed-System|Installed System]] · [[Filesystem|DunitFS v2]] · [[Network-Stack|Networking]] · [[Libc-Musl|SDK/libc]]
 
----
+## Target
 
-## Current State
+Dunit packages — native signed bundles, не `deb`/`rpm` compatibility. Один format обслуживает Rust и C applications, Minimal/DWM images и offline/online installation.
 
-Package management is not active runtime functionality yet. Dunit OS can build userspace components, but it cannot install packages into a persistent root filesystem.
+## Package manifest
 
----
+- Package/app ID, version, architecture and minimum Dunit ABI.
+- Executables, resources, services and GUI protocol version.
+- Runtime/package dependencies with bounded solver rules.
+- Requested capabilities: files, network scopes, GUI, devices, services.
+- Data/config/cache directories and uninstall ownership.
+- Content hashes, signature and publisher/trust metadata.
 
-## Planned Scope
+## Lifecycle
 
-- Package metadata format.
-- Package repository layout.
-- Install/remove operations.
-- Dependency resolution.
-- Local package database stored on persistent dunitFS.
-- Optional network repository sync after networking exists.
+- [ ] Build reproducible bundle from SDK.
+- [ ] Validate manifest/signature/ABI/capabilities before writes.
+- [ ] Transactional stage -> verify -> activate -> rollback.
+- [ ] Maintain local package database on persistent filesystem.
+- [ ] Never remove user data silently on uninstall.
+- [ ] Support offline local packages before network repository.
+- [ ] Add signed repository only after trusted time, TLS, storage recovery and key rotation.
 
----
+## Acceptance
 
-## Not In Scope Yet
+Install/update/remove survives interruption without half-installed state; incompatible ABI and missing permissions fail before activation; rollback restores previous app; Minimal and DWM differ by manifests/packages, not kernel forks.
 
-- dpkg compatibility.
-- Online repositories.
-- System updates.
-- Signature verification.
+## Not yet
 
-Those only make sense after persistent storage and networking are real.
-
----
-
-## Blockers
-
-- Persistent dunitFS is not implemented.
-- Disk-backed block storage is not implemented; only volatile `ramblk0` smoke
-  media exists.
-- Networking is planned, not working.
-- Userspace Runtime v1 is still being stabilized.
+- Public online repository before signatures/time/TLS/transactions.
+- Arbitrary maintainer scripts with ambient privileges.
+- Linux package format compatibility as platform strategy.

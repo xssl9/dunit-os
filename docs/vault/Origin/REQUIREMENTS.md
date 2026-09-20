@@ -3,6 +3,9 @@
 > Исходные требования из `.kiro/specs/microkernel-os/requirements.md`
 > Трансформировались в задачи → [[../ROADMAP|ROADMAP]]
 
+> [!warning] Архив исходных требований
+> Чек-листы ниже не являются текущим backlog и намеренно сохраняют ранние названия relibc/smoltcp/NetSurf. Актуальные замены: [[../Tasks/Future/Libc-Musl|Dunit musl]], [[../Tasks/Future/Network-Stack|netd/network roadmap]] и отдельный browser-network service. Текущая готовность описана в [[../STATUS|STATUS]].
+
 ---
 
 ## REQ-1: Bootloader Integration

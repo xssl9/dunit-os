@@ -1,32 +1,7 @@
 # dufetch
 
-**Status:** Done / terminal command  
-**Links:** [[../../STATUS|STATUS]] · [[Terminal-Mode|Terminal Mode]]
+**Status:** COMPLETED TERMINAL UTILITY
 
----
+`dufetch` prints Dunit OS/Green Tea identity, architecture, terminal/shell/filesystem information, process/cwd, PMM stats and framebuffer details. It remains a kernel-terminal diagnostic, not evidence that every reported subsystem is production-ready.
 
-## What Works
-
-`dufetch` is a kernel terminal command that prints:
-
-- Dunit OS ASCII logo.
-- OS name.
-- Kernel version string.
-- Architecture.
-- Terminal mode.
-- Shell name.
-- Filesystem summary.
-- Current process PID.
-- Current terminal cwd.
-- PMM memory stats when available.
-- Framebuffer display info.
-
----
-
-## Test
-
-Verified through:
-
-```powershell
-python build_and_run_multipass.py --qemu-timeout 40 --qemu-log qemu_dufetch.log --qemu-test-commands "dufetch;pwd;ls"
-```
+Use `tools/qemu_test.py` for any runtime verification; old Multipass commands are obsolete.

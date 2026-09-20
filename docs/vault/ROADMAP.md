@@ -1,168 +1,121 @@
 # ROADMAP
 
-> The vault is the project task graph. Completed nodes are under `Tasks/Completed`, active work under `Tasks/InProgress`, and future architecture under `Tasks/Future`.
+> Vault-level task graph. Полный инженерный план находится в [DUNIT_OS_TECHNICAL_ROADMAP.md](../../DUNIT_OS_TECHNICAL_ROADMAP.md); здесь — короткая карта исполнения и ссылки на живые узлы.
 
----
+## Целевая последовательность
 
-## Done / Working
+```text
+M0 honest baseline / ABI decisions
+  |
+  +-> M1 preemption + threads + VM + events + handles
+  |      +-> M3 userspace GUI Server -> M4 UI Runtime / Dunit DWM
+  |      `-> M6 static musl -> pthread -> broader POSIX later
+  |
+  +-> M2 GUI protocol/headless conformance -> M3
+  |
+  `-> M5 DunitFS v2 + installed root
+         +-> persistent DWM configuration
+         `-> disk-loaded libc/apps/packages
 
-- [x] [[Tasks/Completed/Bootloader|Limine bootloader with GUI and terminal boot modes]]
-- [x] [[Tasks/Completed/HAL|HAL foundation: GDT, IDT, interrupts, syscall entry]]
-- [x] [[Tasks/Completed/Keyboard-Driver|Interrupt-based keyboard driver]]
-- [x] [[Tasks/Completed/Terminal-Mode|Kernel terminal mode with framebuffer console]]
-- [x] [[Tasks/Completed/VFS-MemFS|Runtime VFS + root MemFS]]
-- [x] [[Tasks/Completed/Syscall-ABI|Syscall ABI hardening + bounded user copy]]
-- [x] [[Tasks/Completed/Process-FD-Model|Minimal current process, PID, cwd, fd table]]
-- [x] [[Tasks/Completed/Userspace-VFS-Syscalls|Userspace Open/Read/Write/Close through VFS]]
-- [x] [[Tasks/Completed/Stdio-FD|Minimal stdin/stdout/stderr fd reservation]]
-- [x] [[Tasks/Completed/Dufetch|dufetch terminal system summary]]
-- [x] [[Tasks/Completed/Userspace-Programs|Userspace program build pipeline]]
-- [x] [[Tasks/Completed/Block-Storage-v1|QEMU virtio-blk `vd0` sector IO]]
+M7: E1000 -> netd -> IPv4/UDP/TCP/DHCP/DNS -> native sockets
+    -> musl sockets -> TLS/HTTP -> browser-network service
+```
 
----
+## M0 — честный baseline и контракты
 
-## In Progress
+- [x] Техническое ревью и [полный roadmap](../../DUNIT_OS_TECHNICAL_ROADMAP.md).
+- [x] [[STATUS|Vault status]] отражает проверенное состояние.
+- [ ] Стабилизировать versioned Dunit userspace ABI manifest.
+- [ ] Завести ADR для process entry, handles/rights, GUI protocol, `netd` и musl strategy.
+- [ ] Каждый `WORKING` claim связать с автоматическим serial marker/test.
 
-### Userspace Runtime v1
+## M1 — kernel runtime prerequisites (must-have)
 
-→ [[Tasks/InProgress/Userspace-Runtime-v1|Userspace Runtime v1]]
+→ [[Tasks/InProgress/Kernel-Runtime-Prerequisites|Kernel Runtime Prerequisites]]
 
-- [x] Userspace ELF binaries embedded under `/app`
-- [x] Foreground `exec` with argv/envp and exit/fault reporting
-- [x] `spawn` prepares Ready child processes
-- [x] Cooperative `yield` can run Ready children and resume parents
-- [x] `wait` observes real child exit/fault status after execution
-- [x] Basic parent/child IPC round trip
-- [x] `runtime_stress` regression app
-- [x] Canonical automated runtime regression through `build_and_run_multipass.py`
-- [x] Documentation fully aligned with current runtime behavior
-- [ ] Host-side kernel test workflow fixed or documented
+- [ ] Default-on preemptive scheduler на UP.
+- [ ] Schedulable userspace threads и thread lifecycle.
+- [ ] Blocking wait queues/events/IPC вместо polling.
+- [ ] `munmap`, `mprotect`, shared VM objects и guard pages.
+- [ ] x86_64 `FS.base`/TLS contract.
+- [ ] `wait_on_word/wake` synchronization primitive.
+- [ ] Handle tables с rights и безопасным transfer.
 
-### Terminal Improvements
+## M2–M4 — новый GUI stack
 
-→ [[Tasks/InProgress/Terminal-Improvements|Terminal Improvements]]
+→ [[Tasks/Future/GUI-Architecture|GUI Server Architecture]]
 
-- [x] Command history
-- [x] Tab autocomplete
-- [x] Real VFS-backed `ls/pwd/cd/mkdir/touch/cat/echo/rm/tree`
-- [x] `dufetch`
-- [x] Basic `echo > file` and `echo >> file`
-- [ ] Aliases
-- [ ] Environment variables
-- [ ] Pipes
-- [ ] Full stdin input model for userspace terminal
+- [ ] Versioned binary GUI protocol и headless conformance tests.
+- [ ] Userspace `gui-server` с exclusive display/input master handles.
+- [ ] Shared client surfaces, software compositor, damage/focus/input routing.
+- [ ] Независимый Dunit DWM поверх GUI Server.
+- [ ] DUI markup, DSS styles/motion, TOML settings.
+- [ ] Убрать hardcoded desktop geometry/colors/apps из kernel.
+- [ ] После feature parity удалить legacy `ui_loop`/kernel WM из normal GUI boot.
 
-### Drivers
+## M5 — normal installed system
 
-→ [[Tasks/InProgress/Drivers|Drivers]]
+→ [[Tasks/Future/Installed-System|Installed System]] · [[Tasks/Future/Filesystem|DunitFS v2]]
 
-- [x] PS/2 keyboard path for terminal mode
-- [x] PCI enumeration
-- [x] Disk driver: legacy virtio-blk `vd0` under QEMU
-- [ ] Disk driver: ATA/AHCI
-- [ ] Network driver: RTL8139/E1000
-- [ ] USB driver
-- [ ] Sound driver
-- [ ] ACPI support
+- [ ] Disk-root `/system`, `/apps`, `/users`, `/var`, `/run`.
+- [ ] `init` и services загружаются с установленного system volume.
+- [ ] Transactional installer: partition -> format -> copy -> verify -> boot config -> sync.
+- [ ] DunitFS v2: allocation tracking, directories, rename/unlink, fsync, recovery/fsck.
+- [ ] BIOS/UEFI × AHCI/VirtIO persistence/recovery matrix.
+- [ ] Отличающиеся manifests для Live, Minimal и DWM images.
 
-### GUI Improvements
+## M6 — Dunit musl fork
 
-→ [[Tasks/InProgress/GUI-Improvements|GUI Improvements]]
+→ [[Tasks/Future/Libc-Musl|Dunit musl]]
 
-- [ ] Window animations
-- [ ] Multiple themes
-- [ ] Drag and drop
-- [ ] Context menus
-- [ ] Notifications
-- [ ] System tray
+- [ ] Полный upstream fork с pinned version и контролируемым delta.
+- [ ] `x86_64-dunit` compiler wrapper/sysroot, crt objects и `libc.a`.
+- [ ] Static hello/args/env, затем VM/allocator/files.
+- [ ] Dunit-native `posix_spawn` mapping без обязательного `fork`.
+- [ ] pthread/TLS поверх M1 threads и wait/wake.
+- [ ] Sockets после native `netd` API.
+- [ ] Signals, `fork` и dynamic loader — отдельные later gates.
 
----
-
-## Planned
-
-### Persistent Filesystem
-
-→ [[Tasks/Future/Filesystem|Persistent dunitFS / block-backed FS]]
-
-- [x] Block device abstraction
-- [x] Disk-backed sector IO smoke via `vd0`
-- [ ] Persistent dunitFS design
-- [ ] Mount table beyond root MemFS
-- [ ] File permissions
-- [ ] Symlinks
-- [ ] ext2/FAT32 compatibility research
-
-### Userspace Execution
-
-- [x] Real ELF exec path for embedded `/app` applications
-- [x] Per-process address-space objects for userspace records
-- [x] Per-process kernel stacks for syscall entry
-- [x] Cooperative scheduler integration through `yield`
-- [ ] Blocking wait/input semantics
-- [ ] Timer preemption hardening
-- [ ] Long-running background process model
-
-### Network Stack
+## M7 — networking и platform services
 
 → [[Tasks/Future/Network-Stack|Network Stack]]
 
-- [ ] Ethernet layer
-- [ ] IP layer
-- [ ] TCP/UDP
-- [ ] Socket API
-- [ ] DNS resolver
-- [ ] HTTP client
+- [ ] E1000 RX/TX rings, IRQ/DMA/reset/counters.
+- [ ] Userspace `netd`: Ethernet, ARP, IPv4/ICMP, UDP, DHCP, DNS, TCP.
+- [ ] Native versioned socket/resolver protocol + common event wait.
+- [ ] Dunit musl POSIX socket adapter.
+- [ ] Entropy/time/trust store, proven TLS library и HTTP client.
+- [ ] Sandboxed browser-network service + minimal GUI response viewer.
+- [ ] IPv6/multi-interface после стабильного IPv4 vertical slice.
 
-### Package Manager
+## Later / отдельные platform tracks
 
-→ [[Tasks/Future/Package-Manager|Package Manager]]
+- [[Tasks/InProgress/Drivers|USB/xHCI, VirtIO modern, hardware matrix]].
+- Audio service/HDA.
+- ACPI power/reboot/shutdown, затем suspend.
+- [[Tasks/Future/Package-Manager|Signed application bundles and package transactions]].
+- [[Tasks/Future/Advanced-Features|SMP, GPU acceleration, dynamic linking and advanced diagnostics]].
 
-- [ ] Package metadata format
-- [ ] Repository format
-- [ ] Dependency resolution
+## Milestone discipline
 
-### Advanced Features
+- Main остаётся bootable и regression-green.
+- Разработка идёт vertical slices, а не по чуть-чуть во всех подсистемах.
+- Наличие файла/driver discovery не является completion.
+- Persistence подтверждается только stop/start + remount + content hash.
+- Unsupported API возвращает честную ошибку, а не fake success.
+- Один reference QEMU device/один reference PC завершаются раньше широкой hardware matrix.
 
-→ [[Tasks/Future/Advanced-Features|Advanced Features]]
-
-- [ ] SMP
-- [ ] Power management
-- [ ] Swap
-- [ ] Kernel modules
-- [ ] GDB stub
-
----
-
-## Build / Test
-
-Preferred autonomous workflow on Windows:
+## Единственный test entrypoint
 
 ```bash
-python3 build_and_run_multipass.py \
-  --mode test-terminal \
-  --qemu-timeout 60 \
-  --qemu-log qemu_runtime_stress.log \
-  --qemu-test-commands "exec runtime_stress" \
-  --expect-log "runtime_stress: OK" \
-  --expect-log "exec: /app/runtime_stress returned code=0"
+python3 tools/qemu_test.py \
+  --build \
+  --config limine_test_terminal.conf \
+  --cmd "exec runtime_stress" \
+  --timeout 120 \
+  --cmd-timeout 20 \
+  --settle 2 \
+  --json
 ```
 
-`build_and_run_multipass.py` is the only supported autonomous launch and test
-entrypoint. It builds the ISO, starts QEMU, injects terminal commands, stops QEMU
-on timeout, and analyzes the serial log.
-
-Block Storage v1 regression:
-
-```bash
-python3 build_and_run_multipass.py \
-  --mode test-terminal \
-  --disk virtio \
-  --qemu-timeout 60 \
-  --qemu-log qemu_block_v1.log \
-  --qemu-test-commands "blk;blkread vd0 0;blkwrite vd0 3;blkread vd0 3" \
-  --expect-log "vd0" \
-  --expect-log "virtio-blk" \
-  --expect-log "vd0 lba=3 written=512" \
-  --expect-log "DUNIT-BLOCK-STOR" \
-  --expect-log "AGE-V1"
-```
+Ручной QEMU и старый `build_and_run_multipass.py` не являются актуальным workflow.

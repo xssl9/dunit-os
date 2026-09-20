@@ -1,147 +1,100 @@
-# AI CONTEXT - Dunit OS
+# AI CONTEXT — Dunit OS
 
-> Read this first before changing the project. The vault replaces a flat task.md: use [[../STATUS|STATUS]], [[../ROADMAP|ROADMAP]], and task nodes as the current source of truth.
+> Читать перед изменениями. Vault даёт краткий контекст; подробная архитектура и task cards находятся в [DUNIT_OS_TECHNICAL_ROADMAP.md](../../../DUNIT_OS_TECHNICAL_ROADMAP.md).
 
-Last updated: 2026-07-08
+- **Last updated:** 2026-09-20
+- **Repository:** `https://github.com/xssl9/dunit-os`
+- **Kernel:** Green Tea Kernel
+- **Test rule:** только `tools/qemu_test.py`
 
----
+## Что это
 
-## What This Is
+Dunit OS — самостоятельная x86_64 ОС с Rust `no_std` kernel, C/NASM HAL, собственным syscall ABI, ELF userspace, VFS/MemFS, DunitFS, Terminal Mode и экспериментальным GUI Mode. Цель — собственная desktop platform, не Linux distribution. POSIX/musl являются source portability layer поверх Dunit ABI.
 
-**Dunit OS (Green Tea)** is an x86_64 OS project with a Rust `no_std` kernel, C/NASM HAL pieces, a kernel terminal, experimental GUI code, a runtime VFS/MemFS layer, early userspace syscall support, and QEMU virtio block storage.
+## Проверенное текущее состояние
 
-Repository: `https://github.com/susopki/dunit-os`
+- Limine BIOS/UEFI boot, ISO и persistent disk image paths.
+- Terminal Mode и GUI Mode выбираются boot config.
+- PMM/VMM/heap, GDT/IDT, PIT/PIC, syscall entry, framebuffer/input foundation.
+- Ring 3 ELF programs, per-process address spaces/kernel stacks, PID/parent-child/cwd/fd state.
+- Cooperative spawn/yield/wait, recoverable user faults и byte-queue IPC.
+- Syscall ABI: `rax` number/result; args `rdi/rsi/rdx/r10/r8/r9`; `rcx/r11` clobbered.
+- VFS root MemFS, `/app`, `/proc`, `/dev`, file/stat/readdir/cwd/process/sysinfo/input/GUI wrappers in `libdunit`.
+- AHCI и legacy VirtIO block paths; DunitFS v1 auto-mount как `/persist`.
+- GUI Mode имеет desktop, windows, panel/dock/launcher/notifications/quick settings и полноценный GUI terminal, но high-level GUI остаётся kernel-centric.
+- E1000 driver только обнаруживает controller/MMIO/MAC; packet I/O отсутствует.
+- xHCI имеет ранний controller/ring groundwork, но полной enumeration/HID stack нет.
 
----
+## Главные ограничения
 
-## Current Working State
+- Timer preemption выключена по умолчанию; scheduler фактически cooperative.
+- Нет полноценных userspace threads, TLS, wait queues, futex-like wait/wake и SMP.
+- Нет `munmap/mprotect`-полноты, shared VM object model и rights-bearing handles.
+- Root/system/apps embedded; установленная система не загружает userspace с persistent root.
+- DunitFS v1 ограничена fixed nodes/contiguous allocation и не имеет journal/fsck/permissions.
+- GUI Server/DWM/UI Runtime ещё не вынесены из kernel legacy path.
+- Networking — discovery only; нет Ethernet/IP/TCP/sockets.
+- musl fork ещё не создан.
 
-- Boots through Limine into terminal mode.
-- HAL initializes enough for GDT/IDT/interrupts/syscall entry.
-- PMM/VMM/heap init path works for the current boot flow.
-- Kernel terminal is usable and has VFS-backed commands.
-- `dufetch` prints Dunit OS ASCII logo and system summary.
-- VFS is initialized at boot.
-- Root MemFS is mounted as `/`.
-- MemFS supports runtime directories/files and basic file operations.
-- Process model exists: PID, parent/child, cwd, fd table, wait/reap status.
-- fd `0/1/2` are reserved for stdin/stdout/stderr.
-- Userspace syscall ABI uses:
-  - `rax` syscall number
-  - `rdi/rsi/rdx/r10/r8/r9` args
-  - `rax` return value
-  - `rcx/r11` clobbered by `syscall`
-- Safe user copy helpers are bounded but still range-check-only.
-- CPL3 smoke can enter userspace, perform syscalls, and return.
-- Foreground `exec` runs embedded `/app` ELF programs with argv/envp.
-- `spawn` creates Ready child processes and `yield` can run them cooperatively.
-- `wait` reports real child exit/fault status after execution.
-- Basic IPC supports parent/child send/receive round trips.
-- Userspace `open/read/write/close` go through process fd table into VFS.
-- Userspace `write(1/2)` writes to serial as minimal stdio.
-- Block device layer registers `ramblk0` and legacy virtio-blk `vd0`.
-- `build_and_run_multipass.py --disk virtio` attaches a 1 MiB raw QEMU disk.
-- Terminal `blk`, `blkread`, and `blkwrite` verify sector read/write paths.
+## Обязательные архитектурные границы
 
----
+1. Kernel предоставляет mechanisms: memory, processes/threads, IPC, handles, framebuffer/display backend, input, devices.
+2. GUI Server — отдельный userspace service и единственный владелец display/input master handles.
+3. Dunit DWM — отдельный policy client поверх GUI Server.
+4. UI Runtime — независимые DUI tree, layout/widgets, DSS styles/motion и TOML settings.
+5. NIC driver остаётся в kernel, protocol stack находится в supervised userspace `netd`.
+6. Dunit musl fork адаптируется к native ABI; kernel не копирует Linux syscalls/structs.
+7. Static-first: signals/fork/dynamic loader не блокируют первый C userspace.
 
-## Important Completed Nodes
+## Не делать предположений
 
-- [[../Tasks/Completed/VFS-MemFS|VFS + MemFS Runtime Layer]]
-- [[../Tasks/Completed/Syscall-ABI|Syscall ABI + Safe User Copy]]
-- [[../Tasks/Completed/Process-FD-Model|Current Process + FD Table]]
-- [[../Tasks/Completed/Userspace-VFS-Syscalls|Userspace VFS Syscalls]]
-- [[../Tasks/Completed/Stdio-FD|Minimal Stdio FDs]]
-- [[../Tasks/Completed/Dufetch|dufetch]]
-- [[../Tasks/Completed/Terminal-Mode|Kernel Terminal Mode]]
-- [[../Tasks/Completed/Block-Storage-v1|Block Storage v1]]
+- Не считать `/persist` полноценным installed root.
+- Не считать `net0` работающей сетью.
+- Не считать xHCI probe поддержкой USB devices.
+- Не считать `userspace/display_server` интегрированным server.
+- Не считать наличие scheduler/preempt code работающей preemption.
+- Не утверждать production readiness по наличию исходного файла.
+- Не давать обычным приложениям raw framebuffer/input/NIC/DMA.
+- Не переносить dock/widgets/themes/TCP/POSIX compatibility policy в kernel.
 
----
-
-## Still Not Done
-
-- Persistent dunitFS.
-- Real mount table beyond root MemFS.
-- Mountable persistent dunitFS.
-- Real userspace terminal/shell using stdio.
-- Blocking wait/input semantics.
-- Hardened timer preemption/background process model.
-- Network stack.
-- GUI display server architecture.
-
----
-
-## Do Not Assume
-
-- Do not assume a persistent filesystem exists. Raw sector IO exists on `vd0`,
-  but it is not mounted as files yet.
-- Do not assume `/dev` or `/proc` have real backends.
-- Do not assume long-running background userspace processes are fully hardened.
-- Do not treat current safe-copy as page-table validation. It is bounded range checking until page-fault recovery/user address spaces exist.
-- Do not rewrite scheduler, HAL, drivers, GUI, or memory management unless the task explicitly requires it.
-
----
-
-## Preferred Test Workflow
-
-Use `build_and_run_multipass.py` as the only autonomous launch/test path:
-
-```bash
-python3 build_and_run_multipass.py \
-  --mode test-terminal \
-  --qemu-timeout 60 \
-  --qemu-log qemu_runtime_stress.log \
-  --qemu-test-commands "exec runtime_stress" \
-  --expect-log "runtime_stress: OK" \
-  --expect-log "exec: /app/runtime_stress returned code=0"
-```
-
-Expected boot evidence in serial logs:
+## Ближайшая зависимость
 
 ```text
-[MEMFS] mounted as /
-[SYSCALL-TEST] userspace syscall OK
-[STDOUT] [STDOUT-TEST] hello from userspace
-[SYSCALL-FS-TEST] OK
-[SYSCALL-FS-SEMANTICS-TEST] OK
-root@dunit:~#
+preemption + threads + blocking events + shared VM + handles
+    -> GUI Server and DWM
+    -> musl pthread/TLS
+
+DunitFS v2 + installed root
+    -> persistent configuration
+    -> disk-loaded libc/apps/packages
+
+E1000 packet I/O + netd
+    -> native sockets
+    -> musl sockets
+    -> TLS/HTTP/browser-network service
 ```
 
-Block Storage v1 regression:
+## Автоматическая проверка
+
+Единственная разрешённая точка запуска:
 
 ```bash
-python3 build_and_run_multipass.py \
-  --mode test-terminal \
-  --disk virtio \
-  --qemu-timeout 60 \
-  --qemu-log qemu_block_v1.log \
-  --qemu-test-commands "blk;blkread vd0 0;blkwrite vd0 3;blkread vd0 3" \
-  --expect-log "vd0" \
-  --expect-log "virtio-blk" \
-  --expect-log "vd0 lba=3 written=512" \
-  --expect-log "DUNIT-BLOCK-STOR" \
-  --expect-log "AGE-V1"
+python3 tools/qemu_test.py \
+  --build \
+  --config limine_test_terminal.conf \
+  --cmd "exec runtime_stress" \
+  --timeout 120 \
+  --cmd-timeout 20 \
+  --settle 2 \
+  --json
 ```
 
----
+После проверки анализировать `build/qemu-serial.log`, показывать релевантный tail и подтверждать boot + subsystem marker. QEMU должен завершать harness, участие пользователя запрещено.
 
-## Architecture Notes For Future Work
-
-1. VFS/MemFS is a runtime filesystem layer only. Persistent dunitFS is future work.
-2. Current fd table is process-local, but there is only a minimal current-process model.
-3. Kernel terminal cwd is separate from process cwd.
-4. Stdio exists only as reserved fd targets and serial output for stdout/stderr.
-5. Userspace file IO is ready enough for the next stage, but stdin and real app launch are still blockers for a userspace terminal.
-6. `runtime_stress` is the canonical runtime regression app for VFS,
-   resumable child execution, IPC, repeated spawn/wait, and recoverable faults.
-7. `vd0` is a raw block device. The next storage milestone should build a
-   mountable dunitFS layer above it instead of adding another storage backend.
-
----
-
-## Vault Reading Order
+## Порядок чтения
 
 1. [[../STATUS|STATUS]]
 2. [[../ROADMAP|ROADMAP]]
-3. Relevant task node under `Tasks/Completed`, `Tasks/InProgress`, or `Tasks/Future`
-4. Code
+3. [DUNIT_OS_TECHNICAL_ROADMAP.md](../../../DUNIT_OS_TECHNICAL_ROADMAP.md)
+4. Соответствующий task node
+5. Код и автоматический тест

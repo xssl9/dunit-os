@@ -1,46 +1,29 @@
 # Advanced Features
 
-**Status:** PLANNED  
+**Status:** LATER / DEPENDENCY-GATED
 **Roadmap:** [[../../ROADMAP|ROADMAP]]
 
----
+## Later tracks
 
-## Current State
+- SMP/APIC and per-CPU scheduler state after stable UP preemption/lock audit.
+- GPU acceleration behind GUI backend after correct software compositor.
+- Dynamic loader/`.so` after stable VM, ABI, filesystem and static musl.
+- Full POSIX signals, cancellation and optional `fork`/COW after demonstrated demand.
+- Audio: HDA DMA -> userspace mixer -> per-app streams/permissions.
+- USB: xHCI enumeration/descriptors/endpoints -> HID -> mass storage/hotplug.
+- ACPI: tables, reboot/poweroff, battery/thermal, then suspend/resume.
+- Swap only after robust VM and persistent storage.
+- GDB stub, tracing/profiling and crash dump pipeline.
+- Accessibility, text shaping, IME and broader localization.
 
-These items are deliberately out of scope for the current VFS/syscall/process foundation work. They should stay planned until the kernel has stable process execution, persistent storage, and better driver coverage.
+## Ordering rules
 
----
+- No SMP before race-free single-core preemption.
+- No GPU acceleration before userspace GUI Server parity.
+- No dynamic linking before static C toolchain and stable ABI.
+- No network package repository before trust/time/TLS/transactions.
+- No broad hardware claim without end-to-end I/O on published support tier.
 
-## Planned Items
+## Product boundary
 
-- SMP / multi-core support.
-- ACPI power management.
-- Swap support.
-- Kernel modules.
-- GDB remote stub.
-- More complete panic/fault diagnostics.
-- Better tracing/profiling hooks.
-
----
-
-## Notes
-
-### SMP
-
-Requires APIC/LAPIC work, per-CPU state, locking strategy, and careful scheduler changes. This should not be mixed into the current single-core process/syscall work.
-
-### Swap
-
-Requires persistent storage and a more mature virtual memory model.
-
-### GDB Stub
-
-Serial output is already important for logs and smoke tests. A GDB stub can reuse serial concepts later, but it needs a deliberate debug protocol boundary.
-
----
-
-## Dependencies
-
-- [[../InProgress/Drivers|Drivers]]
-- [[../Future/Filesystem|Persistent dunitFS]]
-- Scheduler/process model maturity.
+Dunit can become usable without SMP, GPU acceleration, dynamic libraries, Wi-Fi or a full browser. These features must not block the first installed desktop release for QEMU and one reference PC.

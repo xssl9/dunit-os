@@ -1,32 +1,21 @@
-# ✅ Bootloader — Limine
+# Bootloader / Limine
 
-**Статус:** ✅ Выполнено  
-**Из плана:** [[../../ROADMAP|ROADMAP]]  
-**Требования:** [[../../Origin/REQUIREMENTS|REQ-1]]
+**Status:** COMPLETED FOUNDATION
+**Current state:** [[../../STATUS|STATUS]]
 
----
+## Delivered
 
-## Что сделано
+- Limine boot and memory/framebuffer handoff.
+- Separate Terminal and GUI boot configurations.
+- BIOS ISO and disk paths.
+- UEFI `BOOTX64.EFI`/OVMF path.
+- Installer BIOS/ESP payload integration.
+- Deterministic test configs `limine_test_terminal.conf` and `limine_test_gui.conf`.
 
-- [x] Limine конфиг (`limine.conf`)
-- [x] GUI режим — запуск с framebuffer
-- [x] Terminal режим — `limine_terminal.conf`
-- [x] Передача framebuffer pointer в kernel
-- [x] Передача memory map в kernel
-- [x] ISO образ через `xorriso` + `limine bios-install`
-- [x] UEFI поддержка (`BOOTX64.EFI`)
+## Verified boundary
 
-## Запуск
+BIOS and UEFI both reach Green Tea Kernel and mounted storage in automated scenarios. This does not by itself mean normal installed root: system/apps are still embedded and [[../Future/Installed-System|disk-root installation]] remains future work.
 
-```bash
-make run          # GUI
-make run-terminal # Terminal (nographic)
-```
+## Test rule
 
-## Скриншоты
-
-> Место для скринов
-
-## Заметки
-
-_Место для заметок_
+Launch only through `tools/qemu_test.py`; `make run` is not the autonomous verification path.

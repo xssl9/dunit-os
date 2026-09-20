@@ -1,42 +1,30 @@
-# Terminal Improvements
+# Terminal and userspace shell migration
 
-**Status:** In progress  
+**Status:** WORKING RECOVERY TERMINAL / USERSPACE MIGRATION PLANNED
 **Previous:** [[../Completed/Terminal-Mode|Terminal Mode]]
 
----
+## Current state
 
-## Done In Kernel Terminal
+- Kernel terminal has history, completion and VFS-backed commands.
+- Foreground userspace programs receive stdin/stdout and can be executed from Terminal Mode.
+- GUI Mode has a full terminal frontend, but command execution still delegates to kernel shell logic.
 
-- [x] Command history
-- [x] Tab autocomplete
-- [x] VFS-backed filesystem commands
-- [x] `echo >` and `echo >>`
-- [x] `tree`
-- [x] `dufetch`
+## Target
 
----
+- Kernel terminal remains a small recovery console.
+- Common userspace shell/session engine serves Terminal and GUI terminal.
+- PTY-like endpoint separates terminal frontend from process/session/job control.
+- Pipes, descriptor duplication/redirection, environment/PATH and blocking input are native runtime contracts.
 
-## Still To Do
+## Tasks
 
-- [ ] Aliases, for example `alias ll='ls -la'`
-- [ ] Environment variables: `$PATH`, `$HOME`
-- [ ] Pipes: `cmd1 | cmd2`
-- [ ] Input redirection: `<`
-- [ ] Real userspace terminal process
-- [x] Foreground keyboard-backed stdin for userspace exec
-- [ ] Shell-grade stdin, job control, and blocking input semantics
+- [ ] Common userspace command parser and builtin boundary.
+- [ ] Environment and executable lookup.
+- [ ] Pipes, `dup`/inheritance and file redirection.
+- [ ] Blocking/pollable input and PTY-like API.
+- [ ] Sessions/process groups/job control only after process model supports them.
+- [ ] GUI terminal becomes ordinary GUI client over the same shell/session service.
 
----
+## Acceptance
 
-## Notes
-
-The kernel terminal is usable, but it is still not the final shell
-architecture. Foreground userspace programs can receive terminal stdin, but the
-next major step is a real userspace shell that talks through stdio and VFS
-syscalls.
-
-Related completed foundations:
-
-- [[../Completed/Stdio-FD|Minimal Stdio FDs]]
-- [[../Completed/Userspace-VFS-Syscalls|Userspace VFS Syscalls]]
-- [[../Completed/Process-FD-Model|Current Process + FD Table]]
+The same command/program behaves consistently in Terminal and GUI terminals; kernel shell is not required during normal desktop session; recovery terminal still works if userspace GUI fails.
