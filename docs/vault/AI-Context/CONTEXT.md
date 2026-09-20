@@ -18,6 +18,7 @@ Dunit OS — самостоятельная x86_64 ОС с Rust `no_std` kernel,
 - PMM/VMM/heap, GDT/IDT, PIT/PIC, syscall entry, framebuffer/input foundation.
 - Ring 3 ELF programs, per-process address spaces/kernel stacks, PID/parent-child/cwd/fd state.
 - Cooperative spawn/yield/wait, recoverable user faults и byte-queue IPC.
+- Timer preemption доказана `preempt_test`: CPU-bound child завершается без `yield`; режим пока gated/default-off и сохраняет только GPR.
 - Syscall ABI: `rax` number/result; args `rdi/rsi/rdx/r10/r8/r9`; `rcx/r11` clobbered.
 - VFS root MemFS, `/app`, `/proc`, `/dev`, file/stat/readdir/cwd/process/sysinfo/input/GUI wrappers in `libdunit`.
 - AHCI и legacy VirtIO block paths; DunitFS v1 auto-mount как `/persist`.
@@ -27,7 +28,7 @@ Dunit OS — самостоятельная x86_64 ОС с Rust `no_std` kernel,
 
 ## Главные ограничения
 
-- Timer preemption выключена по умолчанию; scheduler фактически cooperative.
+- Timer preemption доказана, но выключена по умолчанию; normal runtime фактически cooperative, FPU/SIMD/thread state ещё не завершены.
 - Нет полноценных userspace threads, TLS, wait queues, futex-like wait/wake и SMP.
 - Нет `munmap/mprotect`-полноты, shared VM object model и rights-bearing handles.
 - Root/system/apps embedded; установленная система не загружает userspace с persistent root.

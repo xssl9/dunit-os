@@ -36,7 +36,7 @@ USB / audio / power   ###----------------- ранняя основа / planned
 - Limine загружает Terminal Mode и GUI Mode через BIOS и UEFI.
 - Green Tea Kernel получает memory map/framebuffer, поднимает PMM/VMM/heap, GDT/IDT, interrupts и syscall entry.
 - Ring 3 ELF-программы запускаются с `argc/argv/envp`, завершаются и изолированно fault-ятся.
-- Есть PID/parent-child lifecycle, cwd/fd tables, cooperative spawn/yield/wait и byte-queue IPC.
+- Есть PID/parent-child lifecycle, cwd/fd tables, cooperative spawn/yield/wait и byte-queue IPC; timer preemption доказана отдельным gated smoke, но ещё выключена по умолчанию.
 - Safe user-copy проверяет отображённые userspace ranges; runtime stress проверяет invalid pointers и recoverable faults.
 - VFS/MemFS, `/app`, `/proc`, `/dev`, filesystem/sysinfo/process/input IPC syscalls и `libdunit` работают.
 - Terminal Mode имеет VFS-команды и запускает userspace applications.

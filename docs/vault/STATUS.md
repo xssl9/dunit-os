@@ -4,7 +4,7 @@
 
 ## Краткое резюме
 
-Dunit OS уже является ранним вертикальным прототипом самостоятельной ОС, а не только boot demo. Она загружается через BIOS/UEFI, имеет ring 3 ELF userspace, процессы и системные вызовы, VFS/MemFS, block devices, DunitFS v1, Terminal Mode и функциональный legacy GUI Mode. Основные ограничения — cooperative scheduler, отсутствие threads/TLS и полноценной VM, in-kernel desktop architecture, embedded root/userspace, слабая crash consistency DunitFS и отсутствие packet networking.
+Dunit OS уже является ранним вертикальным прототипом самостоятельной ОС, а не только boot demo. Она загружается через BIOS/UEFI, имеет ring 3 ELF userspace, процессы и системные вызовы, VFS/MemFS, block devices, DunitFS v1, Terminal Mode и функциональный legacy GUI Mode. Timer preemption уже доказана CPU-bound тестом без `yield`, но остаётся gated/default-off и пока сохраняет только GPR. Основные ограничения — отсутствие production preemptive scheduler, threads/TLS и полноценной VM, in-kernel desktop architecture, embedded root/userspace, слабая crash consistency DunitFS и отсутствие packet networking.
 
 ## Статус подсистем
 
@@ -13,7 +13,7 @@ Dunit OS уже является ранним вертикальным прот�
 | Limine / BIOS / UEFI | WORKING | ISO и disk boot проверены; оба firmware paths работают |
 | HAL / interrupts | WORKING FOUNDATION | GDT, IDT, syscall entry, PIT/PIC, keyboard/mouse; APIC/SMP later |
 | PMM / VMM / heap | PARTIAL | address spaces и mapping foundation работают; нужны unmap/protect/shared objects/guard pages |
-| Scheduler | PROTOTYPE | cooperative execution; timer preemption default-off, нет schedulable threads |
+| Scheduler | PARTIAL / PROVEN EXPERIMENT | CPU-bound timer preemption доказана в gated smoke; default-off, GPR-only, нет schedulable threads/FPU state |
 | Processes | PARTIAL | PID, parent/child, fd/cwd, exit/fault/wait; нет production exec/spawn/thread model |
 | ELF userspace | WORKING FOUNDATION | embedded ELF applications запускаются из `/app`; installed disk loading не завершён |
 | Syscalls / user copy | WORKING FOUNDATION | register ABI и mapped-range checks работают; ABI ещё не стабилизирован/versioned |
@@ -37,6 +37,7 @@ Dunit OS уже является ранним вертикальным прот�
 - Terminal ISO boot до `root@dunit:~#`.
 - GUI ISO boot до `[GUI] two-pass blur cache ready`.
 - `runtime_stress`, IPC и file API programs завершаются с code `0`.
+- `preempt_test` доказывает timer preemption CPU-bound parent/child без `yield`; marker проверяется только в boot-smoke profile.
 - BIOS disk boot видит AHCI disk и автоматически монтирует DunitFS.
 - UEFI disk boot через OVMF доходит до того же storage/runtime path.
 - Файл в `/persist` существует после остановки и повторной загрузки того же disk image.

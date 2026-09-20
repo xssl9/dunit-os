@@ -15,7 +15,7 @@
 ## Current limits
 
 - Applications are embedded into current image/root, not loaded from normal installed filesystem.
-- Scheduler remains cooperative; long-running independent services are not hardened.
+- Timer preemption passes a gated smoke test, but normal scheduler remains cooperative/default-off; long-running independent services are not hardened.
 - No userspace threads/TLS, shared VM object model, general events/poll or rights-bearing handles.
 - Process entry/ABI is not yet frozen for musl/toolchain compatibility.
 - GUI services and shell/session are not yet ordinary supervised services.

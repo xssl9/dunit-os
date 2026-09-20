@@ -6,11 +6,12 @@
 
 ## Current boundary
 
-Dunit имеет process/address-space/kernel-stack foundation, cooperative spawn/yield/wait, basic IPC и experimental preemption hooks. Это ещё не среда для нескольких надёжных long-running services: timer preemption default-off, threads/TLS и blocking wait primitives отсутствуют.
+Dunit имеет process/address-space/kernel-stack foundation, cooperative spawn/yield/wait и basic IPC. Timer preemption уже доказана gated CPU-bound smoke-тестом без `yield`, но остаётся default-off и сохраняет только GPR. Это ещё не среда для нескольких надёжных long-running services: threads/TLS, FPU/SIMD context и blocking wait primitives отсутствуют.
 
 ## Required work
 
-- [ ] Stable UP preemptive round-robin with explicit IRQ/preemption/lock rules.
+- [x] Prove PIT timer preemption with CPU-bound parent/child and no `yield`.
+- [ ] Stable default-on UP round-robin with FPU/SIMD, clocksource and explicit IRQ/preemption/lock rules.
 - [ ] Schedulable thread entity: TID, user/kernel stack, registers, FPU/SIMD and shared process address space.
 - [ ] Wait queues, events, deadlines and blocking sleep/IPC/input.
 - [ ] `munmap`, `mprotect`, shared VM objects, guard pages and complete teardown.

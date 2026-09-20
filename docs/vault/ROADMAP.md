@@ -25,7 +25,9 @@ M7: E1000 -> netd -> IPv4/UDP/TCP/DHCP/DNS -> native sockets
 
 - [x] Техническое ревью и [полный roadmap](../../DUNIT_OS_TECHNICAL_ROADMAP.md).
 - [x] [[STATUS|Vault status]] отражает проверенное состояние.
-- [ ] Стабилизировать versioned Dunit userspace ABI manifest.
+- [x] Добавлены `docs/architecture/current-state.md` и документированный Dunit ABI v1 snapshot.
+- [x] CI проверяет warning budget и обязательные/запрещённые QEMU markers.
+- [ ] Стабилизировать ABI v1 после M1 contracts и генерировать Rust/C definitions из одного manifest.
 - [ ] Завести ADR для process entry, handles/rights, GUI protocol, `netd` и musl strategy.
 - [ ] Каждый `WORKING` claim связать с автоматическим serial marker/test.
 
@@ -33,7 +35,8 @@ M7: E1000 -> netd -> IPv4/UDP/TCP/DHCP/DNS -> native sockets
 
 → [[Tasks/InProgress/Kernel-Runtime-Prerequisites|Kernel Runtime Prerequisites]]
 
-- [ ] Default-on preemptive scheduler на UP.
+- [x] Доказать timer preemption CPU-bound parent/child без `yield` в gated boot smoke.
+- [ ] Сделать preemptive round-robin default-on, добавить FPU/SIMD state и clocksource abstraction.
 - [ ] Schedulable userspace threads и thread lifecycle.
 - [ ] Blocking wait queues/events/IPC вместо polling.
 - [ ] `munmap`, `mprotect`, shared VM objects и guard pages.
