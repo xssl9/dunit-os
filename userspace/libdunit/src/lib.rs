@@ -35,6 +35,10 @@ pub const SYSCALL_GET_TERMINAL_CURSOR: usize = 25;
 pub const SYSCALL_GET_SYSTEM_STATS: usize = 26;
 pub const SYSCALL_READDIR: usize = 27;
 pub const SYSCALL_STAT: usize = 28;
+pub const SYSCALL_THREAD_CREATE: usize = 29;
+pub const SYSCALL_THREAD_JOIN: usize = 30;
+pub const SYSCALL_THREAD_EXIT: usize = 31;
+pub const SYSCALL_GET_TID: usize = 32;
 
 pub const EAGAIN: isize = -11;
 pub const ENOMEM: isize = -12;
@@ -909,6 +913,26 @@ pub fn sleep_ms(ms: u64) {
 
 pub fn get_pid() -> u32 {
     syscall0(SYSCALL_GET_PID) as u32
+}
+
+/// Start a thread in this process. `stack_top` must be the aligned top of a
+/// writable user stack; the caller retains its mapping until after join.
+pub fn thread_create(entry: extern "C" fn(usize) -> !, stack_top: *mut u8, arg: usize) -> isize {
+    syscall3(SYSCALL_THREAD_CREATE, entry as usize, stack_top as usize, arg)
+}
+
+pub fn get_tid() -> u32 {
+    syscall0(SYSCALL_GET_TID) as u32
+}
+
+pub fn thread_exit(code: i32) -> ! {
+    syscall1(SYSCALL_THREAD_EXIT, code as usize);
+    loop { core::hint::spin_loop(); }
+}
+
+/// Nonblocking join: returns EAGAIN while the thread is still runnable.
+pub fn thread_join(tid: u32, status: &mut WaitStatus) -> isize {
+    syscall2(SYSCALL_THREAD_JOIN, tid as usize, status as *mut WaitStatus as usize)
 }
 
 pub fn kill(pid: u32) -> isize {

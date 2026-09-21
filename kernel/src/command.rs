@@ -217,6 +217,27 @@ pub fn run_preemption_smoke() -> bool {
     ok
 }
 
+#[cfg(feature = "boot-smoke-tests")]
+pub fn run_thread_smoke() -> bool {
+    crate::serial_write("[THREAD-TEST] START\r\n");
+    process::reset_preemption_count();
+    let mut input = NoExecInput;
+    let result = run_foreground_exec("/", "thread_test", ProcessOutputSink::SerialOnly, &mut input);
+    let preempts = process::preemption_count();
+    let ok = match result {
+        Ok((_, exit)) => {
+            let clean = process::thread_count_for_pid(exit.pid) == 0;
+            let _ = process::autoreap_process(exit.pid, "thread-smoke");
+            matches!(exit.status, process::ProcessExitStatus::Exited(0)) && clean && preempts > 0
+        }
+        Err(_) => false,
+    };
+    crate::serial_write(if ok { "[THREAD-TEST] OK preempts=" } else { "[THREAD-TEST] FAIL preempts=" });
+    serial_write_u32(preempts as u32);
+    crate::serial_write("\r\n");
+    ok
+}
+
 fn serial_write_i32(value: i32) {
     if value < 0 {
         crate::serial_write("-");

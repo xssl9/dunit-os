@@ -37,7 +37,7 @@ M7: E1000 -> netd -> IPv4/UDP/TCP/DHCP/DNS -> native sockets
 
 - [x] Доказать timer preemption CPU-bound parent/child без `yield` в gated boot smoke.
 - [x] Сделать preemptive round-robin default-on, добавить FPU/SIMD state и clocksource abstraction.
-- [ ] Schedulable userspace threads и thread lifecycle.
+- [x] Schedulable userspace threads и thread lifecycle (TID, create/exit/nonblocking join, общий address space).
 - [ ] Blocking wait queues/events/IPC вместо polling.
 - [ ] `munmap`, `mprotect`, shared VM objects и guard pages.
 - [ ] x86_64 `FS.base`/TLS contract.

@@ -254,6 +254,12 @@ fn terminate_current_process(
 
     crate::memory::serial_write("[USER-FAULT] pid=");
     serial_write_u64(pid);
+    if let Some(tid) = crate::process::current_tid() {
+        if tid.0 != pid {
+            crate::memory::serial_write(" tid=");
+            serial_write_u64(tid.0);
+        }
+    }
     crate::memory::serial_write(" reason=");
     crate::memory::serial_write(reason);
     crate::memory::serial_write(" rip=");

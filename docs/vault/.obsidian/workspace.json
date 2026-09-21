@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Tasks/InProgress/GUI-Improvements.md",
+                "file": "Tasks/Future/Libc-Musl.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "GUI-Improvements"
+              "title": "Libc-Musl"
             }
           }
         ]
@@ -41,7 +41,9 @@
               "type": "file-explorer",
               "state": {
                 "sortOrder": "alphabetical",
-                "autoReveal": false
+                "autoReveal": false,
+                "showSearch": false,
+                "searchQuery": ""
               },
               "icon": "lucide-folder-closed",
               "title": "Файловый менеджер"
@@ -182,13 +184,18 @@
   },
   "active": "8e42ca6d33575100",
   "lastOpenFiles": [
+    "Tasks/Future/Installed-System.md",
+    "Tasks/Future/GUI-Architecture.md",
+    "Tasks/Future/Filesystem.md",
+    "Tasks/Future/Advanced-Features.md",
+    "Tasks/Completed/Bootloader.md",
+    "Tasks/Completed/Block-Storage-v1.md",
+    "HOME.md",
+    "Tasks/InProgress/GUI-Improvements.md",
     "STATUS.md",
     "Tasks/Completed/Process-FD-Model.md",
     "Tasks/InProgress/Drivers.md",
-    "Tasks/Future/Filesystem.md",
     "ROADMAP.md",
-    "HOME.md",
-    "Tasks/Completed/Bootloader.md",
     "Tasks/Completed/Userspace-Programs.md",
     "Origin/VISION.md",
     "Origin/DESIGN.md",

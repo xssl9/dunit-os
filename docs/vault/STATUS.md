@@ -4,7 +4,7 @@
 
 ## Краткое резюме
 
-Dunit OS уже является ранним вертикальным прототипом самостоятельной ОС, а не только boot demo. Она загружается через BIOS/UEFI, имеет ring 3 ELF userspace, процессы и системные вызовы, VFS/MemFS, block devices, DunitFS v1, Terminal Mode и функциональный legacy GUI Mode. UP round-robin включён по умолчанию; FXSAVE/FXRSTOR сохраняет x87/SSE состояние процессов, а PIT предоставляет monotonic clock/deadline. Основные ограничения — отсутствие schedulable threads/TLS и полноценной VM, in-kernel desktop architecture, embedded root/userspace, слабая crash consistency DunitFS и отсутствие packet networking.
+Dunit OS уже является ранним вертикальным прототипом самостоятельной ОС, а не только boot demo. Она загружается через BIOS/UEFI, имеет ring 3 ELF userspace, процессы, потоки и системные вызовы, VFS/MemFS, block devices, DunitFS v1, Terminal Mode и функциональный legacy GUI Mode. UP round-robin включён по умолчанию; FXSAVE/FXRSTOR сохраняет x87/SSE состояние потоков, а PIT предоставляет monotonic clock/deadline. Основные ограничения — отсутствие TLS/blocking waits и полноценной VM, in-kernel desktop architecture, embedded root/userspace, слабая crash consistency DunitFS и отсутствие packet networking.
 
 ## Статус подсистем
 
@@ -13,8 +13,8 @@ Dunit OS уже является ранним вертикальным прот�
 | Limine / BIOS / UEFI | WORKING | ISO и disk boot проверены; оба firmware paths работают |
 | HAL / interrupts | WORKING FOUNDATION | GDT, IDT, syscall entry, PIT/PIC, keyboard/mouse; APIC/SMP later |
 | PMM / VMM / heap | PARTIAL | address spaces и mapping foundation работают; нужны unmap/protect/shared objects/guard pages |
-| Scheduler | PARTIAL | UP round-robin default-on; CPU-bound preemption и XMM isolation проверены gated smoke; нет schedulable threads/AVX/SMP |
-| Processes | PARTIAL | PID, parent/child, fd/cwd, exit/fault/wait; нет production exec/spawn/thread model |
+| Scheduler | PARTIAL | UP round-robin default-on; schedulable TID и XMM isolation проверены gated smoke; нет blocking waits/TLS/AVX/SMP |
+| Processes | PARTIAL | PID/parent-child, общий address space/fd table для потоков, thread create/exit/nonblocking join; нет production exec/fork model |
 | ELF userspace | WORKING FOUNDATION | embedded ELF applications запускаются из `/app`; installed disk loading не завершён |
 | Syscalls / user copy | WORKING FOUNDATION | register ABI и mapped-range checks работают; ABI ещё не стабилизирован/versioned |
 | IPC | PROTOTYPE | bounded byte queues и parent/child round trip; нужны handles/events/shared VM/rights |

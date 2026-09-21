@@ -6,13 +6,13 @@
 
 ## Current boundary
 
-Dunit имеет process/address-space/kernel-stack foundation, spawn/yield/wait и basic IPC. UP round-robin включён по умолчанию; x87/SSE состояние сохраняется на границе user/kernel и между процессами. Монотонное время и deadline доступны через `kernel/src/clock.rs` (источник PIT). Для нескольких надёжных long-running services ещё нужны threads/TLS и blocking wait primitives.
+Dunit имеет process/address-space/kernel-stack foundation, spawn/yield/wait, basic IPC и schedulable userspace threads. UP round-robin включён по умолчанию; x87/SSE состояние сохраняется отдельно для каждого TID. Потоки делят process-owned address space и fd table, а GPR, kernel stack и FPU state имеют свои. Монотонное время и deadline доступны через `kernel/src/clock.rs` (источник PIT). Для нескольких надёжных long-running services ещё нужны TLS и blocking wait primitives.
 
 ## Required work
 
 - [x] Prove PIT timer preemption with CPU-bound parent/child and no `yield`.
 - [x] Default-on UP round-robin with x87/SSE FXSAVE state, PIT clocksource/deadline and user-mode-only IRQ preemption.
-- [ ] Schedulable thread entity: TID, user/kernel stack, registers, FPU/SIMD and shared process address space.
+- [x] Schedulable thread entity: TID, caller-provided user stack, per-thread kernel stack/registers/FXSAVE state and shared process address space; create/exit/nonblocking join.
 - [ ] Wait queues, events, deadlines and blocking sleep/IPC/input.
 - [ ] `munmap`, `mprotect`, shared VM objects, guard pages and complete teardown.
 - [ ] x86_64 thread pointer / `FS.base`, initial `PT_TLS` image and context-switch preservation.

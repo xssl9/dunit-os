@@ -37,6 +37,10 @@ pub enum Syscall {
     GetSystemStats = 26,
     Readdir = 27,
     Stat = 28,
+    ThreadCreate = 29,
+    ThreadJoin = 30,
+    ThreadExit = 31,
+    GetTid = 32,
 }
 
 impl Syscall {
@@ -72,6 +76,10 @@ impl Syscall {
             26 => Some(Syscall::GetSystemStats),
             27 => Some(Syscall::Readdir),
             28 => Some(Syscall::Stat),
+            29 => Some(Syscall::ThreadCreate),
+            30 => Some(Syscall::ThreadJoin),
+            31 => Some(Syscall::ThreadExit),
+            32 => Some(Syscall::GetTid),
             _ => None,
         }
     }
@@ -476,12 +484,21 @@ pub extern "C" fn syscall_handler(
             arg3 as usize,
         ),
         Syscall::Stat => sys_stat(arg0 as *const u8, arg1 as usize, arg2 as *mut UserFileStat),
+        Syscall::ThreadCreate => sys_thread_create(arg0, arg1, arg2),
+        Syscall::ThreadJoin => sys_thread_join(arg0, arg1 as *mut WaitStatus),
+        Syscall::ThreadExit => sys_exit(arg0 as i32),
+        Syscall::GetTid => crate::process::current_tid().map(|tid| tid.0 as i64).unwrap_or(0),
     }
 }
 
 fn sys_exit(code: i32) -> i64 {
     if let Some(pid) = crate::process::request_current_user_exit(code) {
-        syscall_log!("[PROCESS-RUN] exited pid={} code={}\r\n", pid.0, code);
+        let tid = crate::process::current_tid().map(|id| id.0).unwrap_or(pid.0);
+        if tid == pid.0 {
+            syscall_log!("[PROCESS-RUN] exited pid={} code={}\r\n", pid.0, code);
+        } else {
+            syscall_log!("[THREAD] exited tid={} pid={} code={}\r\n", tid, pid.0, code);
+        }
         return USER_CONTEXT_RETURN_MAGIC;
     }
 
@@ -1213,8 +1230,8 @@ fn sys_getcwd(buf: *mut u8, len: usize) -> i64 {
 }
 
 fn sys_yield() -> i64 {
-    let current_pid = crate::process::current_process()
-        .map(|process| process.pid)
+    let current_pid = crate::process::current_tid()
+        .map(|tid| crate::process::ProcessId(tid.0))
         .unwrap_or(crate::process::ProcessId(0));
     match crate::process::scheduler::pick_next_candidate_excluding(current_pid) {
         Some(pid) => match crate::process::save_current_user_context_for_yield(pid) {
@@ -1226,6 +1243,57 @@ fn sys_yield() -> i64 {
             Err(error) => process_error_to_errno(error),
         },
     }
+}
+
+fn sys_thread_create(entry: u64, stack_top: u64, arg: u64) -> i64 {
+    if stack_top < 8 || stack_top & 15 != 0 {
+        return EINVAL;
+    }
+    let return_slot = stack_top - 8;
+    if let Err(error) = validate_user_mapping(return_slot, 8, true) {
+        return error;
+    }
+    if let Err(error) = validate_user_mapping(entry, 1, false) {
+        return error;
+    }
+    let entry_flags = crate::memory::vmm::active_user_page_flags(
+        crate::memory::vmm::VirtualAddress::from_usize((entry & !0xfff) as usize),
+    );
+    match entry_flags {
+        Ok(Some(flags)) if !flags.contains(crate::memory::vmm::PageFlags::NO_EXECUTE) => {}
+        _ => return EACCES,
+    }
+    match crate::process::create_user_thread(entry, return_slot, arg) {
+        Ok(tid) => {
+            // A thread entry has the regular x86_64 call-frame alignment.
+            // Returning without ThreadExit faults only this thread.
+            unsafe { core::ptr::write(return_slot as *mut u64, 0); }
+            tid.0 as i64
+        }
+        Err(error) => process_error_to_errno(error),
+    }
+}
+
+fn sys_thread_join(tid: u64, status: *mut WaitStatus) -> i64 {
+    if tid == 0 {
+        return EINVAL;
+    }
+    if let Err(error) =
+        validate_user_mapping(status as u64, core::mem::size_of::<WaitStatus>(), true)
+    {
+        return error;
+    }
+    let exit = match crate::process::wait_thread(crate::process::ThreadId(tid)) {
+        Ok(exit) => exit,
+        Err(error) => return process_error_to_errno(error),
+    };
+    let result = WaitStatus {
+        kind: exit.kind_code(),
+        code: exit.exit_code(),
+    };
+    unsafe { core::ptr::write_unaligned(status, result); }
+    syscall_log!("[THREAD] joined tid={} kind={} code={}\r\n", tid, result.kind, result.code);
+    tid as i64
 }
 
 fn sys_chdir(path: *const u8, path_len: usize) -> i64 {

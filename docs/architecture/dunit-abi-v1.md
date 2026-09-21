@@ -88,6 +88,20 @@ fork`) строился поверх стабильного контракта, 
 | 26 | `get_system_stats` | info: *mut SystemStats | 0 / `-errno` | ✅ |
 | 27 | `readdir` | path, path_len, ents: *mut UserDirEntry, max | кол-во / `-errno` | ✅ |
 | 28 | `stat` | path, path_len, stat: *mut UserFileStat | 0 / `-errno` | ✅ |
+| 29 | `thread_create` | entry: fn(usize), stack_top: *mut u8, arg: usize | tid / `-errno` | ✅ user stack supplied by caller |
+| 30 | `thread_join` | tid: u64, status: *mut WaitStatus | tid / `-errno` | ✅ nonblocking (`EAGAIN` while active) |
+| 31 | `thread_exit` | code: i32 | не возвращается | ✅ secondary thread only; main thread exits process |
+| 32 | `get_tid` | — | tid | ✅ main TID равен PID |
+
+Дополнительные потоки имеют собственные GPR, kernel stack и FXSAVE state, но
+используют адресное пространство, cwd и fd table процесса. `thread_create`
+проверяет executable entry и writable user stack; `stack_top` выровнен по 16
+байт, место `stack_top-8` занято return slot. Entry должен вызвать
+`thread_exit`; обычный `ret` приводит к fault только этого потока.
+`thread_join` удаляет завершённую запись TID и возвращает её `WaitStatus`.
+User stack остаётся собственностью вызывающей стороны и должен сохраняться до
+`join`; `detach`, TLS и blocking join ещё не определены. Вызов `kill_process`
+на собственный PID из дополнительного потока пока возвращает `EINVAL`.
 
 ## Коды ошибок (errno)
 

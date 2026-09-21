@@ -805,6 +805,12 @@ pub extern "C" fn kernel_main(
         } else {
             screen_log("[FAIL] Timer preemption smoke failed", true);
         }
+        screen_log("[ .. ] Running thread smoke test", false);
+        if command::run_thread_smoke() {
+            screen_log("[ OK ] Thread smoke passed", false);
+        } else {
+            screen_log("[FAIL] Thread smoke failed", true);
+        }
     }
 
     screen_log("[ OK ] System initialization complete", false);

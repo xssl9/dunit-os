@@ -4,15 +4,15 @@
 
 ## Навигация
 
-| Раздел | Ссылка |
-|---|---|
-| Проверенное текущее состояние | [[STATUS|STATUS]] |
-| Активный план и зависимости | [[ROADMAP|ROADMAP]] |
-| Полный технический roadmap | [DUNIT_OS_TECHNICAL_ROADMAP.md](../../DUNIT_OS_TECHNICAL_ROADMAP.md) |
-| Контекст для AI/разработчика | [[AI-Context/CONTEXT|AI CONTEXT]] |
-| Исходная идея проекта | [[Origin/VISION|VISION]] |
-| Архивный design | [[Origin/DESIGN|DESIGN]] |
-| Исходные требования | [[Origin/REQUIREMENTS|REQUIREMENTS]] |
+| Раздел                        | Ссылка                                                               |                |
+| ----------------------------- | -------------------------------------------------------------------- | -------------- |
+| Проверенное текущее состояние | [[STATUS                                                             | STATUS]]       |
+| Активный план и зависимости   | [[ROADMAP                                                            | ROADMAP]]      |
+| Полный технический roadmap    | [DUNIT_OS_TECHNICAL_ROADMAP.md](../../DUNIT_OS_TECHNICAL_ROADMAP.md) |                |
+| Контекст для AI/разработчика  | [[AI-Context/CONTEXT                                                 | AI CONTEXT]]   |
+| Исходная идея проекта         | [[Origin/VISION                                                      | VISION]]       |
+| Архивный design               | [[Origin/DESIGN                                                      | DESIGN]]       |
+| Исходные требования           | [[Origin/REQUIREMENTS                                                | REQUIREMENTS]] |
 
 ## Состояние на 2026-09-20
 

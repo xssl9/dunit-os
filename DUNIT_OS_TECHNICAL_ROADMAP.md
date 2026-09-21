@@ -28,8 +28,8 @@ Dunit уже больше, чем boot-screen: она загружается ч�
 
 Однако это ещё не production desktop OS:
 
-- UP round-robin включён по умолчанию (M1 update от 21 сентября 2026); threads/TLS и blocking waits ещё отсутствуют;
-- нет threads/TLS/signals/futex-подобного ожидания и полноценного process `exec`/`fork`;
+- UP round-robin включён по умолчанию (M1 update от 21 сентября 2026); schedulable user threads добавлены, TLS и blocking waits ещё отсутствуют;
+- нет TLS/signals/futex-подобного ожидания и полноценного process `exec`/`fork`;
 - GUI shell, compositor, WM, layout, decorations и системные панели живут в ядре (`kernel/src/ui_loop.rs`, 4458 строк);
 - userspace `display_server` и `video_driver` — неинтегрированные прототипы, отсутствующие в `USERSPACE_APPS` Makefile;
 - установленная система по-прежнему использует MemFS как `/`; DunitFS автоматически монтируется только в `/persist`;
@@ -120,12 +120,13 @@ root@dunit:~#
 
 - **Реализовано:** PID ready queue, saved CPU context, transitions Ready/Running/Blocked/Dead/Reaped, `yield`, parent/child wait/reap.
 - **Реализовано после исходного среза:** UP round-robin включён по умолчанию; x87/MMX/SSE сохраняются через FXSAVE/FXRSTOR, PIT предоставляет monotonic clock/deadline abstraction. QEMU smoke проверяет вытеснение и XMM isolation.
-- **Не реализовано:** kernel threads как полноценные schedulable entities, userspace threads, TLS register setup, per-thread kernel stack/FPU state, blocking wait queues, priorities, time accounting, SMP.
+- **Реализовано после исходного среза:** schedulable userspace TID, отдельные GPR/FPU/kernel stack, общее process-owned address space и fd table; create/exit/nonblocking join/get_tid. QEMU smoke проверяет общую память, XMM isolation, thread fault и teardown при выходе процесса.
+- **Не реализовано:** TLS register setup, blocking wait queues, priorities, time accounting, SMP и полноценный kernel-thread scheduler.
 - **Следствие:** GUI Server как настоящий long-running userspace service и musl pthreads пока нельзя считать надёжными.
 
 ### 4.4 Syscalls и ABI
 
-- **Реализовано:** 29 номеров Dunit ABI (`kernel/src/syscall/mod.rs:9`): file I/O, anonymous mmap, byte IPC, framebuffer/input, spawn/wait/kill/sleep/yield, cwd, stats, readdir/stat.
+- **Реализовано:** Dunit ABI (`kernel/src/syscall/mod.rs:9`): file I/O, anonymous mmap, byte IPC, framebuffer/input, spawn/wait/kill/sleep/yield, cwd, stats, readdir/stat и thread create/join/exit/get_tid (номера 29–32).
 - **Удачно:** user-copy проверяет присутствие и writable/user flags каждой страницы до доступа.
 - **Частично:** `sleep` использует PIT tick wait, но архитектуре нужны blocked sleepers и timer queue; stdio/terminal foreground policy всё ещё kernel-centric.
 - **Проблема безопасности:** raw framebuffer syscalls доступны обычным приложениям; будущий GUI требует capability/handle, доступный только GUI Server.
@@ -348,7 +349,7 @@ Dunit DWM — отдельный policy shell поверх GUI Server:
 
 - [x] Доказать, что preemptive round-robin на PIT реально вытесняет CPU-bound child без `yield` (smoke-хук `[PREEMPT-TEST] OK`).
 - [x] Включить round-robin по умолчанию, сохранять FPU/SSE-состояние и добавить abstraction clocksource/timer. Проверено QEMU boot smoke: CPU-bound parent/child с разными XMM значениями, `runtime_stress`, `ipc_parent`.
-- [ ] Сделать schedulable threads: TID, per-thread context/kernel stack/FPU state, process-owned address space.
+- [x] Сделать schedulable threads: TID, per-thread context/kernel stack/FPU state, process-owned address space. QEMU `[THREAD-TEST] OK`: два потока делят память/PID, сохраняют разные XMM значения, join возвращает статусы, thread fault изолирован, unjoined поток удаляется при выходе владельца.
 - [ ] Добавить wait queues и blocking sleep/IPC/event; убрать polling GUI apps.
 - [ ] Реализовать `munmap`, `mprotect`, shared VM object, guard pages и correct teardown.
 - [ ] Добавить TLS ABI: set/get thread pointer (`FS.base` на x86_64), initial TLS image.

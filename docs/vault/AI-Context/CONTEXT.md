@@ -28,8 +28,8 @@ Dunit OS — самостоятельная x86_64 ОС с Rust `no_std` kernel,
 
 ## Главные ограничения
 
-- UP timer preemption включена по умолчанию; FXSAVE/FXRSTOR сохраняет x87/SSE состояние процессов. Schedulable threads, AVX/XSAVE и SMP ещё не реализованы.
-- Нет полноценных userspace threads, TLS, wait queues, futex-like wait/wake и SMP.
+- UP timer preemption включена по умолчанию; FXSAVE/FXRSTOR сохраняет x87/SSE состояние каждого TID. Schedulable userspace threads делят process-owned address space и fd table; AVX/XSAVE и SMP ещё не реализованы.
+- Нет TLS, blocking wait queues, futex-like wait/wake и SMP; thread join пока неблокирующий.
 - Нет `munmap/mprotect`-полноты, shared VM object model и rights-bearing handles.
 - Root/system/apps embedded; установленная система не загружает userspace с persistent root.
 - DunitFS v1 ограничена fixed nodes/contiguous allocation и не имеет journal/fsck/permissions.
