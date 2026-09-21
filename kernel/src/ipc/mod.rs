@@ -227,7 +227,9 @@ pub fn send_bytes(sender: ProcessId, target: ProcessId, data: &[u8]) -> Result<(
     manager.send_message(
         target,
         Message::with_data(sender, MessageType::WindowClose { window_id: 0 }, data),
-    )
+    )?;
+    crate::process::wake_ipc_waiters(target);
+    Ok(())
 }
 
 pub fn recv_bytes(pid: ProcessId, out: &mut [u8]) -> Result<usize, IpcError> {

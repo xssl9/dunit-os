@@ -232,9 +232,8 @@ pub extern "C" fn _start() -> ! {
 
     loop {
         let mut event = libdunit::GuiMessage::new(0);
-        let received = libdunit::gui_recv_event(&mut event);
+        let received = libdunit::gui_recv_event_wait(&mut event, 0);
         if received < 0 {
-            libdunit::yield_now();
             continue;
         }
         if event.window_id != WINDOW_ID {

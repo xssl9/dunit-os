@@ -78,7 +78,7 @@ fork`) строился поверх стабильного контракта, 
 | 16 | `wait_process` | pid: u32, status: *mut WaitStatus | pid / `-errno` | ✅ (`EAGAIN` на ещё не запущенного) |
 | 17 | `get_pid` | — | pid | ✅ |
 | 18 | `kill_process` | pid: u32 | 0/magic / `-errno` | ✅ (SIGKILL-подобно, code -9) |
-| 19 | `sleep` | ms: u64 | 0 | ✅ tick-wait на PIT |
+| 19 | `sleep` | ms: u64 | 0 | ✅ Blocked до PIT deadline |
 | 20 | `debug_log` | code: u64 | 0 | ✅ пишет в serial |
 | 21 | `smoke_done` | code: i32 | magic | ⚙️ только под `boot-smoke-tests` |
 | 22 | `get_cwd` | buf: *mut u8, len | длина / `-errno` | ✅ |
@@ -92,6 +92,7 @@ fork`) строился поверх стабильного контракта, 
 | 30 | `thread_join` | tid: u64, status: *mut WaitStatus | tid / `-errno` | ✅ nonblocking (`EAGAIN` while active) |
 | 31 | `thread_exit` | code: i32 | не возвращается | ✅ secondary thread only; main thread exits process |
 | 32 | `get_tid` | — | tid | ✅ main TID равен PID |
+| 33 | `wait_event` | timeout_ms: u64 (`0` = без deadline) | 0 / `-errno` | ✅ ждёт непустую IPC очередь процесса или deadline; после wake нужно повторить `receive_message` |
 
 Дополнительные потоки имеют собственные GPR, kernel stack и FXSAVE state, но
 используют адресное пространство, cwd и fd table процесса. `thread_create`

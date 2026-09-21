@@ -28,7 +28,7 @@ Dunit уже больше, чем boot-screen: она загружается ч�
 
 Однако это ещё не production desktop OS:
 
-- UP round-robin включён по умолчанию (M1 update от 21 сентября 2026); schedulable user threads добавлены, TLS и blocking waits ещё отсутствуют;
+- UP round-robin включён по умолчанию (M1 update от 21 сентября 2026); schedulable user threads и timer/IPC wait queues добавлены, TLS и общая система событий ещё отсутствуют;
 - нет TLS/signals/futex-подобного ожидания и полноценного process `exec`/`fork`;
 - GUI shell, compositor, WM, layout, decorations и системные панели живут в ядре (`kernel/src/ui_loop.rs`, 4458 строк);
 - userspace `display_server` и `video_driver` — неинтегрированные прототипы, отсутствующие в `USERSPACE_APPS` Makefile;
@@ -121,14 +121,15 @@ root@dunit:~#
 - **Реализовано:** PID ready queue, saved CPU context, transitions Ready/Running/Blocked/Dead/Reaped, `yield`, parent/child wait/reap.
 - **Реализовано после исходного среза:** UP round-robin включён по умолчанию; x87/MMX/SSE сохраняются через FXSAVE/FXRSTOR, PIT предоставляет monotonic clock/deadline abstraction. QEMU smoke проверяет вытеснение и XMM isolation.
 - **Реализовано после исходного среза:** schedulable userspace TID, отдельные GPR/FPU/kernel stack, общее process-owned address space и fd table; create/exit/nonblocking join/get_tid. QEMU smoke проверяет общую память, XMM isolation, thread fault и teardown при выходе процесса.
-- **Не реализовано:** TLS register setup, blocking wait queues, priorities, time accounting, SMP и полноценный kernel-thread scheduler.
+- **Реализовано после исходного среза:** wait queue переводит потоки в Blocked; PIT будит `sleep` и timed IPC event wait, отправка IPC будит ожидающие потоки. GUI apps ждут IPC-события без цикла `yield`; QEMU `[WAIT-TEST] OK` проверяет таймаут, sleep и IPC wakeup.
+- **Не реализовано:** TLS register setup, универсальный event/handle readiness, priorities, time accounting, SMP и полноценный kernel-thread scheduler.
 - **Следствие:** GUI Server как настоящий long-running userspace service и musl pthreads пока нельзя считать надёжными.
 
 ### 4.4 Syscalls и ABI
 
 - **Реализовано:** Dunit ABI (`kernel/src/syscall/mod.rs:9`): file I/O, anonymous mmap, byte IPC, framebuffer/input, spawn/wait/kill/sleep/yield, cwd, stats, readdir/stat и thread create/join/exit/get_tid (номера 29–32).
 - **Удачно:** user-copy проверяет присутствие и writable/user flags каждой страницы до доступа.
-- **Частично:** `sleep` использует PIT tick wait, но архитектуре нужны blocked sleepers и timer queue; stdio/terminal foreground policy всё ещё kernel-centric.
+- **Частично:** `sleep` блокирует поток до PIT deadline; stdio/terminal foreground policy всё ещё kernel-centric.
 - **Проблема безопасности:** raw framebuffer syscalls доступны обычным приложениям; будущий GUI требует capability/handle, доступный только GUI Server.
 - **ABI-долг:** нет versioned ABI document, handle rights, poll/event wait, dup/pipe, seek, metadata, clocks, threads/TLS, robust errno contract.
 
@@ -192,7 +193,7 @@ root@dunit:~#
 | Интегрировано, но частично | processes, syscalls, scheduler, IPC, DunitFS, GPT/install, UEFI, GUI apps | Реальные end-to-end пути есть, семантика и recovery неполны |
 | Prototype | in-kernel desktop/compositor/WM, shared memory, VirtIO legacy, xHCI, network discovery | Нельзя стабилизировать как public API в текущем виде |
 | Skeleton/dead-end | userspace display_server binary, video_driver binary, initrd loader, kthreads | Требует интеграции или замены |
-| Не реализовано | preemptive default, userspace threads/TLS, signals, futex, dynamic loader, audio, TCP/IP, ACPI power, package manager | Roadmap ниже |
+| Не реализовано | TLS, signals, futex, dynamic loader, audio, TCP/IP, ACPI power, package manager | Roadmap ниже |
 
 ## 6. Реализованные компоненты
 
@@ -205,7 +206,8 @@ root@dunit:~#
 
 ## 7. Незавершённые компоненты
 
-- [ ] Default-on preemption, userspace threads/TLS and blocking synchronization.
+- [x] Default-on preemption, userspace threads и blocking timer/IPC wait queues (M1 QEMU smokes).
+- [ ] TLS и futex-like синхронизация для pthread subset.
 - [ ] Safe shared-memory objects and capability-based IPC handles.
 - [ ] Userspace GUI Server/compositor/DWM and declarative UI Runtime.
 - [ ] Disk-backed system root, first boot, user profiles, recovery-capable DunitFS.
@@ -350,7 +352,7 @@ Dunit DWM — отдельный policy shell поверх GUI Server:
 - [x] Доказать, что preemptive round-robin на PIT реально вытесняет CPU-bound child без `yield` (smoke-хук `[PREEMPT-TEST] OK`).
 - [x] Включить round-robin по умолчанию, сохранять FPU/SSE-состояние и добавить abstraction clocksource/timer. Проверено QEMU boot smoke: CPU-bound parent/child с разными XMM значениями, `runtime_stress`, `ipc_parent`.
 - [x] Сделать schedulable threads: TID, per-thread context/kernel stack/FPU state, process-owned address space. QEMU `[THREAD-TEST] OK`: два потока делят память/PID, сохраняют разные XMM значения, join возвращает статусы, thread fault изолирован, unjoined поток удаляется при выходе владельца.
-- [ ] Добавить wait queues и blocking sleep/IPC/event; убрать polling GUI apps.
+- [x] Добавить wait queues и blocking sleep/IPC event wait; убрать polling GUI apps. `[WAIT-TEST] OK` проверяет timeout, timer wake и IPC wake; общий handle/event readiness остаётся отдельной задачей.
 - [ ] Реализовать `munmap`, `mprotect`, shared VM object, guard pages и correct teardown.
 - [ ] Добавить TLS ABI: set/get thread pointer (`FS.base` на x86_64), initial TLS image.
 - [ ] Добавить futex-like Dunit primitive `wait_on_word/wake` без копирования Linux ABI.
@@ -538,7 +540,7 @@ src/mman/, src/fs/        native VM/VFS mappings
 
 - [ ] Реализовать anonymous/private `mmap`, `munmap`, `mprotect`; явно определить alignment, zero-fill, partial unmap и W^X policy.
 - [ ] Адаптировать allocator musl без требования Linux `brk`; optional hints вроде `madvise` могут быть no-op только если контракт это разрешает.
-- [ ] Реализовать monotonic/realtime clocks, blocking sleep и time conversion; realtime должен иметь явный источник/статус validity.
+- [ ] Добавить realtime clock и time conversion поверх существующих monotonic clock/blocking sleep; realtime должен иметь явный источник/статус validity.
 - [ ] Добавить kernel entropy interface для stack guards и будущей криптографии; слабый PRNG не маркировать как secure.
 
 **Результат:** стабильные `malloc/calloc/realloc/free`, clocks и random seed. **Готовность:** allocator переживает fragmentation/OOM и возвращает корректный `errno`; protection faults детерминированны. **Тесты:** allocator stress, zero/huge allocations, map/unmap/protect boundaries, OOM, monotonicity, entropy availability. **Риски:** VM leaks, use-after-unmap, executable writable memory.

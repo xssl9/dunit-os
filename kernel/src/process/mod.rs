@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use core::cell::UnsafeCell;
 
 use crate::memory::vmm::{ActiveAddressSpace, AddressSpace};
-use crate::sync::InterruptGuard;
+use crate::sync::{InterruptGuard, IrqSafeSpinLock};
 #[cfg(feature = "boot-smoke-tests")]
 use crate::memory::vmm::{PageFlags, VirtualAddress};
 
@@ -43,6 +43,21 @@ static PREEMPT_SWITCH_REQUESTED: AtomicBool = AtomicBool::new(false);
 static PREEMPTION_COUNT: AtomicU64 = AtomicU64::new(0);
 // UP round-robin is the default. A child may finish before its parent's first wait.
 static PREEMPTION_ENABLED: AtomicBool = AtomicBool::new(true);
+/// IRQ-safe wait queue; check/block is covered by the caller's IRQ guard.
+static WAIT_QUEUE: IrqSafeSpinLock<Vec<WaitEntry>> = IrqSafeSpinLock::new(Vec::new());
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WaitKey {
+    Timer,
+    Ipc(ProcessId),
+}
+
+#[derive(Clone, Copy)]
+struct WaitEntry {
+    entity: ProcessId,
+    key: WaitKey,
+    deadline: Option<u64>,
+}
 static mut TERMINAL_STDIN_BUFFER: [u8; 256] = [0; 256];
 static mut TERMINAL_STDIN_LEN: usize = 0;
 static mut TERMINAL_STDIN_READY: bool = false;
@@ -986,6 +1001,7 @@ fn cleanup_owned_threads(owner: ProcessId) {
     let mut index = 0;
     while index < table.len() {
         if table[index].owner == Some(owner) {
+            remove_waiter(table[index].pid);
             crate::process::scheduler::remove(table[index].pid);
             table.remove(index);
         } else {
@@ -1104,7 +1120,88 @@ pub fn save_current_user_context_for_yield(next_pid: ProcessId) -> Result<Proces
     Ok(pid)
 }
 
+pub fn block_current(key_ipc: Option<ProcessId>, deadline: Option<u64>) -> Result<(), ProcessError> {
+    let _irq = InterruptGuard::new();
+    let entity = current_entity_id().ok_or(ProcessError::NoCurrentProcess)?;
+    let table = process_table_mut();
+    let index = process_record_index(table, entity).ok_or(ProcessError::NoSuchProcess)?;
+    let record = &mut table[index];
+    if record.state != ProcessState::Running {
+        return Err(ProcessError::NotRunnable);
+    }
+    let process = record.process.as_mut().ok_or(ProcessError::ProcessNotPrepared)?;
+    if process.is_kernel {
+        return Err(ProcessError::InvalidUserContext);
+    }
+    unsafe {
+        crate::hal::syscall_capture_user_context(&mut process.context, 0);
+    }
+    record.state = ProcessState::Blocked;
+    process.state = ProcessState::Blocked;
+    WAIT_QUEUE.lock().push(WaitEntry {
+        entity,
+        key: key_ipc.map(WaitKey::Ipc).unwrap_or(WaitKey::Timer),
+        deadline,
+    });
+    PROCESS_YIELD_REQUESTED.store(true, Ordering::SeqCst);
+    PROCESS_SCHEDULE_HINT.store(0, Ordering::SeqCst);
+    Ok(())
+}
+
+fn wake_entry(entry: WaitEntry) {
+    let table = process_table_mut();
+    if let Some(index) = process_record_index(table, entry.entity) {
+        let record = &mut table[index];
+        if record.state == ProcessState::Blocked {
+            record.state = ProcessState::Ready;
+            if let Some(process) = record.process.as_mut() {
+                process.state = ProcessState::Ready;
+            }
+            let _ = scheduler::enqueue_ready(entry.entity);
+        }
+    }
+}
+
+pub fn wake_ipc_waiters(pid: ProcessId) {
+    let _irq = InterruptGuard::new();
+    let mut queue = WAIT_QUEUE.lock();
+    let mut index = 0;
+    while index < queue.len() {
+        if queue[index].key == WaitKey::Ipc(pid) {
+            wake_entry(queue.remove(index));
+        } else {
+            index += 1;
+        }
+    }
+}
+
+pub fn wake_expired_waiters() {
+    let _irq = InterruptGuard::new();
+    let mut queue = WAIT_QUEUE.lock();
+    let now = crate::clock::monotonic_ticks();
+    let mut index = 0;
+    while index < queue.len() {
+        if queue[index].deadline.map(|deadline| now >= deadline).unwrap_or(false) {
+            wake_entry(queue.remove(index));
+        } else {
+            index += 1;
+        }
+    }
+}
+
+pub fn is_pid_blocked(pid: ProcessId) -> bool {
+    process_table_mut()
+        .iter()
+        .any(|record| record.pid == pid && record.state == ProcessState::Blocked)
+}
+
+fn remove_waiter(entity: ProcessId) {
+    let _irq = InterruptGuard::new();
+    WAIT_QUEUE.lock().retain(|entry| entry.entity != entity);
+}
+
 pub fn mark_process_finished(exit: ProcessExit) {
+    remove_waiter(exit.pid);
     let table = process_table_mut();
     if let Some(index) = process_record_index(table, exit.pid) {
         let record = &mut table[index];
@@ -1124,6 +1221,7 @@ pub fn mark_process_finished(exit: ProcessExit) {
 }
 
 pub fn reap_process(pid: ProcessId) -> Result<(), ProcessError> {
+    remove_waiter(pid);
     let table = process_table_mut();
     let index = process_record_index(table, pid).ok_or(ProcessError::NoSuchProcess)?;
     let record = &mut table[index];
@@ -1204,6 +1302,7 @@ pub fn kill_process(pid: ProcessId, code: i32) -> Result<bool, ProcessError> {
         }
         log_process_transition(pid, from, ProcessState::Dead, "kill");
     }
+    remove_waiter(pid);
     cleanup_owned_threads(pid);
     Ok(false)
 }
@@ -1582,6 +1681,10 @@ pub fn enter_user_process(pid: ProcessId) -> Result<ProcessExit, ProcessError> {
     let root_pid = pid;
     let mut next_pid = pid;
     loop {
+        if is_pid_blocked(next_pid) {
+            next_pid = crate::process::scheduler::pick_next_candidate()
+                .ok_or(ProcessError::SchedulerUnavailable)?;
+        }
         let address_space_ready = owner_of(next_pid)
             .and_then(|owner| process_table_mut()
                 .iter()
@@ -1708,7 +1811,7 @@ pub fn enter_user_process(pid: ProcessId) -> Result<ProcessExit, ProcessError> {
                 next_pid = candidate;
             }
             None => {
-                if next_pid == root_pid {
+                if next_pid == root_pid || is_pid_blocked(root_pid) {
                     CURRENT_PID.store(previous_pid, Ordering::SeqCst);
                     unsafe {
                         crate::memory::vmm::switch_to_root_frame(previous_root);

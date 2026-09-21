@@ -1736,6 +1736,7 @@ fn run_gui_app_once(state: &mut UiState, app_index: usize) {
         return;
     }
     let pid = crate::process::ProcessId(state.gui_apps[app_index].pid);
+    if crate::process::is_pid_blocked(pid) { return; }
     let mut exited = false;
     match crate::process::enter_user_process(pid) {
         Ok(exit) => {
@@ -1750,7 +1751,7 @@ fn run_gui_app_once(state: &mut UiState, app_index: usize) {
             let _ = crate::process::autoreap_process(pid, "gui-proto-exit");
         }
         Err(crate::process::ProcessError::SchedulerUnavailable)
-            if crate::process::is_pid_runnable(pid) => {}
+            if crate::process::is_pid_runnable(pid) || crate::process::is_pid_blocked(pid) => {}
         Err(_) => {
             state.gui_apps[app_index].running = false;
             state.gui_apps[app_index].exited = true;

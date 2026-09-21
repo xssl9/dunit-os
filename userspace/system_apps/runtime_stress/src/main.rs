@@ -62,7 +62,12 @@ fn wait_exited(pid: u32, code: i32, label: &str) {
 
 fn wait_faulted(pid: u32, label: &str) {
     let mut status = libdunit::WaitStatus::empty();
-    let waited = libdunit::wait(pid, &mut status);
+    let mut waited = libdunit::EAGAIN;
+    for _ in 0..50 {
+        waited = libdunit::wait(pid, &mut status);
+        if waited != libdunit::EAGAIN { break; }
+        libdunit::sleep_ms(10);
+    }
     if waited != pid as isize {
         fail(label, 22);
     }

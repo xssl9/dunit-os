@@ -27,6 +27,7 @@ pub const SYSCALL_WAIT_PROCESS: usize = 16;
 pub const SYSCALL_GET_PID: usize = 17;
 pub const SYSCALL_KILL_PROCESS: usize = 18;
 pub const SYSCALL_SLEEP: usize = 19;
+pub const SYSCALL_WAIT_EVENT: usize = 33;
 pub const SYSCALL_DEBUG_LOG: usize = 20;
 pub const SYSCALL_GETCWD: usize = 22;
 pub const SYSCALL_CHDIR: usize = 23;
@@ -968,6 +969,20 @@ pub fn ipc_recv(buf: &mut [u8]) -> isize {
     )
 }
 
+pub fn wait_ipc_event(timeout_ms: u64) -> isize {
+    syscall1(SYSCALL_WAIT_EVENT, timeout_ms as usize)
+}
+
+pub fn ipc_recv_blocking(buf: &mut [u8], timeout_ms: u64) -> isize {
+    loop {
+        let received = ipc_recv(buf);
+        if received != EAGAIN { return received; }
+        let waited = wait_ipc_event(timeout_ms);
+        if waited < 0 { return waited; }
+        if timeout_ms != 0 { return ipc_recv(buf); }
+    }
+}
+
 pub fn gui_send(message: &GuiMessage) -> isize {
     let bytes = unsafe {
         core::slice::from_raw_parts(
@@ -1043,6 +1058,23 @@ pub fn gui_recv_event(message: &mut GuiMessage) -> isize {
         )
     };
     let received = ipc_recv(bytes);
+    if received == core::mem::size_of::<GuiMessage>() as isize && message.valid() {
+        received
+    } else if received < 0 {
+        received
+    } else {
+        EAGAIN
+    }
+}
+
+pub fn gui_recv_event_wait(message: &mut GuiMessage, timeout_ms: u64) -> isize {
+    let bytes = unsafe {
+        core::slice::from_raw_parts_mut(
+            message as *mut GuiMessage as *mut u8,
+            core::mem::size_of::<GuiMessage>(),
+        )
+    };
+    let received = ipc_recv_blocking(bytes, timeout_ms);
     if received == core::mem::size_of::<GuiMessage>() as isize && message.valid() {
         received
     } else if received < 0 {

@@ -45,13 +45,15 @@
     { "marker": "ipc_parent: OK", "claim": "ipc_parent full pass", "source": "userspace/system_apps/ipc_parent" },
     { "marker": "exec: /app/ipc_parent returned code=0", "claim": "ipc_parent clean exit", "source": "kernel/src/command.rs" },
     { "marker": "[PREEMPT-TEST] OK", "claim": "default-on timer preemption and XMM isolation for CPU-bound parent/child (M1)", "source": "kernel/src/command.rs" },
-    { "marker": "[THREAD-TEST] OK", "claim": "schedulable TIDs, shared process address space, per-thread XMM and lifecycle", "source": "kernel/src/command.rs" }
+    { "marker": "[THREAD-TEST] OK", "claim": "schedulable TIDs, shared process address space, per-thread XMM and lifecycle", "source": "kernel/src/command.rs" },
+    { "marker": "[WAIT-TEST] OK", "claim": "timer and IPC wait queues with blocked thread wakeup", "source": "kernel/src/command.rs" }
   ],
   "forbidden": [
     { "marker": "[PANIC]", "why": "kernel panic (covers double-fault/invalid-TSS, which panic!)", "source": "kernel/src/lib.rs" },
     { "marker": "[PROCESS-RUN] VFS handles leaked", "why": "VFS handle leak after a process exits", "source": "kernel/src/command.rs" },
     { "marker": "preempt_test: FAIL", "why": "CPU-bound child was not preempted without yield", "source": "userspace/system_apps/preempt_test" },
     { "marker": "[PREEMPT-TEST] FAIL", "why": "timer preemption smoke did not observe a committed switch", "source": "kernel/src/command.rs" },
-    { "marker": "[THREAD-TEST] FAIL", "why": "thread lifecycle or state isolation failed", "source": "kernel/src/command.rs" }
+    { "marker": "[THREAD-TEST] FAIL", "why": "thread lifecycle or state isolation failed", "source": "kernel/src/command.rs" },
+    { "marker": "[WAIT-TEST] FAIL", "why": "blocked sleep or IPC/event wakeup failed", "source": "kernel/src/command.rs" }
   ]
 }

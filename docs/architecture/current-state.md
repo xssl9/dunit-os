@@ -67,12 +67,13 @@
 | `kill` процесса | ✅ | `[WAIT] pid=10 kind=0 code=-9` (runtime_stress: kill OK) |
 | Обработка user-fault (page fault) | ✅ | `[USER-FAULT] pid=11 reason=page-fault … err=0x4`, `[WAIT] pid=11 kind=1 code=-14` |
 | Schedulable user threads | ✅ | `[THREAD-TEST] OK`: TID, create/exit/nonblocking join, отдельные GPR/kernel stack/FXSAVE, общий PID/address space/fd table; thread fault не завершает процесс |
+| Wait queues / blocking sleep / IPC event | ✅ | `[WAIT-TEST] OK`: timeout, blocked sleep, wake при отправке IPC; GUI apps ждут событие без yield polling |
 | TLS / futex | ⛔ | ещё не реализованы (следующие задачи M1) |
 
 Профиль исполнения: UP round-robin с PIT (~100 Гц), один процесс исполняется
 в каждый момент времени. Состояние x87/MMX/SSE сохраняется отдельно для каждого
 потока; AVX/XSAVE пока не поддержаны. `clock.rs` предоставляет монотонные
-тики/наносекунды и deadline. TLS, blocking waits и SMP остаются задачами M1.
+тики/наносекунды и deadline. TLS, универсальный event/handle wait и SMP остаются задачами M1.
 
 ## IPC
 

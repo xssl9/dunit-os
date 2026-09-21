@@ -40,6 +40,7 @@ static PREEMPT_CHILD_BYTES: &[u8] = include_bytes!("../../../build/userspace/pre
 static PREEMPT_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/preempt_test");
 static KILL_TARGET_BYTES: &[u8] = include_bytes!("../../../build/userspace/kill_target");
 static THREAD_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/thread_test");
+static WAIT_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/wait_test");
 
 pub struct AssetEntry {
     pub path: &'static str,
@@ -635,6 +636,10 @@ pub fn init() -> Result<()> {
         let mut thread_test = Vec::new();
         thread_test.extend_from_slice(THREAD_TEST_BYTES);
         ROOT_MEMFS.add_file("/app/thread_test", thread_test);
+
+        let mut wait_test = Vec::new();
+        wait_test.extend_from_slice(WAIT_TEST_BYTES);
+        ROOT_MEMFS.add_file("/app/wait_test", wait_test);
 
         vfs.mount("/", &mut ROOT_MEMFS)?;
         serial_log("[MEMFS] mounted as /\r\n");

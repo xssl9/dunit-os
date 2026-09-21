@@ -42,4 +42,8 @@ impl Deadline {
     pub fn expired(self) -> bool {
         monotonic_ticks() >= self.0
     }
+
+    pub fn tick(self) -> u64 {
+        self.0
+    }
 }

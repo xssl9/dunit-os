@@ -41,6 +41,7 @@ pub enum Syscall {
     ThreadJoin = 30,
     ThreadExit = 31,
     GetTid = 32,
+    WaitEvent = 33,
 }
 
 impl Syscall {
@@ -80,6 +81,7 @@ impl Syscall {
             30 => Some(Syscall::ThreadJoin),
             31 => Some(Syscall::ThreadExit),
             32 => Some(Syscall::GetTid),
+            33 => Some(Syscall::WaitEvent),
             _ => None,
         }
     }
@@ -488,6 +490,7 @@ pub extern "C" fn syscall_handler(
         Syscall::ThreadJoin => sys_thread_join(arg0, arg1 as *mut WaitStatus),
         Syscall::ThreadExit => sys_exit(arg0 as i32),
         Syscall::GetTid => crate::process::current_tid().map(|tid| tid.0 as i64).unwrap_or(0),
+        Syscall::WaitEvent => sys_wait_event(arg0),
     }
 }
 
@@ -1391,37 +1394,27 @@ fn sys_sleep(ms: u64) -> i64 {
         return 0;
     }
 
-    let deadline = crate::clock::Deadline::after_ms(ms);
-    let wait_ticks = ms.saturating_mul(crate::clock::TICKS_PER_SECOND).saturating_add(999) / 1000;
-
-    // The timer IRQ only advances ticks while interrupts are enabled. Enable
-    // them for the wait, then restore the caller's prior IF state.
-    let prev_if: u64;
-    unsafe {
-        core::arch::asm!("pushfq; pop {}", out(reg) prev_if, options(nomem));
-        core::arch::asm!("sti", options(nomem, nostack));
+    let deadline = crate::clock::Deadline::after_ms(ms).tick();
+    match crate::process::block_current(None, Some(deadline)) {
+        Ok(()) => USER_CONTEXT_RETURN_MAGIC,
+        Err(error) => process_error_to_errno(error),
     }
+}
 
-    // Bound the spin so a stalled timer can never hang the kernel forever.
-    let mut guard: u64 = wait_ticks.saturating_mul(20_000_000).max(20_000_000);
-    while !deadline.expired() {
-        unsafe {
-            core::arch::asm!("pause", options(nomem, nostack));
-        }
-        guard -= 1;
-        if guard == 0 {
-            break;
-        }
+/// Wait for an IPC event addressed to this process, with optional timeout.
+/// Zero timeout means no deadline. The caller rechecks the queue on wake.
+fn sys_wait_event(timeout_ms: u64) -> i64 {
+    let Some(pid) = crate::process::current_process().map(|process| process.pid) else {
+        return EINVAL;
+    };
+    if crate::ipc::get_ipc_manager().map(|manager| manager.has_messages(pid)).unwrap_or(false) {
+        return 0;
     }
-
-    // Restore IF if it was clear on entry.
-    if (prev_if & (1 << 9)) == 0 {
-        unsafe {
-            core::arch::asm!("cli", options(nomem, nostack));
-        }
+    let deadline = (timeout_ms != 0).then(|| crate::clock::Deadline::after_ms(timeout_ms).tick());
+    match crate::process::block_current(Some(pid), deadline) {
+        Ok(()) => USER_CONTEXT_RETURN_MAGIC,
+        Err(error) => process_error_to_errno(error),
     }
-
-    0
 }
 
 fn sys_debug_log(code: u64) -> i64 {

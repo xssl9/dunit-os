@@ -36,6 +36,7 @@ pub fn handle_timer(frame: &InterruptFrame) {
     }
 
     crate::clock::on_tick();
+    crate::process::wake_expired_waiters();
 
     // Only preempt user mode while the run_user_context escape frame is active.
     if (frame.cs & 3) != 3 {

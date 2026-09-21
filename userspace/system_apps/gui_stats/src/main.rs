@@ -35,11 +35,9 @@ pub extern "C" fn _start() -> ! {
     libdunit::gui_set_status("gui_stats: running");
 
     redraw();
-    let mut idle_ticks = 0u32;
-
     loop {
         let mut event = libdunit::GuiMessage::new(0);
-        let received = libdunit::gui_recv_event(&mut event);
+        let received = libdunit::gui_recv_event_wait(&mut event, 1000);
         if received >= 0 && event.window_id == WINDOW_ID {
             match event.kind {
                 libdunit::GUI_MSG_CLOSE_EVENT => {
@@ -51,12 +49,9 @@ pub extern "C" fn _start() -> ! {
             }
         }
 
-        idle_ticks = idle_ticks.wrapping_add(1);
-        if idle_ticks >= 180 {
+        if received == libdunit::EAGAIN {
             redraw();
-            idle_ticks = 0;
         }
-        libdunit::yield_now();
     }
 }
 

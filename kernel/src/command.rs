@@ -137,7 +137,14 @@ pub fn run_foreground_exec(
     let run_result = loop {
         match process::enter_user_process(pid) {
             Ok(exit) => break Ok(exit),
-            Err(ProcessError::SchedulerUnavailable) if process::is_pid_runnable(pid) => {
+            Err(ProcessError::SchedulerUnavailable)
+                if process::is_pid_runnable(pid) || process::is_pid_blocked(pid) => {
+                if process::is_pid_blocked(pid) {
+                    unsafe {
+                        core::arch::asm!("sti; hlt", options(nomem, nostack));
+                    }
+                    continue;
+                }
                 if process::terminal_stdin_waiting_pid() == Some(pid) {
                     match input.collect_stdin(pid) {
                         ExecInputResult::Provided => {}
@@ -235,6 +242,27 @@ pub fn run_thread_smoke() -> bool {
     crate::serial_write(if ok { "[THREAD-TEST] OK preempts=" } else { "[THREAD-TEST] FAIL preempts=" });
     serial_write_u32(preempts as u32);
     crate::serial_write("\r\n");
+    ok
+}
+
+#[cfg(feature = "boot-smoke-tests")]
+pub fn run_wait_smoke() -> bool {
+    crate::serial_write("[WAIT-TEST] START\r\n");
+    let mut input = NoExecInput;
+    let result = run_foreground_exec("/", "wait_test", ProcessOutputSink::SerialOnly, &mut input);
+    let ok = match result {
+        Ok((_, exit)) => {
+            let clean = process::thread_count_for_pid(exit.pid) == 0;
+            let _ = process::autoreap_process(exit.pid, "wait-smoke");
+            matches!(exit.status, process::ProcessExitStatus::Exited(0)) && clean
+        }
+        Err(_) => false,
+    };
+    crate::serial_write(if ok {
+        "[WAIT-TEST] OK\r\n"
+    } else {
+        "[WAIT-TEST] FAIL\r\n"
+    });
     ok
 }
 

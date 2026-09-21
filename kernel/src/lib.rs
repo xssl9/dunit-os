@@ -811,6 +811,12 @@ pub extern "C" fn kernel_main(
         } else {
             screen_log("[FAIL] Thread smoke failed", true);
         }
+        screen_log("[ .. ] Running wait queue smoke test", false);
+        if command::run_wait_smoke() {
+            screen_log("[ OK ] Wait queue smoke passed", false);
+        } else {
+            screen_log("[FAIL] Wait queue smoke failed", true);
+        }
     }
 
     screen_log("[ OK ] System initialization complete", false);
