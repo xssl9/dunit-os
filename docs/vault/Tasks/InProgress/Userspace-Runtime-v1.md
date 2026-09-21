@@ -15,8 +15,8 @@
 ## Current limits
 
 - Applications are embedded into current image/root, not loaded from normal installed filesystem.
-- Timer preemption passes a gated smoke test, but normal scheduler remains cooperative/default-off; long-running independent services are not hardened.
-- No userspace threads/TLS, shared VM object model, general events/poll or rights-bearing handles.
+- Default-on UP timer preemption and schedulable userspace threads pass gated smoke tests; long-running independent services are not yet hardened.
+- Shared VM objects, blocking IPC event waits and guard pages exist; TLS, general events/poll and rights-bearing handles are still missing.
 - Process entry/ABI is not yet frozen for musl/toolchain compatibility.
 - GUI services and shell/session are not yet ordinary supervised services.
 
@@ -24,9 +24,8 @@
 
 Work moves through [[Kernel-Runtime-Prerequisites|Kernel Runtime Prerequisites]]:
 
-- preemption and thread lifecycle;
-- blocking events/wait queues;
-- shared VM and handle rights;
+- TLS and atomic wait/wake for pthread synchronization;
+- general event readiness and handle rights;
 - stable process entry/auxv/ELF/TLS ABI;
 - spawn/exec-image inheritance and installed-disk loading;
 - service supervision/restart.

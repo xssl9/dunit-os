@@ -50,7 +50,7 @@
 | Kernel heap (PMM-backed, growable) | ✅ | `[HEAP] OK (PMM-backed, growable)` |
 | Переключение адресных пространств | ✅ | `[ADDRSPACE-TEST] OK`, `[PROCESS-ADDRSPACE-TEST] OK` |
 | MMIO-аллокатор | ✅ | `[MMIO-ALLOC-TEST] OK` |
-| `mmap` (userspace) | 🟡 | только anonymous private; нет `munmap`/`mprotect`/shared/file |
+| VM mappings (userspace) | 🟡 | anonymous private, `munmap/mprotect`, guard pages и shared objects работают; нет file mappings/COW/rights |
 
 ## Планировщик и процессы
 
@@ -68,6 +68,7 @@
 | Обработка user-fault (page fault) | ✅ | `[USER-FAULT] pid=11 reason=page-fault … err=0x4`, `[WAIT] pid=11 kind=1 code=-14` |
 | Schedulable user threads | ✅ | `[THREAD-TEST] OK`: TID, create/exit/nonblocking join, отдельные GPR/kernel stack/FXSAVE, общий PID/address space/fd table; thread fault не завершает процесс |
 | Wait queues / blocking sleep / IPC event | ✅ | `[WAIT-TEST] OK`: timeout, blocked sleep, wake при отправке IPC; GUI apps ждут событие без yield polling |
+| VM lifecycle | ✅ | `[VM-TEST] OK`: `munmap/mprotect`, W^X, guard fault, shared frame между процессами и освобождение после закрытия/exit |
 | TLS / futex | ⛔ | ещё не реализованы (следующие задачи M1) |
 
 Профиль исполнения: UP round-robin с PIT (~100 Гц), один процесс исполняется
@@ -83,8 +84,8 @@
 | `send` / `receive` между процессами | ✅ | `[IPC] send from=12 to=13 len=7`, `[IPC] recv pid=13 len=7`, `ipc_parent: OK` |
 | Границы: ≤256 байт, ≤128 сообщений/очередь | ✅ | `MAX_MESSAGE_SIZE`, `MAX_QUEUE_MESSAGES` |
 | Неблокирующий `receive` | ✅ | пустая очередь → `EAGAIN` |
-| Блокирующий `receive` / poll | ⛔ | нет |
-| Shared memory | 🧪 | `IPC: shared memory prototype (0 regions, no syscall surface yet)` — есть менеджер регионов, но syscall'ов нет |
+| Блокирующее ожидание IPC-события | ✅ | `wait_event` + повторный `receive`; `libdunit::ipc_recv_blocking` |
+| Shared VM object | ✅ | `shared_vm_create/map/close`, refcounted frames; ID пока без rights/handle table |
 
 ## Файловая система
 

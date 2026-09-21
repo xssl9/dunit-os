@@ -490,7 +490,7 @@ fn ensure_process_page(
                 merged_flags.remove(PageFlags::NO_EXECUTE);
             }
             address_space
-                .map_user_frame(virt, phys, merged_flags)
+                .protect_user_page(virt, merged_flags, true)
                 .map_err(|_| ElfError::InvalidProgramHeader)?;
             Ok(phys)
         }

@@ -216,7 +216,10 @@ impl AddressSpace {
         }
 
         let user_flags = flags | PageFlags::PRESENT | PageFlags::USER;
-        self.map_user_frame(virt, frame, user_flags)?;
+        if let Err(error) = self.map_user_frame(virt, frame, user_flags) {
+            pmm.free_frame(frame);
+            return Err(error);
+        }
         self.user_frames.push(frame);
         Ok(frame)
     }
@@ -283,11 +286,45 @@ impl AddressSpace {
             let p3 = self.ensure_next_table(root.get_entry_mut(virt.p4_index()))?;
             let p2 = self.ensure_next_table(p3.get_entry_mut(virt.p3_index()))?;
             let p1 = self.ensure_next_table(p2.get_entry_mut(virt.p2_index()))?;
-            p1.get_entry_mut(virt.p1_index())
-                .set(phys, flags | PageFlags::PRESENT | PageFlags::USER);
+            let entry = p1.get_entry_mut(virt.p1_index());
+            if !entry.is_unused() {
+                return Err(AddressSpaceError::InvalidUserAddress);
+            }
+            entry.set(phys, flags | PageFlags::PRESENT | PageFlags::USER);
         }
 
         Ok(())
+    }
+
+    /// Change access to an existing user page, including PROT_NONE (not present).
+    pub fn protect_user_page(
+        &mut self,
+        virt: VirtualAddress,
+        flags: PageFlags,
+        present: bool,
+    ) -> Result<bool, AddressSpaceError> {
+        let addr = virt.as_usize();
+        if addr == 0 || addr >= USER_SPACE_END || addr & (PAGE_SIZE - 1) != 0 {
+            return Err(AddressSpaceError::InvalidUserAddress);
+        }
+        let Some((phys, _)) = self.user_page_mapping(virt)? else {
+            return Ok(false);
+        };
+        unsafe {
+            let root = page_table_from_phys_mut(self.root_frame);
+            let p3 = page_table_from_phys_mut(root.get_entry(virt.p4_index()).addr());
+            let p2 = page_table_from_phys_mut(p3.get_entry(virt.p3_index()).addr());
+            let p1 = page_table_from_phys_mut(p2.get_entry(virt.p2_index()).addr());
+            let mut new_flags = flags | PageFlags::USER;
+            if present {
+                new_flags |= PageFlags::PRESENT;
+            }
+            p1.get_entry_mut(virt.p1_index()).set(phys, new_flags);
+            if read_cr3() == self.root_frame.as_usize() {
+                flush_page(addr);
+            }
+        }
+        Ok(true)
     }
 
     pub unsafe fn activate(&self) -> ActiveAddressSpace {

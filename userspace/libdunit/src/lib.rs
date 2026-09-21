@@ -40,6 +40,19 @@ pub const SYSCALL_THREAD_CREATE: usize = 29;
 pub const SYSCALL_THREAD_JOIN: usize = 30;
 pub const SYSCALL_THREAD_EXIT: usize = 31;
 pub const SYSCALL_GET_TID: usize = 32;
+pub const SYSCALL_MUNMAP: usize = 34;
+pub const SYSCALL_MPROTECT: usize = 35;
+pub const SYSCALL_SHARED_VM_CREATE: usize = 36;
+pub const SYSCALL_SHARED_VM_MAP: usize = 37;
+pub const SYSCALL_SHARED_VM_CLOSE: usize = 38;
+
+pub const VM_PROT_READ: usize = 1;
+pub const VM_PROT_WRITE: usize = 2;
+pub const VM_PROT_EXEC: usize = 4;
+pub const VM_MAP_PRIVATE: usize = 1 << 1;
+pub const VM_MAP_ANONYMOUS: usize = 1 << 5;
+/// Add one inaccessible page before and after the returned usable range.
+pub const VM_MAP_GUARD: usize = 1 << 6;
 
 pub const EAGAIN: isize = -11;
 pub const ENOMEM: isize = -12;
@@ -910,6 +923,30 @@ pub fn get_mouse_pos() -> (u32, u32) {
 
 pub fn sleep_ms(ms: u64) {
     syscall1(SYSCALL_SLEEP, ms as usize);
+}
+
+pub fn vm_map(addr: usize, length: usize, prot: usize, flags: usize) -> isize {
+    syscall5(SYSCALL_MMAP, addr, length, prot, flags, 0)
+}
+
+pub fn vm_unmap(addr: usize, length: usize) -> isize {
+    syscall2(SYSCALL_MUNMAP, addr, length)
+}
+
+pub fn vm_protect(addr: usize, length: usize, prot: usize) -> isize {
+    syscall3(SYSCALL_MPROTECT, addr, length, prot)
+}
+
+pub fn shared_vm_create(length: usize) -> isize {
+    syscall1(SYSCALL_SHARED_VM_CREATE, length)
+}
+
+pub fn shared_vm_map(id: u64, addr: usize, prot: usize) -> isize {
+    syscall3(SYSCALL_SHARED_VM_MAP, id as usize, addr, prot)
+}
+
+pub fn shared_vm_close(id: u64) -> isize {
+    syscall1(SYSCALL_SHARED_VM_CLOSE, id as usize)
 }
 
 pub fn get_pid() -> u32 {

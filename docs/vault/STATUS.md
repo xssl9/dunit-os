@@ -12,7 +12,7 @@ Dunit OS уже является ранним вертикальным прот�
 |---|---|---|
 | Limine / BIOS / UEFI | WORKING | ISO и disk boot проверены; оба firmware paths работают |
 | HAL / interrupts | WORKING FOUNDATION | GDT, IDT, syscall entry, PIT/PIC, keyboard/mouse; APIC/SMP later |
-| PMM / VMM / heap | PARTIAL | address spaces и mapping foundation работают; нужны unmap/protect/shared objects/guard pages |
+| PMM / VMM / heap | PARTIAL | `munmap/mprotect`, shared VM frames и guard pages проверены `[VM-TEST] OK`; нужны file mappings, demand paging, COW и rights |
 | Scheduler | PARTIAL | UP round-robin default-on; schedulable TID, XMM isolation и timer/IPC wait queues проверены gated smoke; нет TLS/AVX/SMP |
 | Processes | PARTIAL | PID/parent-child, общий address space/fd table для потоков, thread create/exit/nonblocking join; нет production exec/fork model |
 | ELF userspace | WORKING FOUNDATION | embedded ELF applications запускаются из `/app`; installed disk loading не завершён |

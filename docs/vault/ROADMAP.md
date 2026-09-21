@@ -39,7 +39,7 @@ M7: E1000 -> netd -> IPv4/UDP/TCP/DHCP/DNS -> native sockets
 - [x] Сделать preemptive round-robin default-on, добавить FPU/SIMD state и clocksource abstraction.
 - [x] Schedulable userspace threads и thread lifecycle (TID, create/exit/nonblocking join, общий address space).
 - [x] Blocking timer/IPC wait queues и event wait вместо GUI polling (`[WAIT-TEST] OK`).
-- [ ] `munmap`, `mprotect`, shared VM objects и guard pages.
+- [x] `munmap`, `mprotect`, shared VM objects и guard pages (`[VM-TEST] OK`).
 - [ ] x86_64 `FS.base`/TLS contract.
 - [ ] `wait_on_word/wake` synchronization primitive.
 - [ ] Handle tables с rights и безопасным transfer.

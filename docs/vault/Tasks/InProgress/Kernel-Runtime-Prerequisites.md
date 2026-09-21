@@ -14,7 +14,7 @@ Dunit имеет process/address-space/kernel-stack foundation, spawn/yield/wait
 - [x] Default-on UP round-robin with x87/SSE FXSAVE state, PIT clocksource/deadline and user-mode-only IRQ preemption.
 - [x] Schedulable thread entity: TID, caller-provided user stack, per-thread kernel stack/registers/FXSAVE state and shared process address space; create/exit/nonblocking join.
 - [x] Wait queues, IPC event/deadline wait and blocking sleep; GUI apps no longer yield-poll (`[WAIT-TEST] OK`). Blocking raw input remains separate work.
-- [ ] `munmap`, `mprotect`, shared VM objects, guard pages and complete teardown.
+- [x] `munmap`, `mprotect`, shared VM objects, guard pages and frame teardown (`[VM-TEST] OK`).
 - [ ] x86_64 thread pointer / `FS.base`, initial `PT_TLS` image and context-switch preservation.
 - [ ] Atomic `wait_on_word/wake` with timeout and no lost wakeups.
 - [ ] Per-process handle table with rights such as read/write/map/signal/transfer/display/raw-network.

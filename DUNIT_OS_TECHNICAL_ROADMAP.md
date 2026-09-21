@@ -112,7 +112,8 @@ root@dunit:~#
 
 - **Рабочая база:** multi-region PMM, HHDM, растущая PMM-backed kernel heap; `AddressSpace` с owned user frames, map/unmap и kernel-half sync (`kernel/src/memory/vmm.rs:143`, `:202`, `:227`).
 - **Рабочая база:** ELF parser/loader, W^X flags, user stack и `argc/argv/envp` (`kernel/src/elf/mod.rs:209`, `:391`). Userspace faults завершают процесс, не kernel.
-- **Частично:** anonymous private `mmap` существует (`kernel/src/syscall/mod.rs:807`, `Process::map_anonymous` в `kernel/src/process/mod.rs:353`), но нет `munmap`, `mprotect`, file mappings, shared mappings, demand paging или COW.
+- **Реализовано после исходного среза:** anonymous private `mmap`, `munmap`, `mprotect`, guard pages и shared VM object с физическими страницами и refcount. `[VM-TEST] OK` проверяет aliasing между процессами, page fault на guard page, partial unmap и освобождение frame после teardown.
+- **Не реализовано:** file mappings, demand paging, COW и права доступа на shared VM IDs (позже через handle table).
 - **Не реализовано:** syscall `fork` и process-image `exec` возвращают `ENOSYS` (`kernel/src/syscall/mod.rs:491`, `:495`). Текущий `spawn` — Dunit-native primitive и пригоден как основной API; `fork` не обязан быть первым.
 - **Техдолг:** много `static mut` singleton state и 91 compiler warning в test build; существующие `SpinLock`/`IrqSafeSpinLock` надо распространить на VFS, DunitFS, IPC, terminal, WM и driver registries.
 
@@ -353,7 +354,7 @@ Dunit DWM — отдельный policy shell поверх GUI Server:
 - [x] Включить round-robin по умолчанию, сохранять FPU/SSE-состояние и добавить abstraction clocksource/timer. Проверено QEMU boot smoke: CPU-bound parent/child с разными XMM значениями, `runtime_stress`, `ipc_parent`.
 - [x] Сделать schedulable threads: TID, per-thread context/kernel stack/FPU state, process-owned address space. QEMU `[THREAD-TEST] OK`: два потока делят память/PID, сохраняют разные XMM значения, join возвращает статусы, thread fault изолирован, unjoined поток удаляется при выходе владельца.
 - [x] Добавить wait queues и blocking sleep/IPC event wait; убрать polling GUI apps. `[WAIT-TEST] OK` проверяет timeout, timer wake и IPC wake; общий handle/event readiness остаётся отдельной задачей.
-- [ ] Реализовать `munmap`, `mprotect`, shared VM object, guard pages и correct teardown.
+- [x] Реализовать `munmap`, `mprotect`, shared VM object, guard pages и correct teardown. QEMU `[VM-TEST] OK`: partial unmap, W^X, guard fault, shared aliasing и возврат frame в PMM после закрытия/выхода peer.
 - [ ] Добавить TLS ABI: set/get thread pointer (`FS.base` на x86_64), initial TLS image.
 - [ ] Добавить futex-like Dunit primitive `wait_on_word/wake` без копирования Linux ABI.
 - [ ] Перевести глобальные mutable singletons на locks/owned services.
@@ -538,7 +539,7 @@ src/mman/, src/fs/        native VM/VFS mappings
 
 ##### M6-B — VM, allocator, time и entropy
 
-- [ ] Реализовать anonymous/private `mmap`, `munmap`, `mprotect`; явно определить alignment, zero-fill, partial unmap и W^X policy.
+- [x] Реализовать anonymous/private `mmap`, `munmap`, `mprotect`; alignment 4 KiB, zero-fill, partial unmap и запрет W+X проверены `[VM-TEST] OK`.
 - [ ] Адаптировать allocator musl без требования Linux `brk`; optional hints вроде `madvise` могут быть no-op только если контракт это разрешает.
 - [ ] Добавить realtime clock и time conversion поверх существующих monotonic clock/blocking sleep; realtime должен иметь явный источник/статус validity.
 - [ ] Добавить kernel entropy interface для stack guards и будущей криптографии; слабый PRNG не маркировать как secure.

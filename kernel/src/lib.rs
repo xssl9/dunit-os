@@ -817,6 +817,12 @@ pub extern "C" fn kernel_main(
         } else {
             screen_log("[FAIL] Wait queue smoke failed", true);
         }
+        screen_log("[ .. ] Running VM mapping smoke test", false);
+        if command::run_vm_smoke() {
+            screen_log("[ OK ] VM mapping smoke passed", false);
+        } else {
+            screen_log("[FAIL] VM mapping smoke failed", true);
+        }
     }
 
     screen_log("[ OK ] System initialization complete", false);

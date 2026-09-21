@@ -41,6 +41,10 @@ static PREEMPT_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/pree
 static KILL_TARGET_BYTES: &[u8] = include_bytes!("../../../build/userspace/kill_target");
 static THREAD_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/thread_test");
 static WAIT_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/wait_test");
+static VM_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/vm_test");
+static VM_PEER_BYTES: &[u8] = include_bytes!("../../../build/userspace/vm_peer");
+static VM_GUARD_FAULT_BYTES: &[u8] = include_bytes!("../../../build/userspace/vm_guard_fault");
+static VM_PROTECT_FAULT_BYTES: &[u8] = include_bytes!("../../../build/userspace/vm_protect_fault");
 
 pub struct AssetEntry {
     pub path: &'static str,
@@ -640,6 +644,11 @@ pub fn init() -> Result<()> {
         let mut wait_test = Vec::new();
         wait_test.extend_from_slice(WAIT_TEST_BYTES);
         ROOT_MEMFS.add_file("/app/wait_test", wait_test);
+
+        ROOT_MEMFS.add_file("/app/vm_test", VM_TEST_BYTES.to_vec());
+        ROOT_MEMFS.add_file("/app/vm_peer", VM_PEER_BYTES.to_vec());
+        ROOT_MEMFS.add_file("/app/vm_guard_fault", VM_GUARD_FAULT_BYTES.to_vec());
+        ROOT_MEMFS.add_file("/app/vm_protect_fault", VM_PROTECT_FAULT_BYTES.to_vec());
 
         vfs.mount("/", &mut ROOT_MEMFS)?;
         serial_log("[MEMFS] mounted as /\r\n");

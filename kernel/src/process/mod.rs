@@ -8,10 +8,9 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use core::cell::UnsafeCell;
 
-use crate::memory::vmm::{ActiveAddressSpace, AddressSpace};
+use crate::memory::pmm::{get_pmm, PhysicalAddress};
+use crate::memory::vmm::{ActiveAddressSpace, AddressSpace, PageFlags, VirtualAddress};
 use crate::sync::{InterruptGuard, IrqSafeSpinLock};
-#[cfg(feature = "boot-smoke-tests")]
-use crate::memory::vmm::{PageFlags, VirtualAddress};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProcessId(pub u64);
@@ -26,6 +25,26 @@ pub const MAX_PROCESS_FD: ProcessFd = 1024;
 pub const DEFAULT_KERNEL_STACK_SIZE: usize = 0x40000;
 
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
+static NEXT_SHARED_VM_ID: AtomicU64 = AtomicU64::new(1);
+static SHARED_VM_OBJECTS: IrqSafeSpinLock<BTreeMap<u64, SharedVmObject>> =
+    IrqSafeSpinLock::new(BTreeMap::new());
+
+struct SharedVmObject {
+    frames: Vec<PhysicalAddress>,
+    refs: usize,
+}
+
+fn shared_vm_release(id: u64, count: usize) {
+    let mut objects = SHARED_VM_OBJECTS.lock();
+    let Some(object) = objects.get_mut(&id) else { return; };
+    object.refs -= count;
+    if object.refs == 0 {
+        let object = objects.remove(&id).unwrap();
+        if let Some(pmm) = get_pmm() {
+            for frame in object.frames { pmm.free_frame(frame); }
+        }
+    }
+}
 static mut PROCESS_TABLE: Option<Vec<ProcessRecord>> = None;
 static CURRENT_PID: AtomicU64 = AtomicU64::new(0);
 static PROCESS_EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -222,11 +241,26 @@ pub struct Process {
     fd_table: BTreeMap<ProcessFd, FdEntry>,
     next_fd: ProcessFd,
     next_mmap_addr: usize,
+    shared_owned: Vec<u64>,
+    shared_pages: BTreeMap<usize, u64>,
+    guard_regions: BTreeMap<usize, usize>,
 }
 
 const USER_MMAP_BASE: usize = 0x0000_0010_0000_0000;
 const USER_MMAP_END: usize = 0x0000_7000_0000_0000;
 const USER_PAGE_SIZE: usize = 4096;
+
+fn vm_range_end(start: usize, length: usize) -> Result<usize, ProcessError> {
+    if start < USER_MMAP_BASE || start & (USER_PAGE_SIZE - 1) != 0 || length == 0 {
+        return Err(ProcessError::InvalidMemoryRange);
+    }
+    let length = length.checked_add(USER_PAGE_SIZE - 1)
+        .map(|value| value & !(USER_PAGE_SIZE - 1))
+        .ok_or(ProcessError::InvalidMemoryRange)?;
+    let end = start.checked_add(length).ok_or(ProcessError::InvalidMemoryRange)?;
+    if end > USER_MMAP_END { return Err(ProcessError::InvalidMemoryRange); }
+    Ok(end)
+}
 
 impl Process {
     /// Creates an isolated userspace process.
@@ -255,6 +289,9 @@ impl Process {
             fd_table: BTreeMap::new(),
             next_fd: FIRST_PROCESS_FD,
             next_mmap_addr: USER_MMAP_BASE,
+            shared_owned: Vec::new(),
+            shared_pages: BTreeMap::new(),
+            guard_regions: BTreeMap::new(),
         };
         process.reserve_stdio();
         process
@@ -286,6 +323,9 @@ impl Process {
             fd_table: BTreeMap::new(),
             next_fd: FIRST_PROCESS_FD,
             next_mmap_addr: USER_MMAP_BASE,
+            shared_owned: Vec::new(),
+            shared_pages: BTreeMap::new(),
+            guard_regions: BTreeMap::new(),
         };
         process.reserve_stdio();
         Ok(process)
@@ -414,6 +454,8 @@ impl Process {
         length: usize,
         writable: bool,
         executable: bool,
+        guarded: bool,
+        accessible: bool,
     ) -> Result<usize, ProcessError> {
         if self.is_kernel || length == 0 {
             return Err(ProcessError::InvalidMemoryRange);
@@ -422,6 +464,11 @@ impl Process {
             .checked_add(USER_PAGE_SIZE - 1)
             .map(|value| value & !(USER_PAGE_SIZE - 1))
             .ok_or(ProcessError::InvalidMemoryRange)?;
+        let total_length = if guarded {
+            map_length.checked_add(2 * USER_PAGE_SIZE)
+        } else {
+            Some(map_length)
+        }.ok_or(ProcessError::InvalidMemoryRange)?;
         let start = if requested_addr == 0 {
             self.next_mmap_addr
         } else {
@@ -431,7 +478,7 @@ impl Process {
             requested_addr
         };
         let end = start
-            .checked_add(map_length)
+            .checked_add(total_length)
             .ok_or(ProcessError::InvalidMemoryRange)?;
         if start < USER_MMAP_BASE || end > USER_MMAP_END {
             return Err(ProcessError::InvalidMemoryRange);
@@ -483,7 +530,185 @@ impl Process {
         if requested_addr == 0 {
             self.next_mmap_addr = end;
         }
+        if !accessible {
+            let accessible_start = if guarded { start + USER_PAGE_SIZE } else { start };
+            let accessible_end = if guarded { end - USER_PAGE_SIZE } else { end };
+            let address_space = self.address_space_mut().unwrap();
+            for page in (accessible_start..accessible_end).step_by(USER_PAGE_SIZE) {
+                address_space.protect_user_page(
+                    VirtualAddress(page), PageFlags::NO_EXECUTE, false,
+                ).map_err(|_| ProcessError::InvalidMemoryRange)?;
+            }
+        }
+        if guarded {
+            let address_space = self.address_space_mut().unwrap();
+            let guard_flags = PageFlags::NO_EXECUTE;
+            address_space.protect_user_page(VirtualAddress(start), guard_flags, false)
+                .map_err(|_| ProcessError::InvalidMemoryRange)?;
+            address_space.protect_user_page(VirtualAddress(end - USER_PAGE_SIZE), guard_flags, false)
+                .map_err(|_| ProcessError::InvalidMemoryRange)?;
+            self.guard_regions.insert(start + USER_PAGE_SIZE, map_length);
+            Ok(start + USER_PAGE_SIZE)
+        } else {
+            Ok(start)
+        }
+    }
+
+    pub fn create_shared_vm(&mut self, length: usize) -> Result<u64, ProcessError> {
+        if self.is_kernel || length == 0 { return Err(ProcessError::InvalidMemoryRange); }
+        let length = length.checked_add(USER_PAGE_SIZE - 1)
+            .map(|value| value & !(USER_PAGE_SIZE - 1))
+            .ok_or(ProcessError::InvalidMemoryRange)?;
+        if length > 16 * 1024 * 1024 { return Err(ProcessError::InvalidMemoryRange); }
+        let pmm = get_pmm().ok_or(ProcessError::OutOfMemory)?;
+        let mut frames = Vec::new();
+        for _ in 0..length / USER_PAGE_SIZE {
+            let Some(frame) = pmm.alloc_frame() else {
+                for frame in frames { pmm.free_frame(frame); }
+                return Err(ProcessError::OutOfMemory);
+            };
+            unsafe {
+                core::ptr::write_bytes(
+                    crate::memory::vmm::phys_to_virt(frame.as_usize()) as *mut u8,
+                    0, USER_PAGE_SIZE,
+                );
+            }
+            frames.push(frame);
+        }
+        let id = NEXT_SHARED_VM_ID.fetch_add(1, Ordering::SeqCst);
+        SHARED_VM_OBJECTS.lock().insert(id, SharedVmObject { frames, refs: 1 });
+        self.shared_owned.push(id);
+        Ok(id)
+    }
+
+    pub fn close_shared_vm(&mut self, id: u64) -> Result<(), ProcessError> {
+        let index = self.shared_owned.iter().position(|owned| *owned == id)
+            .ok_or(ProcessError::InvalidMemoryRange)?;
+        self.shared_owned.swap_remove(index);
+        shared_vm_release(id, 1);
+        Ok(())
+    }
+
+    pub fn map_shared_vm(
+        &mut self, id: u64, requested_addr: usize, writable: bool,
+    ) -> Result<usize, ProcessError> {
+        if self.is_kernel { return Err(ProcessError::InvalidUserContext); }
+        let frames = {
+            let mut objects = SHARED_VM_OBJECTS.lock();
+            let object = objects.get_mut(&id).ok_or(ProcessError::InvalidMemoryRange)?;
+            object.refs += object.frames.len();
+            object.frames.clone()
+        };
+        let length = frames.len() * USER_PAGE_SIZE;
+        let start = if requested_addr == 0 { self.next_mmap_addr } else { requested_addr };
+        let end = start.checked_add(length).ok_or(ProcessError::InvalidMemoryRange);
+        let valid = start >= USER_MMAP_BASE && start & (USER_PAGE_SIZE - 1) == 0
+            && end.as_ref().map(|end| *end <= USER_MMAP_END).unwrap_or(false);
+        if !valid {
+            shared_vm_release(id, frames.len());
+            return Err(ProcessError::InvalidMemoryRange);
+        }
+        let end = end.unwrap();
+        let Some(address_space) = self.address_space_mut() else {
+            shared_vm_release(id, frames.len());
+            return Err(ProcessError::NoAddressSpace);
+        };
+        let mut mapped = 0;
+        for (index, frame) in frames.iter().copied().enumerate() {
+            let page = start + index * USER_PAGE_SIZE;
+            if address_space.translate_user_page(VirtualAddress(page)).ok().flatten().is_some()
+                || address_space.map_user_frame(
+                    VirtualAddress(page), frame,
+                    PageFlags::NO_EXECUTE | if writable { PageFlags::WRITABLE } else { PageFlags::empty() },
+                ).is_err()
+            {
+                for rollback in 0..mapped {
+                    let _ = address_space.unmap_user_page(VirtualAddress(start + rollback * USER_PAGE_SIZE));
+                }
+                shared_vm_release(id, frames.len());
+                return Err(ProcessError::AddressInUse);
+            }
+            mapped += 1;
+        }
+        for index in 0..frames.len() {
+            self.shared_pages.insert(start + index * USER_PAGE_SIZE, id);
+        }
+        if requested_addr == 0 { self.next_mmap_addr = end; }
         Ok(start)
+    }
+
+    pub fn unmap_range(&mut self, start: usize, length: usize) -> Result<(), ProcessError> {
+        let end = vm_range_end(start, length)?;
+        let mut guard = None;
+        for (&usable, &len) in &self.guard_regions {
+            let reservation_start = usable - USER_PAGE_SIZE;
+            let reservation_end = usable + len + USER_PAGE_SIZE;
+            if start < reservation_end && end > reservation_start {
+                if start != usable || end != usable + len {
+                    return Err(ProcessError::InvalidMemoryRange);
+                }
+                guard = Some((usable, len));
+            }
+        }
+        {
+            let address_space = self.address_space_mut().ok_or(ProcessError::NoAddressSpace)?;
+            for page in (start..end).step_by(USER_PAGE_SIZE) {
+                if address_space.translate_user_page(VirtualAddress(page)).ok().flatten().is_none() {
+                    return Err(ProcessError::InvalidMemoryRange);
+                }
+            }
+        }
+        for page in (start..end).step_by(USER_PAGE_SIZE) {
+            self.address_space_mut().unwrap().unmap_user_page(VirtualAddress(page))
+                .map_err(|_| ProcessError::InvalidMemoryRange)?;
+            if let Some(id) = self.shared_pages.remove(&page) { shared_vm_release(id, 1); }
+        }
+        if let Some((usable, len)) = guard {
+            let address_space = self.address_space_mut().unwrap();
+            address_space.unmap_user_page(VirtualAddress(usable - USER_PAGE_SIZE)).unwrap();
+            address_space.unmap_user_page(VirtualAddress(usable + len)).unwrap();
+            self.guard_regions.remove(&usable);
+        }
+        Ok(())
+    }
+
+    pub fn protect_range(
+        &mut self, start: usize, length: usize, writable: bool,
+        executable: bool, present: bool,
+    ) -> Result<(), ProcessError> {
+        let end = vm_range_end(start, length)?;
+        for (usable, len) in &self.guard_regions {
+            if start <= *usable - USER_PAGE_SIZE && end > *usable - USER_PAGE_SIZE
+                || start <= *usable + *len && end > *usable + *len {
+                return Err(ProcessError::InvalidMemoryRange);
+            }
+        }
+        let address_space = self.address_space_mut().ok_or(ProcessError::NoAddressSpace)?;
+        for page in (start..end).step_by(USER_PAGE_SIZE) {
+            if address_space.translate_user_page(VirtualAddress(page)).ok().flatten().is_none() {
+                return Err(ProcessError::InvalidMemoryRange);
+            }
+        }
+        let flags = (if writable { PageFlags::WRITABLE } else { PageFlags::empty() })
+            | (if executable { PageFlags::empty() } else { PageFlags::NO_EXECUTE });
+        for page in (start..end).step_by(USER_PAGE_SIZE) {
+            address_space.protect_user_page(VirtualAddress(page), flags, present)
+                .map_err(|_| ProcessError::InvalidMemoryRange)?;
+        }
+        Ok(())
+    }
+
+    /// Release heavyweight VM ownership at exit, independently of wait/reap.
+    /// The caller must have switched away from this address space first.
+    fn release_vm_resources(&mut self) {
+        self.address_space = None;
+        for (_, id) in core::mem::take(&mut self.shared_pages) {
+            shared_vm_release(id, 1);
+        }
+        for id in core::mem::take(&mut self.shared_owned) {
+            shared_vm_release(id, 1);
+        }
+        self.guard_regions.clear();
     }
 
     pub fn fd_count(&self) -> usize {
@@ -494,6 +719,12 @@ impl Process {
         self.fd_table.insert(0, FdEntry::stdin());
         self.fd_table.insert(1, FdEntry::stdout());
         self.fd_table.insert(2, FdEntry::stderr());
+    }
+}
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        self.release_vm_resources();
     }
 }
 
@@ -1293,6 +1524,7 @@ pub fn kill_process(pid: ProcessId, code: i32) -> Result<bool, ProcessError> {
         let status = ProcessExitStatus::Exited(code);
         let from = record.state;
         process.exit(code);
+        process.release_vm_resources();
         record.state = ProcessState::Dead;
         record.status = Some(status);
         record.has_run = true;
@@ -1768,6 +2000,11 @@ pub fn enter_user_process(pid: ProcessId) -> Result<ProcessExit, ProcessError> {
             mark_process_finished(exit);
             if !is_thread {
                 cleanup_owned_threads(next_pid);
+                unsafe { crate::memory::vmm::switch_to_root_frame(previous_root); }
+                with_process_mut(next_pid, |finished| {
+                    finished.release_vm_resources();
+                    Ok(())
+                })?;
             }
             let reaped_children = if is_thread {
                 0

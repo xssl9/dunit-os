@@ -1,0 +1,11 @@
+[package]
+name = "vm_guard_fault"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libdunit = { path = "../../libdunit" }
+
+[[bin]]
+name = "vm_guard_fault"
+path = "src/main.rs"

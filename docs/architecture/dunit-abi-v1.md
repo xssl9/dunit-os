@@ -66,7 +66,7 @@ fork`) строился поверх стабильного контракта, 
 | 4 | `write` | fd: u32, buf: *const u8, count | записано байт / `-errno` | ✅ |
 | 5 | `open` | path: *const u8, path_len, flags: u32 | fd (>=3) / `-errno` | ✅ |
 | 6 | `close` | fd: u32 | 0 / `-errno` | ✅ |
-| 7 | `mmap` | addr, length, prot: u32, flags: u32 | адрес / `-errno` | ✅ только anonymous private |
+| 7 | `mmap` | addr, length, prot: u32, flags: u32 | адрес / `-errno` | ✅ anonymous private, optional guard pages |
 | 8 | `send_message` | target_pid: u32, msg: *const u8, len | len / `-errno` | ✅ байтовый IPC |
 | 9 | `receive_message` | msg: *mut u8, len | прочитано / `-errno` | ✅ неблокирующий (`EAGAIN`, если пусто) |
 | 10 | `get_framebuffer` | info: *mut FbInfo | 0 / `-errno` | ✅ (raw, без capability) |
@@ -93,6 +93,19 @@ fork`) строился поверх стабильного контракта, 
 | 31 | `thread_exit` | code: i32 | не возвращается | ✅ secondary thread only; main thread exits process |
 | 32 | `get_tid` | — | tid | ✅ main TID равен PID |
 | 33 | `wait_event` | timeout_ms: u64 (`0` = без deadline) | 0 / `-errno` | ✅ ждёт непустую IPC очередь процесса или deadline; после wake нужно повторить `receive_message` |
+| 34 | `munmap` | addr: page-aligned, len: usize | 0 / `-errno` | ✅ partial unmap; every page must be mapped |
+| 35 | `mprotect` | addr: page-aligned, len: usize, prot: bits | 0 / `-errno` | ✅ `PROT_NONE`, R, RW, RX; W+X отвергается |
+| 36 | `shared_vm_create` | len: usize | object ID / `-errno` | ✅ zero-filled page frames; limit 16 MiB |
+| 37 | `shared_vm_map` | ID, addr (`0` = auto), prot: R or RW | addr / `-errno` | ✅ maps same frames into another process |
+| 38 | `shared_vm_close` | ID | 0 / `-errno` | ✅ releases creator reference; mappings retain object |
+
+Anonymous `mmap` supports `MAP_GUARD` (bit 6): the returned usable range has one
+unmapped guard page on each side. `munmap` of the full usable range releases
+both guards; partial unmap of a guarded reservation is rejected. VM ranges are
+page-aligned, zero-filled and restricted to the mmap window. For a fixed guarded
+mapping, `addr` names the reservation start; the returned usable address is
+`addr + 4096`. Shared object IDs
+are currently unprotected bearer IDs; rights-bearing handles remain M1 work.
 
 Дополнительные потоки имеют собственные GPR, kernel stack и FXSAVE state, но
 используют адресное пространство, cwd и fd table процесса. `thread_create`
@@ -160,10 +173,10 @@ User stack остаётся собственностью вызывающей с
 
 Из `userspace/libdunit/src/lib.rs` / `sys_mmap`:
 
-- `prot`: `PROT_READ = 1<<0`, `PROT_WRITE = 1<<1`, `PROT_EXEC` учитывается как
-  W^X-намерение.
-- `flags`: `MAP_PRIVATE = 1<<1`, `MAP_ANONYMOUS = 1<<5`. Поддержан только
-  анонимный private mapping; `munmap`/`mprotect`/file/shared mappings — нет.
+- `prot`: `PROT_READ = 1<<0`, `PROT_WRITE = 1<<1`, `PROT_EXEC = 1<<2`;
+  `PROT_NONE = 0`, W+X отвергается. На x86 write/execute допускают read.
+- `flags`: `MAP_PRIVATE = 1<<1`, `MAP_ANONYMOUS = 1<<5`, `MAP_GUARD = 1<<6`.
+  Файловые mappings ещё не поддержаны; shared mappings имеют отдельный syscall.
 
 ## Структуры (repr(C), little-endian, x86_64)
 

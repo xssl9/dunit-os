@@ -42,6 +42,11 @@ pub enum Syscall {
     ThreadExit = 31,
     GetTid = 32,
     WaitEvent = 33,
+    Munmap = 34,
+    Mprotect = 35,
+    SharedVmCreate = 36,
+    SharedVmMap = 37,
+    SharedVmClose = 38,
 }
 
 impl Syscall {
@@ -82,6 +87,11 @@ impl Syscall {
             31 => Some(Syscall::ThreadExit),
             32 => Some(Syscall::GetTid),
             33 => Some(Syscall::WaitEvent),
+            34 => Some(Syscall::Munmap),
+            35 => Some(Syscall::Mprotect),
+            36 => Some(Syscall::SharedVmCreate),
+            37 => Some(Syscall::SharedVmMap),
+            38 => Some(Syscall::SharedVmClose),
             _ => None,
         }
     }
@@ -491,6 +501,11 @@ pub extern "C" fn syscall_handler(
         Syscall::ThreadExit => sys_exit(arg0 as i32),
         Syscall::GetTid => crate::process::current_tid().map(|tid| tid.0 as i64).unwrap_or(0),
         Syscall::WaitEvent => sys_wait_event(arg0),
+        Syscall::Munmap => sys_munmap(arg0 as usize, arg1 as usize),
+        Syscall::Mprotect => sys_mprotect(arg0 as usize, arg1 as usize, arg2 as u32),
+        Syscall::SharedVmCreate => sys_shared_vm_create(arg0 as usize),
+        Syscall::SharedVmMap => sys_shared_vm_map(arg0, arg1 as usize, arg2 as u32),
+        Syscall::SharedVmClose => sys_shared_vm_close(arg0),
     }
 }
 
@@ -830,13 +845,15 @@ fn sys_mmap(addr: usize, length: usize, prot: u32, flags: u32) -> i64 {
     const PROT_EXEC: u32 = 1 << 2;
     const MAP_PRIVATE: u32 = 1 << 1;
     const MAP_ANONYMOUS: u32 = 1 << 5;
+    const MAP_GUARD: u32 = 1 << 6;
 
     if length == 0 {
         return EINVAL;
     }
     if prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0
-        || flags & !(MAP_PRIVATE | MAP_ANONYMOUS) != 0
+        || flags & !(MAP_PRIVATE | MAP_ANONYMOUS | MAP_GUARD) != 0
         || flags & (MAP_PRIVATE | MAP_ANONYMOUS) != (MAP_PRIVATE | MAP_ANONYMOUS)
+        || prot & (PROT_WRITE | PROT_EXEC) == (PROT_WRITE | PROT_EXEC)
     {
         return EINVAL;
     }
@@ -846,12 +863,65 @@ fn sys_mmap(addr: usize, length: usize, prot: u32, flags: u32) -> i64 {
 
     match crate::process::current_process_mut() {
         Some(process) => {
-            match process.map_anonymous(addr, length, prot & PROT_WRITE != 0, prot & PROT_EXEC != 0)
+            match process.map_anonymous(
+                addr, length, prot & PROT_WRITE != 0, prot & PROT_EXEC != 0,
+                flags & MAP_GUARD != 0, prot != 0,
+            )
             {
                 Ok(mapped) => mapped as i64,
                 Err(error) => process_error_to_errno(error),
             }
         }
+        None => EINVAL,
+    }
+}
+
+fn sys_munmap(addr: usize, length: usize) -> i64 {
+    match crate::process::current_process_mut() {
+        Some(process) => process.unmap_range(addr, length)
+            .map(|_| 0).unwrap_or_else(process_error_to_errno),
+        None => EINVAL,
+    }
+}
+
+fn sys_mprotect(addr: usize, length: usize, prot: u32) -> i64 {
+    const PROT_READ: u32 = 1;
+    const PROT_WRITE: u32 = 2;
+    const PROT_EXEC: u32 = 4;
+    if prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0
+        || prot & (PROT_WRITE | PROT_EXEC) == (PROT_WRITE | PROT_EXEC)
+    {
+        return EINVAL;
+    }
+    match crate::process::current_process_mut() {
+        Some(process) => process.protect_range(
+            addr, length, prot & PROT_WRITE != 0, prot & PROT_EXEC != 0, prot != 0,
+        ).map(|_| 0).unwrap_or_else(process_error_to_errno),
+        None => EINVAL,
+    }
+}
+
+fn sys_shared_vm_create(length: usize) -> i64 {
+    match crate::process::current_process_mut() {
+        Some(process) => process.create_shared_vm(length)
+            .map(|id| id as i64).unwrap_or_else(process_error_to_errno),
+        None => EINVAL,
+    }
+}
+
+fn sys_shared_vm_map(id: u64, addr: usize, prot: u32) -> i64 {
+    if prot != 1 && prot != 3 { return EINVAL; }
+    match crate::process::current_process_mut() {
+        Some(process) => process.map_shared_vm(id, addr, prot & 2 != 0)
+            .map(|mapped| mapped as i64).unwrap_or_else(process_error_to_errno),
+        None => EINVAL,
+    }
+}
+
+fn sys_shared_vm_close(id: u64) -> i64 {
+    match crate::process::current_process_mut() {
+        Some(process) => process.close_shared_vm(id)
+            .map(|_| 0).unwrap_or_else(process_error_to_errno),
         None => EINVAL,
     }
 }
