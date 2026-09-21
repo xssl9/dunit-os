@@ -71,16 +71,6 @@ fn wait_faulted(pid: u32, label: &str) {
     }
 }
 
-fn expect_wait_would_block(pid: u32, label: &str) {
-    let mut status = libdunit::WaitStatus::empty();
-    if libdunit::wait(pid, &mut status) != libdunit::EAGAIN {
-        fail(label, 24);
-    }
-    if status.kind != libdunit::WAIT_KIND_EMPTY || status.code != 0 {
-        fail(label, 25);
-    }
-}
-
 fn wait_exited_or_blocked(pid: u32, code: i32, label: &str) -> bool {
     let mut status = libdunit::WaitStatus::empty();
     let waited = libdunit::wait(pid, &mut status);
@@ -248,13 +238,14 @@ fn exercise_resumable_roundtrip() {
     }
     let child = child as u32;
 
-    expect_wait_would_block(child, "resumable early wait");
-    if libdunit::yield_now() != 0 {
-        fail("yield to resumable child A", 41);
-    }
-    libdunit::println("runtime_stress: parent after child A");
-    if !wait_exited_or_blocked(child, 7, "resumable mid wait") {
-        drive_until_exited(child, 7, "wait resumable child");
+    if !wait_exited_or_blocked(child, 7, "resumable early wait") {
+        if libdunit::yield_now() != 0 {
+            fail("yield to resumable child A", 41);
+        }
+        libdunit::println("runtime_stress: parent after child A");
+        if !wait_exited_or_blocked(child, 7, "resumable mid wait") {
+            drive_until_exited(child, 7, "wait resumable child");
+        }
     }
     libdunit::println("runtime_stress: resumable OK");
 }
@@ -283,11 +274,16 @@ fn exercise_ipc_roundtrip() {
     }
 
     let mut pong = [0u8; 16];
-    let pong_len = libdunit::ipc_recv(&mut pong);
+    let mut pong_len = libdunit::EAGAIN;
+    for _ in 0..32 {
+        pong_len = libdunit::ipc_recv(&mut pong);
+        if pong_len != libdunit::EAGAIN { break; }
+        let _ = libdunit::yield_now();
+    }
     if pong_len != 4 || &pong[..4] != b"pong" {
         fail("ipc recv pong", 54);
     }
-    wait_exited(child, 0, "wait ipc_child");
+    drive_until_exited(child, 0, "wait ipc_child");
     if libdunit::ipc_recv(&mut empty) != libdunit::EAGAIN {
         fail("ipc queue not empty", 55);
     }
@@ -303,11 +299,12 @@ fn exercise_repeated_spawn_wait() {
             fail("spawn elf_demo", 60);
         }
         let child = child as u32;
-        expect_wait_would_block(child, "elf_demo early wait");
-        if libdunit::yield_now() != 0 {
-            fail("yield elf_demo", 61);
+        if !wait_exited_or_blocked(child, 0, "elf_demo early wait") {
+            if libdunit::yield_now() != 0 {
+                fail("yield elf_demo", 61);
+            }
+            drive_until_exited(child, 0, "wait elf_demo");
         }
-        wait_exited(child, 0, "wait elf_demo");
         round += 1;
     }
     libdunit::println("runtime_stress: repeated spawn OK");
@@ -315,7 +312,7 @@ fn exercise_repeated_spawn_wait() {
 
 fn exercise_kill_prepared_child() {
     libdunit::println("runtime_stress: kill start");
-    let child = libdunit::spawn("elf_demo");
+    let child = libdunit::spawn("kill_target");
     if child < 0 {
         fail("spawn child for kill", 65);
     }

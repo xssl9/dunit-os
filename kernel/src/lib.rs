@@ -9,6 +9,7 @@ extern crate std;
 pub mod allocator;
 pub mod apps;
 pub mod command;
+pub mod clock;
 pub mod cpu;
 pub mod dpkg;
 pub mod drivers;
@@ -487,7 +488,7 @@ pub extern "C" fn screen_log_c(text: *const u8, is_error: bool) {
 /// Report the *measured* context-switch capability instead of a hardcoded
 /// caveat. Cooperative context switching (CPU-context save/restore driven by
 /// `yield`/`wait`) is real and exercised by the userspace runtime; timer-driven
-/// preemption is an experimental hook that is off by default.
+/// preemption is enabled for the UP runtime.
 fn report_context_switch_state(screen_log: &impl Fn(&str, bool)) {
     screen_log(
         "[ OK ] Scheduler: cooperative context switch ready (save/restore + yield)",
@@ -495,7 +496,7 @@ fn report_context_switch_state(screen_log: &impl Fn(&str, bool)) {
     );
     if process::preemption_enabled() {
         screen_log(
-            "[ OK ] Scheduler: timer preemption enabled (experimental)",
+            "[ OK ] Scheduler: timer preemption enabled (round-robin, FPU/SSE saved)",
             false,
         );
     } else {
@@ -769,12 +770,8 @@ pub extern "C" fn kernel_main(
 
     screen_log("[ .. ] Configuring interrupt handlers", false);
 
-    unsafe {
-        // Program PIT channel 0 at ~100 Hz (divisor = 1193182 / 100 = 11931)
-        hal::hal_outb(0x43, 0x36); // ch0, lo/hi byte, mode 3 square wave, binary
-        hal::hal_outb(0x40, (11931_u16 & 0xFF) as u8);
-        hal::hal_outb(0x40, (11931_u16 >> 8) as u8);
-    }
+    clock::init_pit();
+    screen_log("[ OK ] Clocksource: PIT monotonic (100 Hz)", false);
 
     if terminal_mode == 0 {
         unsafe {
@@ -801,9 +798,7 @@ pub extern "C" fn kernel_main(
 
     #[cfg(feature = "boot-smoke-tests")]
     {
-        // Timer preemption proof (M1). Must run AFTER the PIT/IRQ0 are live,
-        // otherwise no timer tick can fire. Enables preemption only for this one
-        // exec, then restores the cooperative default.
+        // Default-on preemption and SSE proof (M1). IRQ0 must be live.
         screen_log("[ .. ] Running timer preemption smoke test", false);
         if command::run_preemption_smoke() {
             screen_log("[ OK ] Timer preemption smoke passed", false);

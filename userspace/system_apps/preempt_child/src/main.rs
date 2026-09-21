@@ -1,7 +1,6 @@
 #![no_std]
 #![no_main]
 
-use core::hint::black_box;
 use core::panic::PanicInfo;
 
 // Pure CPU-bound work: enough integer iterations that, at ~100 Hz, several
@@ -22,13 +21,26 @@ fn panic(_: &PanicInfo) -> ! {
 }
 
 fn spin(iters: u64) {
-    let mut acc: u64 = 0;
-    let mut i: u64 = 0;
-    while i < iters {
-        acc = black_box(acc.wrapping_mul(6364136223846793005).wrapping_add(i));
-        i += 1;
+    // Keep a distinct XMM value live across timer interrupts and switches.
+    let pattern = [0x5au8; 16];
+    let mask: u32;
+    unsafe {
+        core::arch::asm!(
+            "movdqu xmm0, [{pattern}]",
+            "mov rcx, {count}",
+            "xor rdx, rdx",
+            "2: imul rdx, rdx, 33",
+            "add rdx, rcx",
+            "dec rcx",
+            "jnz 2b",
+            "pcmpeqb xmm0, [{pattern}]",
+            "pmovmskb eax, xmm0",
+            pattern = in(reg) pattern.as_ptr(), count = in(reg) iters,
+            lateout("eax") mask, out("rcx") _, out("rdx") _, out("xmm0") _,
+            options(nostack),
+        );
     }
-    black_box(acc);
+    if mask != 0xffff { libdunit::exit(1); }
 }
 
 #[no_mangle]

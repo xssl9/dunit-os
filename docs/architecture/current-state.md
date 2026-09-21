@@ -56,9 +56,9 @@
 
 | Возможность | Статус | Признак / примечание |
 |---|---|---|
-| Кооперативная основа планировщика | ✅ | `[SCHED] foundation init: cooperative only, timer-preemption=off smp=off` |
+| UP round-robin планировщик | ✅ | `[SCHED] UP round-robin init: timer-preemption=on fpu=fxsave smp=off` |
 | Context switch (save/restore + `yield`) | ✅ | `Scheduler: cooperative context switch ready` |
-| Таймерное вытеснение (preemption) | 🟡 | механизм **доказан**: `[PREEMPT-TEST] OK preempts=N` — CPU-bound child вытеснен без `yield`. **Выключено по умолчанию** в обычной работе (`timer preemption off`); включается только на время smoke-хука. Сохраняются только GPR, не FPU/SSE |
+| Таймерное вытеснение (preemption) | ✅ | включено по умолчанию; `[PREEMPT-TEST] OK preempts=N` проверяет CPU-bound parent/child без `yield` и сохранность разных XMM значений. FXSAVE/FXRSTOR сохраняет x87/MMX/SSE (без AVX). |
 | SMP / многоядерность | ⛔ | `smp=off`; поднимается один CPU |
 | Загрузка ELF и запуск процесса | ✅ | `[EXEC] loading /app/runtime_stress`, `[ELF-TEST] userspace app started` |
 | `spawn` дочернего процесса | ✅ | `[SPAWN] ready pid=5 path=/app/resumable_child execution=not-started` |
@@ -68,12 +68,10 @@
 | Обработка user-fault (page fault) | ✅ | `[USER-FAULT] pid=11 reason=page-fault … err=0x4`, `[WAIT] pid=11 kind=1 code=-14` |
 | Потоки / TLS / futex | ⛔ | не реализованы (задачи M1) |
 
-Профиль исполнения в обычной работе: **один активный userspace-процесс за раз**,
-кооперативная передача управления. Таймерное вытеснение доказано рабочим
-(`[PREEMPT-TEST] OK`: CPU-bound child вытеснен без `yield`), но по умолчанию
-остаётся выключенным — включать его глобально нельзя без риска сломать
-кооперативный контракт, на который опираются встроенные тесты (`runtime_stress`),
-и без сохранения FPU/SSE-состояния (пока сохраняются только GPR).
+Профиль исполнения: UP round-robin с PIT (~100 Гц), один процесс исполняется
+в каждый момент времени. Состояние x87/MMX/SSE сохраняется отдельно для каждого
+процесса; AVX/XSAVE пока не поддержаны. `clock.rs` предоставляет монотонные
+тики/наносекунды и deadline. Threads, blocking waits и SMP остаются задачами M1.
 
 ## IPC
 

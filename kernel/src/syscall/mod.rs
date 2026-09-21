@@ -1323,14 +1323,8 @@ fn sys_sleep(ms: u64) -> i64 {
         return 0;
     }
 
-    let hz = crate::interrupts::TIMER_HZ;
-    // Round up to at least one tick so short sleeps still wait. Saturating
-    // math avoids the `ms * 1000` overflow of the old busy-wait.
-    let wait_ticks = ms.saturating_mul(hz).saturating_add(999) / 1000;
-    let wait_ticks = wait_ticks.max(1);
-
-    let start = crate::interrupts::timer_ticks();
-    let deadline = start.saturating_add(wait_ticks);
+    let deadline = crate::clock::Deadline::after_ms(ms);
+    let wait_ticks = ms.saturating_mul(crate::clock::TICKS_PER_SECOND).saturating_add(999) / 1000;
 
     // The timer IRQ only advances ticks while interrupts are enabled. Enable
     // them for the wait, then restore the caller's prior IF state.
@@ -1342,7 +1336,7 @@ fn sys_sleep(ms: u64) -> i64 {
 
     // Bound the spin so a stalled timer can never hang the kernel forever.
     let mut guard: u64 = wait_ticks.saturating_mul(20_000_000).max(20_000_000);
-    while crate::interrupts::timer_ticks() < deadline {
+    while !deadline.expired() {
         unsafe {
             core::arch::asm!("pause", options(nomem, nostack));
         }

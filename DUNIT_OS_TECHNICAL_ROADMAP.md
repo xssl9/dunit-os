@@ -28,7 +28,7 @@ Dunit уже больше, чем boot-screen: она загружается ч�
 
 Однако это ещё не production desktop OS:
 
-- планирование кооперативное; timer preemption выключен по умолчанию;
+- UP round-robin включён по умолчанию (M1 update от 21 сентября 2026); threads/TLS и blocking waits ещё отсутствуют;
 - нет threads/TLS/signals/futex-подобного ожидания и полноценного process `exec`/`fork`;
 - GUI shell, compositor, WM, layout, decorations и системные панели живут в ядре (`kernel/src/ui_loop.rs`, 4458 строк);
 - userspace `display_server` и `video_driver` — неинтегрированные прототипы, отсутствующие в `USERSPACE_APPS` Makefile;
@@ -119,7 +119,7 @@ root@dunit:~#
 ### 4.3 Планировщик, threads, TLS и синхронизация
 
 - **Реализовано:** PID ready queue, saved CPU context, transitions Ready/Running/Blocked/Dead/Reaped, `yield`, parent/child wait/reap.
-- **Прототип:** scheduler прямо логирует `cooperative only, timer-preemption=off smp=off` (`kernel/src/process/scheduler.rs:80`). PIT tick и experimental save/schedule hook есть, но `PREEMPTION_ENABLED=false` (`kernel/src/process/mod.rs:41`, `:1278`).
+- **Реализовано после исходного среза:** UP round-robin включён по умолчанию; x87/MMX/SSE сохраняются через FXSAVE/FXRSTOR, PIT предоставляет monotonic clock/deadline abstraction. QEMU smoke проверяет вытеснение и XMM isolation.
 - **Не реализовано:** kernel threads как полноценные schedulable entities, userspace threads, TLS register setup, per-thread kernel stack/FPU state, blocking wait queues, priorities, time accounting, SMP.
 - **Следствие:** GUI Server как настоящий long-running userspace service и musl pthreads пока нельзя считать надёжными.
 
@@ -346,8 +346,8 @@ Dunit DWM — отдельный policy shell поверх GUI Server:
 
 ### M1 — kernel runtime prerequisites (must-have, перед GUI migration)
 
-- [x] Доказать, что preemptive round-robin на PIT реально вытесняет CPU-bound child без `yield` (smoke-хук `[PREEMPT-TEST] OK`, вытеснение off по умолчанию, сохраняются только GPR).
-- [ ] Включить round-robin по умолчанию, сохранять FPU/SSE-состояние и добавить abstraction clocksource/timer.
+- [x] Доказать, что preemptive round-robin на PIT реально вытесняет CPU-bound child без `yield` (smoke-хук `[PREEMPT-TEST] OK`).
+- [x] Включить round-robin по умолчанию, сохранять FPU/SSE-состояние и добавить abstraction clocksource/timer. Проверено QEMU boot smoke: CPU-bound parent/child с разными XMM значениями, `runtime_stress`, `ipc_parent`.
 - [ ] Сделать schedulable threads: TID, per-thread context/kernel stack/FPU state, process-owned address space.
 - [ ] Добавить wait queues и blocking sleep/IPC/event; убрать polling GUI apps.
 - [ ] Реализовать `munmap`, `mprotect`, shared VM object, guard pages и correct teardown.

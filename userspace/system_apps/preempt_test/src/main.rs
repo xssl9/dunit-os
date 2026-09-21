@@ -1,7 +1,6 @@
 #![no_std]
 #![no_main]
 
-use core::hint::black_box;
 use core::panic::PanicInfo;
 
 // M1 preemption proof (userspace side).
@@ -37,13 +36,25 @@ fn fail(message: &str) -> ! {
 }
 
 fn spin(iters: u64) {
-    let mut acc: u64 = 0;
-    let mut i: u64 = 0;
-    while i < iters {
-        acc = black_box(acc.wrapping_mul(6364136223846793005).wrapping_add(i));
-        i += 1;
+    let pattern = [0xa5u8; 16];
+    let mask: u32;
+    unsafe {
+        core::arch::asm!(
+            "movdqu xmm0, [{pattern}]",
+            "mov rcx, {count}",
+            "xor rdx, rdx",
+            "2: imul rdx, rdx, 33",
+            "add rdx, rcx",
+            "dec rcx",
+            "jnz 2b",
+            "pcmpeqb xmm0, [{pattern}]",
+            "pmovmskb eax, xmm0",
+            pattern = in(reg) pattern.as_ptr(), count = in(reg) iters,
+            lateout("eax") mask, out("rcx") _, out("rdx") _, out("xmm0") _,
+            options(nostack),
+        );
     }
-    black_box(acc);
+    if mask != 0xffff { fail("SSE state corrupted"); }
 }
 
 /// Non-blocking wait: returns true once the child has exited with `code`.

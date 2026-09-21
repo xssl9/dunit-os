@@ -38,6 +38,7 @@ static FAULT_PF_BYTES: &[u8] = include_bytes!("../../../build/userspace/fault_pf
 static FAULT_UD_BYTES: &[u8] = include_bytes!("../../../build/userspace/fault_ud");
 static PREEMPT_CHILD_BYTES: &[u8] = include_bytes!("../../../build/userspace/preempt_child");
 static PREEMPT_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/preempt_test");
+static KILL_TARGET_BYTES: &[u8] = include_bytes!("../../../build/userspace/kill_target");
 
 pub struct AssetEntry {
     pub path: &'static str,
@@ -625,6 +626,10 @@ pub fn init() -> Result<()> {
         let mut preempt_test = Vec::new();
         preempt_test.extend_from_slice(PREEMPT_TEST_BYTES);
         ROOT_MEMFS.add_file("/app/preempt_test", preempt_test);
+
+        let mut kill_target = Vec::new();
+        kill_target.extend_from_slice(KILL_TARGET_BYTES);
+        ROOT_MEMFS.add_file("/app/kill_target", kill_target);
 
         vfs.mount("/", &mut ROOT_MEMFS)?;
         serial_log("[MEMFS] mounted as /\r\n");

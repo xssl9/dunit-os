@@ -65,7 +65,12 @@ pub extern "C" fn _start() -> ! {
     }
 
     let mut pong = [0u8; 16];
-    let pong_len = libdunit::ipc_recv(&mut pong);
+    let mut pong_len = libdunit::EAGAIN;
+    for _ in 0..32 {
+        pong_len = libdunit::ipc_recv(&mut pong);
+        if pong_len != libdunit::EAGAIN { break; }
+        let _ = libdunit::yield_now();
+    }
     if pong_len != 4 || &pong[..4] != b"pong" {
         libdunit::println("ipc_parent: expected pong");
         libdunit::exit(4);
@@ -73,7 +78,12 @@ pub extern "C" fn _start() -> ! {
     libdunit::println("ipc_parent: got pong");
 
     let mut status = libdunit::WaitStatus::empty();
-    let waited = libdunit::wait(child as u32, &mut status);
+    let mut waited = libdunit::EAGAIN;
+    for _ in 0..32 {
+        waited = libdunit::wait(child as u32, &mut status);
+        if waited != libdunit::EAGAIN { break; }
+        let _ = libdunit::yield_now();
+    }
     if waited != child {
         libdunit::println("ipc_parent: wait failed");
         libdunit::exit(5);

@@ -758,7 +758,7 @@ fn cmd_ps(out: &mut dyn ShellSink, aux: bool) {
 
 fn cmd_uptime(out: &mut dyn ShellSink) {
     let ticks = crate::interrupts::timer_ticks();
-    let hz = crate::interrupts::TIMER_HZ;
+    let hz = crate::clock::TICKS_PER_SECOND;
     let total_secs = ticks / hz;
     let hours = total_secs / 3600;
     let minutes = (total_secs % 3600) / 60;

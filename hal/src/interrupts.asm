@@ -57,6 +57,7 @@ ISR_NOERRCODE i
 
 extern interrupt_handler
 extern syscall_escape_user_fault
+extern user_fpu_state
 
 isr_common_stub:
     push rax
@@ -74,18 +75,32 @@ isr_common_stub:
     push r13
     push r14
     push r15
+    ; Save SIMD before Rust/C interrupt handling can touch XMM registers.
+    ; The saved CS is at +144 after the 15 general-purpose pushes.
+    test byte [rsp + 144], 3
+    jz .no_user_fpu_save
+    mov rax, [rel user_fpu_state]
+    test rax, rax
+    jz .no_user_fpu_save
+    fxsave [rax]
+.no_user_fpu_save:
     
     mov rdi, rsp
     mov rax, rsp
     and rsp, -16
-    sub rsp, 16
-    mov [rsp], rax
+    ; Keep the interrupted kernel's SIMD state too. The user copy above is
+    ; durable across a scheduler escape; this stack copy protects normal IRQ
+    ; returns even if the handler itself uses XMM registers.
+    sub rsp, 528
+    mov [rsp + 512], rax
+    fxsave [rsp]
     call interrupt_handler
     cmp rax, 1
     je .escape_user_fault
     cmp rax, 2
     je .escape_user_fault
-    mov rsp, [rsp]
+    fxrstor [rsp]
+    mov rsp, [rsp + 512]
     
     pop r15
     pop r14

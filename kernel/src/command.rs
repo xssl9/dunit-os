@@ -185,23 +185,15 @@ pub fn run_foreground_exec(
     Ok((normalized, exit))
 }
 
-/// M1 preemption proof. Enables timer preemption for exactly one foreground
-/// exec of `preempt_test`, which spawns a CPU-bound child and never yields. If
-/// the child runs to completion (exit code 0 from the parent) and the kernel
-/// committed at least one timer-driven context switch, preemption is proven to
-/// work. Preemption is disabled again before returning, so the default
-/// cooperative contract (relied on by runtime_stress) is untouched.
+/// Prove default-on preemption and SSE isolation with CPU-bound parent/child.
 #[cfg(feature = "boot-smoke-tests")]
 pub fn run_preemption_smoke() -> bool {
     crate::serial_write("[PREEMPT-TEST] START\r\n");
 
     process::reset_preemption_count();
-    process::set_preemption_enabled(true);
 
     let mut input = NoExecInput;
     let result = run_foreground_exec("/", "preempt_test", ProcessOutputSink::SerialOnly, &mut input);
-
-    process::set_preemption_enabled(false);
 
     let preempts = process::preemption_count();
 

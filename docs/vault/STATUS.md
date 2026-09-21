@@ -1,10 +1,10 @@
 # STATUS
 
-> Проверенный snapshot Dunit OS / Green Tea Kernel. Последнее обновление: 2026-09-20.
+> Проверенный snapshot Dunit OS / Green Tea Kernel. Последнее обновление: 2026-09-21.
 
 ## Краткое резюме
 
-Dunit OS уже является ранним вертикальным прототипом самостоятельной ОС, а не только boot demo. Она загружается через BIOS/UEFI, имеет ring 3 ELF userspace, процессы и системные вызовы, VFS/MemFS, block devices, DunitFS v1, Terminal Mode и функциональный legacy GUI Mode. Timer preemption уже доказана CPU-bound тестом без `yield`, но остаётся gated/default-off и пока сохраняет только GPR. Основные ограничения — отсутствие production preemptive scheduler, threads/TLS и полноценной VM, in-kernel desktop architecture, embedded root/userspace, слабая crash consistency DunitFS и отсутствие packet networking.
+Dunit OS уже является ранним вертикальным прототипом самостоятельной ОС, а не только boot demo. Она загружается через BIOS/UEFI, имеет ring 3 ELF userspace, процессы и системные вызовы, VFS/MemFS, block devices, DunitFS v1, Terminal Mode и функциональный legacy GUI Mode. UP round-robin включён по умолчанию; FXSAVE/FXRSTOR сохраняет x87/SSE состояние процессов, а PIT предоставляет monotonic clock/deadline. Основные ограничения — отсутствие schedulable threads/TLS и полноценной VM, in-kernel desktop architecture, embedded root/userspace, слабая crash consistency DunitFS и отсутствие packet networking.
 
 ## Статус подсистем
 
@@ -13,7 +13,7 @@ Dunit OS уже является ранним вертикальным прот�
 | Limine / BIOS / UEFI | WORKING | ISO и disk boot проверены; оба firmware paths работают |
 | HAL / interrupts | WORKING FOUNDATION | GDT, IDT, syscall entry, PIT/PIC, keyboard/mouse; APIC/SMP later |
 | PMM / VMM / heap | PARTIAL | address spaces и mapping foundation работают; нужны unmap/protect/shared objects/guard pages |
-| Scheduler | PARTIAL / PROVEN EXPERIMENT | CPU-bound timer preemption доказана в gated smoke; default-off, GPR-only, нет schedulable threads/FPU state |
+| Scheduler | PARTIAL | UP round-robin default-on; CPU-bound preemption и XMM isolation проверены gated smoke; нет schedulable threads/AVX/SMP |
 | Processes | PARTIAL | PID, parent/child, fd/cwd, exit/fault/wait; нет production exec/spawn/thread model |
 | ELF userspace | WORKING FOUNDATION | embedded ELF applications запускаются из `/app`; installed disk loading не завершён |
 | Syscalls / user copy | WORKING FOUNDATION | register ABI и mapped-range checks работают; ABI ещё не стабилизирован/versioned |

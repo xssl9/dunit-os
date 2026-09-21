@@ -24,19 +24,10 @@ pub struct InterruptFrame {
     pub ss: u64,
 }
 
-use core::sync::atomic::{AtomicU64, Ordering};
-
-/// PIT ticks since boot. IRQ0 is programmed for ~100 Hz (see the boot log),
-/// so this is a real, monotonic uptime source at ~10 ms resolution.
-static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
-
-/// PIT frequency in Hz (matches the IRQ0 programming in the HAL).
-pub const TIMER_HZ: u64 = 100;
-
-/// Raw PIT tick count since boot.
+/// Compatibility entry point for existing uptime consumers.
 #[inline]
 pub fn timer_ticks() -> u64 {
-    TIMER_TICKS.load(Ordering::Relaxed)
+    crate::clock::monotonic_ticks()
 }
 
 pub fn handle_timer(frame: &InterruptFrame) {
@@ -44,9 +35,9 @@ pub fn handle_timer(frame: &InterruptFrame) {
         core::arch::asm!("out dx, al", in("dx") 0x20u16, in("al") 0x20u8, options(nomem, nostack));
     }
 
-    TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
+    crate::clock::on_tick();
 
-    // Only attempt preemption from userspace with an active smoke context
+    // Only preempt user mode while the run_user_context escape frame is active.
     if (frame.cs & 3) != 3 {
         return;
     }

@@ -6,6 +6,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use core::cell::UnsafeCell;
 
 use crate::memory::vmm::{ActiveAddressSpace, AddressSpace};
 use crate::sync::InterruptGuard;
@@ -37,12 +38,8 @@ static PREEMPT_SWITCH_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// `timer_preempt_save_and_schedule` actually hands the CPU to another process,
 /// so a non-zero value is proof that preemption fired (see M1 [PREEMPT-TEST]).
 static PREEMPTION_COUNT: AtomicU64 = AtomicU64::new(0);
-// Timer-driven preemption is experimental and OFF by default. The userspace
-// runtime contract (spawn/yield/wait) is cooperative: a spawned child stays
-// Ready until the parent explicitly yields. Letting the PIT run Ready children
-// out from under a parent breaks that contract (e.g. runtime_stress's
-// `expect_wait_would_block` checks). Opt in explicitly to experiment with it.
-static PREEMPTION_ENABLED: AtomicBool = AtomicBool::new(false);
+// UP round-robin is the default. A child may finish before its parent's first wait.
+static PREEMPTION_ENABLED: AtomicBool = AtomicBool::new(true);
 static mut TERMINAL_STDIN_BUFFER: [u8; 256] = [0; 256];
 static mut TERMINAL_STDIN_LEN: usize = 0;
 static mut TERMINAL_STDIN_READY: bool = false;
@@ -167,10 +164,32 @@ impl CpuContext {
     }
 }
 
+#[repr(C, align(16))]
+pub struct FpuState(UnsafeCell<[u8; 512]>);
+
+// On this UP kernel, the selected process alone owns its FPU buffer while
+// user mode runs. IRQs disable nesting before saving to the same buffer.
+unsafe impl Sync for FpuState {}
+
+impl FpuState {
+    pub const fn new() -> Self {
+        let mut bytes = [0; 512];
+        // FINIT defaults: x87 control word and MXCSR. The remaining registers
+        // start cleared, so each new process receives an independent state.
+        bytes[0] = 0x7f;
+        bytes[1] = 0x03;
+        bytes[24] = 0x80;
+        bytes[25] = 0x1f;
+        Self(UnsafeCell::new(bytes))
+    }
+}
+
 pub struct Process {
     pub pid: ProcessId,
     pub state: ProcessState,
     pub context: CpuContext,
+    /// 16-byte aligned legacy x87/MMX/SSE state (FXSAVE format).
+    pub fpu_state: FpuState,
     pub is_kernel: bool,
     pub cwd: String,
     pub status: Option<ProcessExitStatus>,
@@ -203,6 +222,7 @@ impl Process {
             pid,
             state: ProcessState::Ready,
             context: CpuContext::new(),
+            fpu_state: FpuState::new(),
             is_kernel,
             cwd: String::from("/"),
             status: None,
@@ -231,6 +251,7 @@ impl Process {
             pid,
             state: ProcessState::Ready,
             context: CpuContext::new(),
+            fpu_state: FpuState::new(),
             is_kernel: false,
             cwd: String::from("/"),
             status: None,
@@ -1269,8 +1290,7 @@ pub fn clear_preempt_switch() {
     PREEMPT_SWITCH_REQUESTED.store(false, Ordering::SeqCst);
 }
 
-/// Enable or disable experimental timer-driven preemption. Off by default so
-/// the cooperative userspace runtime contract holds deterministically.
+/// Runtime switch for diagnostics; normal operation is preemptive.
 pub fn set_preemption_enabled(enabled: bool) {
     PREEMPTION_ENABLED.store(enabled, Ordering::SeqCst);
 }
@@ -1424,7 +1444,9 @@ pub fn enter_user_process(pid: ProcessId) -> Result<ProcessExit, ProcessError> {
                 Some(current) => match current.install_syscall_stack() {
                     Ok(()) => match current.switch_to_address_space() {
                         Ok(()) => {
+                            crate::hal::set_user_fpu_state(current.fpu_state.0.get().cast::<u8>());
                             crate::hal::run_user_context(&context as *const CpuContext);
+                            crate::hal::set_user_fpu_state(core::ptr::null_mut());
                             Ok(())
                         }
                         Err(error) => Err(error),

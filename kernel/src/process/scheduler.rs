@@ -80,7 +80,7 @@ static SCHEDULER: IrqSafeSpinLock<Option<Scheduler>> = IrqSafeSpinLock::new(None
 pub fn init() {
     *SCHEDULER.lock() = Some(Scheduler::new());
     crate::memory::serial_write(
-        "[SCHED] foundation init: cooperative only, timer-preemption=off smp=off\r\n",
+        "[SCHED] UP round-robin init: timer-preemption=on fpu=fxsave smp=off\r\n",
     );
 }
 

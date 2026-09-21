@@ -24,6 +24,7 @@ extern "C" {
     pub fn run_user_syscall_smoke(entry: u64, stack_top: u64);
     pub fn run_user_process(entry: u64, stack_top: u64, argc: u64, argv: u64, envp: u64);
     pub fn run_user_context(context: *const crate::process::CpuContext);
+    pub fn set_user_fpu_state(state: *mut u8);
 }
 
 #[no_mangle]

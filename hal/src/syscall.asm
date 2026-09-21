@@ -29,12 +29,18 @@ syscall_entry:
     mov [rel syscall_saved_r13], r13
     mov [rel syscall_saved_r14], r14
     mov [rel syscall_saved_r15], r15
+    mov rax, [rel user_fpu_state]
+    test rax, rax
+    jz .fpu_saved
+    fxsave [rax]
+.fpu_saved:
     mov rsp, [rel syscall_selected_stack_top]
     test rsp, rsp
     jnz .stack_selected
     lea rsp, [rel syscall_stack_top]
 .stack_selected:
     and rsp, -16
+    mov rax, [rel syscall_saved_rax]
 
     push rcx
     push r11
@@ -99,7 +105,19 @@ syscall_entry:
     push r11
     push qword USER_CODE_SELECTOR
     push rcx
+    push rax
+    mov rax, [rel user_fpu_state]
+    test rax, rax
+    jz .fpu_restored
+    fxrstor [rax]
+.fpu_restored:
+    pop rax
     iretq
+
+global set_user_fpu_state
+set_user_fpu_state:
+    mov [rel user_fpu_state], rdi
+    ret
 
 global syscall_init
 syscall_init:
@@ -311,6 +329,11 @@ run_user_context:
     mov [rel syscall_smoke_kernel_rsp], rsp
     mov qword [rel syscall_smoke_active], 1
     mov rbx, rdi
+    mov rax, [rel user_fpu_state]
+    test rax, rax
+    jz .no_user_fpu
+    fxrstor [rax]
+.no_user_fpu:
 
     mov rax, [rbx + 0]
     mov rcx, [rbx + 16]
@@ -349,6 +372,9 @@ syscall_selected_stack_top:
 syscall_smoke_kernel_rsp:
     resq 1
 syscall_smoke_active:
+    resq 1
+global user_fpu_state
+user_fpu_state:
     resq 1
 syscall_saved_rax:
     resq 1
