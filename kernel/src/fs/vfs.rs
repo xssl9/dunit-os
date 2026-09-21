@@ -45,6 +45,7 @@ static VM_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/vm_test")
 static VM_PEER_BYTES: &[u8] = include_bytes!("../../../build/userspace/vm_peer");
 static VM_GUARD_FAULT_BYTES: &[u8] = include_bytes!("../../../build/userspace/vm_guard_fault");
 static VM_PROTECT_FAULT_BYTES: &[u8] = include_bytes!("../../../build/userspace/vm_protect_fault");
+static TLS_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/tls_test");
 
 pub struct AssetEntry {
     pub path: &'static str,
@@ -649,6 +650,7 @@ pub fn init() -> Result<()> {
         ROOT_MEMFS.add_file("/app/vm_peer", VM_PEER_BYTES.to_vec());
         ROOT_MEMFS.add_file("/app/vm_guard_fault", VM_GUARD_FAULT_BYTES.to_vec());
         ROOT_MEMFS.add_file("/app/vm_protect_fault", VM_PROTECT_FAULT_BYTES.to_vec());
+        ROOT_MEMFS.add_file("/app/tls_test", TLS_TEST_BYTES.to_vec());
 
         vfs.mount("/", &mut ROOT_MEMFS)?;
         serial_log("[MEMFS] mounted as /\r\n");

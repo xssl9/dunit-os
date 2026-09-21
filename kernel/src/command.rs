@@ -282,6 +282,22 @@ pub fn run_vm_smoke() -> bool {
     ok
 }
 
+#[cfg(feature = "boot-smoke-tests")]
+pub fn run_tls_smoke() -> bool {
+    crate::serial_write("[TLS-TEST] START\r\n");
+    let mut input = NoExecInput;
+    let result = run_foreground_exec("/", "tls_test", ProcessOutputSink::SerialOnly, &mut input);
+    let ok = match result {
+        Ok((_, exit)) => {
+            let _ = process::autoreap_process(exit.pid, "tls-smoke");
+            matches!(exit.status, process::ProcessExitStatus::Exited(0))
+        }
+        Err(_) => false,
+    };
+    crate::serial_write(if ok { "[TLS-TEST] OK\r\n" } else { "[TLS-TEST] FAIL\r\n" });
+    ok
+}
+
 fn serial_write_i32(value: i32) {
     if value < 0 {
         crate::serial_write("-");

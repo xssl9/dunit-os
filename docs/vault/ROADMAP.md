@@ -40,7 +40,7 @@ M7: E1000 -> netd -> IPv4/UDP/TCP/DHCP/DNS -> native sockets
 - [x] Schedulable userspace threads и thread lifecycle (TID, create/exit/nonblocking join, общий address space).
 - [x] Blocking timer/IPC wait queues и event wait вместо GUI polling (`[WAIT-TEST] OK`).
 - [x] `munmap`, `mprotect`, shared VM objects и guard pages (`[VM-TEST] OK`).
-- [ ] x86_64 `FS.base`/TLS contract.
+- [x] x86_64 `FS.base`/static `PT_TLS` contract (`[TLS-TEST] OK`).
 - [ ] `wait_on_word/wake` synchronization primitive.
 - [ ] Handle tables с rights и безопасным transfer.
 

@@ -98,6 +98,8 @@ fork`) строился поверх стабильного контракта, 
 | 36 | `shared_vm_create` | len: usize | object ID / `-errno` | ✅ zero-filled page frames; limit 16 MiB |
 | 37 | `shared_vm_map` | ID, addr (`0` = auto), prot: R or RW | addr / `-errno` | ✅ maps same frames into another process |
 | 38 | `shared_vm_close` | ID | 0 / `-errno` | ✅ releases creator reference; mappings retain object |
+| 39 | `set_thread_pointer` | user `FS.base`: u64 | 0 / `-errno` | ✅ per-TID, canonical userspace address or zero |
+| 40 | `get_thread_pointer` | — | hardware `FS.base` / `-errno` | ✅ reads IA32_FS_BASE |
 
 Anonymous `mmap` supports `MAP_GUARD` (bit 6): the returned usable range has one
 unmapped guard page on each side. `munmap` of the full usable range releases
@@ -114,7 +116,8 @@ are currently unprotected bearer IDs; rights-bearing handles remain M1 work.
 `thread_exit`; обычный `ret` приводит к fault только этого потока.
 `thread_join` удаляет завершённую запись TID и возвращает её `WaitStatus`.
 User stack остаётся собственностью вызывающей стороны и должен сохраняться до
-`join`; `detach`, TLS и blocking join ещё не определены. Вызов `kill_process`
+`join`; `detach` и blocking join ещё не определены. Kernel-owned static TLS
+освобождается при `join` или выходе процесса. Вызов `kill_process`
 на собственный PID из дополнительного потока пока возвращает `EINVAL`.
 
 ## Коды ошибок (errno)
@@ -247,11 +250,12 @@ rsp -> argc: u64
 
 - magic `\x7fELF`, class `ELFCLASS64` (2), data `ELFDATA2LSB` (1),
   machine `EM_X86_64` (0x3E), type `ET_EXEC` (2).
-- Загружаются только сегменты `PT_LOAD`. Флаги `PF_R/PF_W/PF_X` переносятся в
-  page flags с политикой W^X.
-- `PT_TLS`, `PT_GNU_RELRO`, `PT_INTERP`, `ET_DYN`/PIE, динамический линковщик —
-  **не поддерживаются**. Все бинарники static, non-PIE, с фиксированным load
-  bias.
+- `PT_LOAD` загружается с переносом `PF_R/PF_W/PF_X` в page flags и политикой W^X.
+- Один `PT_TLS` до 1 MiB создаёт x86_64 Variant II static TLS: `.tdata` копируется,
+  `.tbss` остаётся zero-filled, `FS:0` содержит self pointer. Новый TID получает
+  независимую копию initial image.
+- `PT_GNU_RELRO`, `PT_INTERP`, `ET_DYN`/PIE, dynamic TLS/DTV и динамический
+  линковщик не поддерживаются. Все бинарники static, non-PIE с фиксированным bias.
 
 ## Известные несоответствия «идеальному» ABI (долг для M6.3)
 
@@ -259,6 +263,7 @@ rsp -> argc: u64
   C-определения; сейчас номера продублированы вручную в `syscall/mod.rs` и
   `libdunit`.
 - Нет capability/handle-модели: raw framebuffer/input доступны любому процессу.
-- Нет `poll`/событий, `dup`/`pipe`, `seek`, часов, thread/TLS-примитивов.
+- Нет общего `poll`/handle events, `dup`/`pipe`, `seek`, realtime clocks,
+  dynamic TLS/DTV, detach и блокирующего join.
 - `receive_message` неблокирующий; блокирующего wait нет.
 - Auxiliary vector, page size, random seed при входе процесса отсутствуют.

@@ -1,0 +1,11 @@
+[package]
+name = "tls_test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libdunit = { path = "../../libdunit" }
+
+[[bin]]
+name = "tls_test"
+path = "src/main.rs"

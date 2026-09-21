@@ -16,7 +16,7 @@
 
 - Applications are embedded into current image/root, not loaded from normal installed filesystem.
 - Default-on UP timer preemption and schedulable userspace threads pass gated smoke tests; long-running independent services are not yet hardened.
-- Shared VM objects, blocking IPC event waits and guard pages exist; TLS, general events/poll and rights-bearing handles are still missing.
+- Shared VM objects, blocking IPC event waits, guard pages and static `PT_TLS` exist; dynamic TLS/DTV, general events/poll and rights-bearing handles are still missing.
 - Process entry/ABI is not yet frozen for musl/toolchain compatibility.
 - GUI services and shell/session are not yet ordinary supervised services.
 

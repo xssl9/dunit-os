@@ -47,7 +47,8 @@
     { "marker": "[PREEMPT-TEST] OK", "claim": "default-on timer preemption and XMM isolation for CPU-bound parent/child (M1)", "source": "kernel/src/command.rs" },
     { "marker": "[THREAD-TEST] OK", "claim": "schedulable TIDs, shared process address space, per-thread XMM and lifecycle", "source": "kernel/src/command.rs" },
     { "marker": "[WAIT-TEST] OK", "claim": "timer and IPC wait queues with blocked thread wakeup", "source": "kernel/src/command.rs" },
-    { "marker": "[VM-TEST] OK", "claim": "munmap/mprotect, shared VM frames, guard pages and frame reclamation", "source": "kernel/src/command.rs" }
+    { "marker": "[VM-TEST] OK", "claim": "munmap/mprotect, shared VM frames, guard pages and frame reclamation", "source": "kernel/src/command.rs" },
+    { "marker": "[TLS-TEST] OK", "claim": "FS.base thread pointer, PT_TLS initialization and per-thread TLS isolation", "source": "kernel/src/command.rs" }
   ],
   "forbidden": [
     { "marker": "[PANIC]", "why": "kernel panic (covers double-fault/invalid-TSS, which panic!)", "source": "kernel/src/lib.rs" },
@@ -56,6 +57,7 @@
     { "marker": "[PREEMPT-TEST] FAIL", "why": "timer preemption smoke did not observe a committed switch", "source": "kernel/src/command.rs" },
     { "marker": "[THREAD-TEST] FAIL", "why": "thread lifecycle or state isolation failed", "source": "kernel/src/command.rs" },
     { "marker": "[WAIT-TEST] FAIL", "why": "blocked sleep or IPC/event wakeup failed", "source": "kernel/src/command.rs" },
-    { "marker": "[VM-TEST] FAIL", "why": "VM mapping lifecycle failed", "source": "kernel/src/command.rs" }
+    { "marker": "[VM-TEST] FAIL", "why": "VM mapping lifecycle failed", "source": "kernel/src/command.rs" },
+    { "marker": "[TLS-TEST] FAIL", "why": "TLS initialization or thread isolation failed", "source": "kernel/src/command.rs" }
   ]
 }

@@ -119,6 +119,23 @@ set_user_fpu_state:
     mov [rel user_fpu_state], rdi
     ret
 
+global set_fs_base
+set_fs_base:
+    mov rax, rdi
+    mov rdx, rax
+    shr rdx, 32
+    mov ecx, 0xC0000100
+    wrmsr
+    ret
+
+global get_fs_base
+get_fs_base:
+    mov ecx, 0xC0000100
+    rdmsr
+    shl rdx, 32
+    or rax, rdx
+    ret
+
 global syscall_init
 syscall_init:
     ; EFER.SCE = enable SYSCALL/SYSRET instructions.

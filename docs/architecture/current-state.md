@@ -69,12 +69,13 @@
 | Schedulable user threads | ✅ | `[THREAD-TEST] OK`: TID, create/exit/nonblocking join, отдельные GPR/kernel stack/FXSAVE, общий PID/address space/fd table; thread fault не завершает процесс |
 | Wait queues / blocking sleep / IPC event | ✅ | `[WAIT-TEST] OK`: timeout, blocked sleep, wake при отправке IPC; GUI apps ждут событие без yield polling |
 | VM lifecycle | ✅ | `[VM-TEST] OK`: `munmap/mprotect`, W^X, guard fault, shared frame между процессами и освобождение после закрытия/exit |
-| TLS / futex | ⛔ | ещё не реализованы (следующие задачи M1) |
+| Static TLS | ✅ | `[TLS-TEST] OK`: `FS.base`, x86_64 Variant II TCB, initial `PT_TLS` `.tdata/.tbss`, изоляция main/threads |
+| Futex-like wait/wake | ⛔ | следующий пункт M1 |
 
 Профиль исполнения: UP round-robin с PIT (~100 Гц), один процесс исполняется
 в каждый момент времени. Состояние x87/MMX/SSE сохраняется отдельно для каждого
 потока; AVX/XSAVE пока не поддержаны. `clock.rs` предоставляет монотонные
-тики/наносекунды и deadline. TLS, универсальный event/handle wait и SMP остаются задачами M1.
+тики/наносекунды и deadline. Dynamic TLS/DTV, универсальный event/handle wait и SMP остаются будущими задачами.
 
 ## IPC
 

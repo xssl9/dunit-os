@@ -6,7 +6,7 @@
 
 ## Current boundary
 
-Dunit имеет process/address-space/kernel-stack foundation, spawn/yield/wait, basic IPC и schedulable userspace threads. UP round-robin включён по умолчанию; x87/SSE состояние сохраняется отдельно для каждого TID. Потоки делят process-owned address space и fd table, а GPR, kernel stack и FPU state имеют свои. Монотонное время и deadline доступны через `kernel/src/clock.rs` (источник PIT). Для нескольких надёжных long-running services ещё нужны TLS и blocking wait primitives.
+Dunit имеет process/address-space/kernel-stack foundation, spawn/yield/wait, basic IPC и schedulable userspace threads. UP round-robin включён по умолчанию; x87/SSE и static TLS/`FS.base` сохраняются отдельно для каждого TID. Потоки делят process-owned address space и fd table, а GPR, kernel stack, FPU и TLS state имеют свои. Монотонное время и deadline доступны через `kernel/src/clock.rs` (источник PIT). Для pthread synchronization ещё нужен atomic wait/wake primitive.
 
 ## Required work
 
@@ -15,7 +15,7 @@ Dunit имеет process/address-space/kernel-stack foundation, spawn/yield/wait
 - [x] Schedulable thread entity: TID, caller-provided user stack, per-thread kernel stack/registers/FXSAVE state and shared process address space; create/exit/nonblocking join.
 - [x] Wait queues, IPC event/deadline wait and blocking sleep; GUI apps no longer yield-poll (`[WAIT-TEST] OK`). Blocking raw input remains separate work.
 - [x] `munmap`, `mprotect`, shared VM objects, guard pages and frame teardown (`[VM-TEST] OK`).
-- [ ] x86_64 thread pointer / `FS.base`, initial `PT_TLS` image and context-switch preservation.
+- [x] x86_64 thread pointer / `FS.base`, initial static `PT_TLS` image and context-switch preservation (`[TLS-TEST] OK`).
 - [ ] Atomic `wait_on_word/wake` with timeout and no lost wakeups.
 - [ ] Per-process handle table with rights such as read/write/map/signal/transfer/display/raw-network.
 - [ ] Replace unsafe global mutable ownership with explicit locks/services.

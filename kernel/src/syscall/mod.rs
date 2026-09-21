@@ -47,6 +47,8 @@ pub enum Syscall {
     SharedVmCreate = 36,
     SharedVmMap = 37,
     SharedVmClose = 38,
+    SetThreadPointer = 39,
+    GetThreadPointer = 40,
 }
 
 impl Syscall {
@@ -92,6 +94,8 @@ impl Syscall {
             36 => Some(Syscall::SharedVmCreate),
             37 => Some(Syscall::SharedVmMap),
             38 => Some(Syscall::SharedVmClose),
+            39 => Some(Syscall::SetThreadPointer),
+            40 => Some(Syscall::GetThreadPointer),
             _ => None,
         }
     }
@@ -506,6 +510,10 @@ pub extern "C" fn syscall_handler(
         Syscall::SharedVmCreate => sys_shared_vm_create(arg0 as usize),
         Syscall::SharedVmMap => sys_shared_vm_map(arg0, arg1 as usize, arg2 as u32),
         Syscall::SharedVmClose => sys_shared_vm_close(arg0),
+        Syscall::SetThreadPointer => sys_set_thread_pointer(arg0),
+        Syscall::GetThreadPointer => crate::process::current_thread_pointer()
+            .map(|_| unsafe { crate::hal::get_fs_base() as i64 })
+            .unwrap_or(EINVAL),
     }
 }
 
@@ -923,6 +931,16 @@ fn sys_shared_vm_close(id: u64) -> i64 {
         Some(process) => process.close_shared_vm(id)
             .map(|_| 0).unwrap_or_else(process_error_to_errno),
         None => EINVAL,
+    }
+}
+
+fn sys_set_thread_pointer(base: u64) -> i64 {
+    if base > USER_SPACE_END || (base != 0 && !is_valid_user_pointer(base, 1)) {
+        return EINVAL;
+    }
+    match crate::process::set_current_thread_pointer(base) {
+        Ok(()) => 0,
+        Err(error) => process_error_to_errno(error),
     }
 }
 

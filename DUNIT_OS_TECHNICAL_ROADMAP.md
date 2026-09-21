@@ -28,8 +28,8 @@ Dunit уже больше, чем boot-screen: она загружается ч�
 
 Однако это ещё не production desktop OS:
 
-- UP round-robin включён по умолчанию (M1 update от 21 сентября 2026); schedulable user threads и timer/IPC wait queues добавлены, TLS и общая система событий ещё отсутствуют;
-- нет TLS/signals/futex-подобного ожидания и полноценного process `exec`/`fork`;
+- UP round-robin, schedulable user threads, timer/IPC wait queues и x86_64 static TLS включены; общая система событий и futex-like синхронизация ещё отсутствуют;
+- нет dynamic TLS/DTV, signals, futex-подобного ожидания и полноценного process `exec`/`fork`;
 - GUI shell, compositor, WM, layout, decorations и системные панели живут в ядре (`kernel/src/ui_loop.rs`, 4458 строк);
 - userspace `display_server` и `video_driver` — неинтегрированные прототипы, отсутствующие в `USERSPACE_APPS` Makefile;
 - установленная система по-прежнему использует MemFS как `/`; DunitFS автоматически монтируется только в `/persist`;
@@ -123,7 +123,8 @@ root@dunit:~#
 - **Реализовано после исходного среза:** UP round-robin включён по умолчанию; x87/MMX/SSE сохраняются через FXSAVE/FXRSTOR, PIT предоставляет monotonic clock/deadline abstraction. QEMU smoke проверяет вытеснение и XMM isolation.
 - **Реализовано после исходного среза:** schedulable userspace TID, отдельные GPR/FPU/kernel stack, общее process-owned address space и fd table; create/exit/nonblocking join/get_tid. QEMU smoke проверяет общую память, XMM isolation, thread fault и teardown при выходе процесса.
 - **Реализовано после исходного среза:** wait queue переводит потоки в Blocked; PIT будит `sleep` и timed IPC event wait, отправка IPC будит ожидающие потоки. GUI apps ждут IPC-события без цикла `yield`; QEMU `[WAIT-TEST] OK` проверяет таймаут, sleep и IPC wakeup.
-- **Не реализовано:** TLS register setup, универсальный event/handle readiness, priorities, time accounting, SMP и полноценный kernel-thread scheduler.
+- **Реализовано после исходного среза:** `FS.base` переключается для каждого TID, syscalls 39–40 задают/читают thread pointer, ELF `PT_TLS` создаёт отдельный initial TLS/TCB для main и новых потоков. `[TLS-TEST] OK` проверяет `.tdata/.tbss` и изоляцию при вытеснении.
+- **Не реализовано:** dynamic thread vector для dynamic TLS, универсальный event/handle readiness, priorities, time accounting, SMP и полноценный kernel-thread scheduler.
 - **Следствие:** GUI Server как настоящий long-running userspace service и musl pthreads пока нельзя считать надёжными.
 
 ### 4.4 Syscalls и ABI
@@ -132,7 +133,7 @@ root@dunit:~#
 - **Удачно:** user-copy проверяет присутствие и writable/user flags каждой страницы до доступа.
 - **Частично:** `sleep` блокирует поток до PIT deadline; stdio/terminal foreground policy всё ещё kernel-centric.
 - **Проблема безопасности:** raw framebuffer syscalls доступны обычным приложениям; будущий GUI требует capability/handle, доступный только GUI Server.
-- **ABI-долг:** нет versioned ABI document, handle rights, poll/event wait, dup/pipe, seek, metadata, clocks, threads/TLS, robust errno contract.
+- **ABI-долг:** нет generated/versioned ABI manifest, handle rights, poll/event wait, dup/pipe, seek, metadata, realtime clocks, dynamic TLS/DTV и robust errno contract.
 
 ### 4.5 IPC
 
@@ -355,7 +356,7 @@ Dunit DWM — отдельный policy shell поверх GUI Server:
 - [x] Сделать schedulable threads: TID, per-thread context/kernel stack/FPU state, process-owned address space. QEMU `[THREAD-TEST] OK`: два потока делят память/PID, сохраняют разные XMM значения, join возвращает статусы, thread fault изолирован, unjoined поток удаляется при выходе владельца.
 - [x] Добавить wait queues и blocking sleep/IPC event wait; убрать polling GUI apps. `[WAIT-TEST] OK` проверяет timeout, timer wake и IPC wake; общий handle/event readiness остаётся отдельной задачей.
 - [x] Реализовать `munmap`, `mprotect`, shared VM object, guard pages и correct teardown. QEMU `[VM-TEST] OK`: partial unmap, W^X, guard fault, shared aliasing и возврат frame в PMM после закрытия/выхода peer.
-- [ ] Добавить TLS ABI: set/get thread pointer (`FS.base` на x86_64), initial TLS image.
+- [x] Добавить TLS ABI: set/get thread pointer (`FS.base` на x86_64), initial `PT_TLS` image. `[TLS-TEST] OK`: Variant II TCB, `.tdata/.tbss`, отдельный TLS main/threads и сохранение при вытеснении.
 - [ ] Добавить futex-like Dunit primitive `wait_on_word/wake` без копирования Linux ABI.
 - [ ] Перевести глобальные mutable singletons на locks/owned services.
 - [ ] Ввести handle table с rights (`READ/WRITE/MAP/SIGNAL/TRANSFER/DISPLAY_MASTER`).
@@ -568,7 +569,7 @@ src/mman/, src/fs/        native VM/VFS mappings
 ##### M6-E — threads, TLS и synchronization
 
 - [ ] Green Tea Kernel создаёт schedulable user threads с отдельными kernel/user stacks и общим address space.
-- [ ] Поддержать установку/переключение x86_64 `FS.base`, initial `PT_TLS` image и dynamic thread vector contract.
+- [x] Поддержать установку/переключение x86_64 `FS.base` и initial static `PT_TLS` image; dynamic thread vector contract остаётся частью будущего dynamic TLS/ldso profile.
 - [ ] Реализовать thread create/exit/join/detach и безопасное освобождение stack/TLS после завершения.
 - [ ] Реализовать Dunit `wait_on_word/wake` с atomic compare-and-block, timeout и защитой от lost wakeups; не копировать Linux futex ABI.
 - [ ] Адаптировать musl pthread create/join, mutex, condvar, rwlock, once и per-thread `errno`.

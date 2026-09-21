@@ -229,6 +229,8 @@ pub struct Process {
     pub context: CpuContext,
     /// 16-byte aligned legacy x87/MMX/SSE state (FXSAVE format).
     pub fpu_state: FpuState,
+    /// x86_64 userspace thread pointer installed in IA32_FS_BASE.
+    pub fs_base: u64,
     pub is_kernel: bool,
     pub cwd: String,
     pub status: Option<ProcessExitStatus>,
@@ -244,10 +246,15 @@ pub struct Process {
     shared_owned: Vec<u64>,
     shared_pages: BTreeMap<usize, u64>,
     guard_regions: BTreeMap<usize, usize>,
+    tls_image: Vec<u8>,
+    tls_mem_size: usize,
+    tls_align: usize,
+    tls_allocation: Option<(usize, usize)>,
 }
 
 const USER_MMAP_BASE: usize = 0x0000_0010_0000_0000;
 const USER_MMAP_END: usize = 0x0000_7000_0000_0000;
+const USER_ADDRESS_END: u64 = 0x0000_8000_0000_0000;
 const USER_PAGE_SIZE: usize = 4096;
 
 fn vm_range_end(start: usize, length: usize) -> Result<usize, ProcessError> {
@@ -277,6 +284,7 @@ impl Process {
             state: ProcessState::Ready,
             context: CpuContext::new(),
             fpu_state: FpuState::new(),
+            fs_base: 0,
             is_kernel,
             cwd: String::from("/"),
             status: None,
@@ -292,6 +300,10 @@ impl Process {
             shared_owned: Vec::new(),
             shared_pages: BTreeMap::new(),
             guard_regions: BTreeMap::new(),
+            tls_image: Vec::new(),
+            tls_mem_size: 0,
+            tls_align: 1,
+            tls_allocation: None,
         };
         process.reserve_stdio();
         process
@@ -309,6 +321,7 @@ impl Process {
             state: ProcessState::Ready,
             context: CpuContext::new(),
             fpu_state: FpuState::new(),
+            fs_base: 0,
             is_kernel: false,
             cwd: String::from("/"),
             status: None,
@@ -326,6 +339,10 @@ impl Process {
             shared_owned: Vec::new(),
             shared_pages: BTreeMap::new(),
             guard_regions: BTreeMap::new(),
+            tls_image: Vec::new(),
+            tls_mem_size: 0,
+            tls_align: 1,
+            tls_allocation: None,
         };
         process.reserve_stdio();
         Ok(process)
@@ -698,6 +715,77 @@ impl Process {
         Ok(())
     }
 
+    pub fn install_tls_template(
+        &mut self,
+        image: &[u8],
+        mem_size: usize,
+        align: usize,
+    ) -> Result<(), ProcessError> {
+        if image.len() > mem_size || mem_size == 0 || !align.is_power_of_two() {
+            return Err(ProcessError::InvalidMemoryRange);
+        }
+        self.tls_image.clear();
+        self.tls_image.extend_from_slice(image);
+        self.tls_mem_size = mem_size;
+        self.tls_align = align.max(1);
+        let (base, length, thread_pointer) = self.allocate_tls_instance()?;
+        self.fs_base = thread_pointer as u64;
+        self.tls_allocation = Some((base, length));
+        Ok(())
+    }
+
+    fn allocate_tls_instance(&mut self) -> Result<(usize, usize, usize), ProcessError> {
+        if self.tls_mem_size == 0 {
+            return Ok((0, 0, 0));
+        }
+        let tls_size = self.tls_mem_size.checked_add(self.tls_align - 1)
+            .map(|value| value & !(self.tls_align - 1))
+            .ok_or(ProcessError::InvalidMemoryRange)?;
+        // Dunit static TLS follows x86_64 variant II: TLS data is directly
+        // below the thread pointer and FS:0 contains the thread pointer itself.
+        let mapped_length = tls_size.checked_add(core::mem::size_of::<u64>())
+            .and_then(|value| value.checked_add(USER_PAGE_SIZE - 1))
+            .map(|value| value & !(USER_PAGE_SIZE - 1))
+            .ok_or(ProcessError::InvalidMemoryRange)?;
+        let base = self.map_anonymous(0, mapped_length, true, false, false, true)?;
+        let address_space = self.address_space().ok_or(ProcessError::NoAddressSpace)?;
+        let mut copied = 0;
+        while copied < self.tls_image.len() {
+            let addr = base + copied;
+            let chunk = (USER_PAGE_SIZE - (addr & (USER_PAGE_SIZE - 1)))
+                .min(self.tls_image.len() - copied);
+            let phys = address_space.translate_user_page(VirtualAddress(addr))
+                .map_err(|_| ProcessError::InvalidMemoryRange)?
+                .ok_or(ProcessError::InvalidMemoryRange)?;
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    self.tls_image.as_ptr().add(copied),
+                    crate::memory::vmm::phys_to_virt(phys.as_usize()) as *mut u8,
+                    chunk,
+                );
+            }
+            copied += chunk;
+        }
+        let thread_pointer = base + tls_size;
+        let tp_phys = address_space.translate_user_page(VirtualAddress(thread_pointer))
+            .map_err(|_| ProcessError::InvalidMemoryRange)?
+            .ok_or(ProcessError::InvalidMemoryRange)?;
+        unsafe {
+            (crate::memory::vmm::phys_to_virt(tp_phys.as_usize()) as *mut u64)
+                .write_unaligned(thread_pointer as u64);
+        }
+        Ok((base, mapped_length, thread_pointer))
+    }
+
+    pub fn set_thread_pointer(&mut self, base: u64) -> Result<(), ProcessError> {
+        if base >= USER_ADDRESS_END {
+            return Err(ProcessError::InvalidMemoryRange);
+        }
+        self.fs_base = base;
+        unsafe { crate::hal::set_fs_base(base); }
+        Ok(())
+    }
+
     /// Release heavyweight VM ownership at exit, independently of wait/reap.
     /// The caller must have switched away from this address space first.
     fn release_vm_resources(&mut self) {
@@ -709,6 +797,7 @@ impl Process {
             shared_vm_release(id, 1);
         }
         self.guard_regions.clear();
+        self.tls_allocation = None;
     }
 
     pub fn fd_count(&self) -> usize {
@@ -929,6 +1018,23 @@ fn current_thread() -> Option<&'static Process> {
     let table = process_table_mut();
     let index = process_record_index(table, entity)?;
     table[index].process.as_ref().map(|boxed| &**boxed)
+}
+
+pub fn current_thread_mut() -> Option<&'static mut Process> {
+    let entity = current_entity_id()?;
+    let table = process_table_mut();
+    let index = process_record_index(table, entity)?;
+    table[index].process.as_mut().map(|boxed| &mut **boxed)
+}
+
+pub fn current_thread_pointer() -> Option<u64> {
+    current_thread().map(|thread| thread.fs_base)
+}
+
+pub fn set_current_thread_pointer(base: u64) -> Result<(), ProcessError> {
+    current_thread_mut()
+        .ok_or(ProcessError::NoCurrentProcess)?
+        .set_thread_pointer(base)
 }
 
 pub fn set_terminal_foreground_process(pid: Option<ProcessId>) {
@@ -1169,7 +1275,14 @@ pub fn create_user_thread(entry: u64, stack_top: u64, arg: u64) -> Result<Thread
         return Err(ProcessError::InvalidUserContext);
     }
     let tid = ThreadId(allocate_pid().0);
-    let thread = Box::new(Process::new_user_thread(tid, entry, stack_top, arg));
+    let (tls_base, tls_length, thread_pointer) = current_process_mut()
+        .ok_or(ProcessError::NoCurrentProcess)?
+        .allocate_tls_instance()?;
+    let mut thread = Box::new(Process::new_user_thread(tid, entry, stack_top, arg));
+    thread.fs_base = thread_pointer as u64;
+    if tls_length != 0 {
+        thread.tls_allocation = Some((tls_base, tls_length));
+    }
     {
         let _irq = InterruptGuard::new();
         let table = process_table_mut();
@@ -1194,6 +1307,9 @@ pub fn create_user_thread(entry: u64, stack_top: u64, arg: u64) -> Result<Thread
         let table = process_table_mut();
         if let Some(index) = process_record_index(table, ProcessId(tid.0)) {
             table.remove(index);
+        }
+        if tls_length != 0 {
+            let _ = current_process_mut().map(|owner| owner.unmap_range(tls_base, tls_length));
         }
         return Err(error);
     }
@@ -1220,9 +1336,15 @@ pub fn wait_thread(tid: ThreadId) -> Result<ProcessExitStatus, ProcessError> {
         return Err(ProcessError::NotRunnable);
     }
     let status = record.status.ok_or(ProcessError::ProcessNotPrepared)?;
+    let tls = record.process.as_ref().and_then(|thread| thread.tls_allocation);
     let _irq = InterruptGuard::new();
     crate::process::scheduler::remove(ProcessId(tid.0));
     table.remove(index);
+    if let Some((base, length)) = tls {
+        if let Some(owner) = current_process_mut() {
+            owner.unmap_range(base, length)?;
+        }
+    }
     Ok(status)
 }
 
@@ -1951,7 +2073,9 @@ pub fn enter_user_process(pid: ProcessId) -> Result<ProcessExit, ProcessError> {
                     Ok(()) => match owner.switch_to_address_space() {
                         Ok(()) => {
                             crate::hal::set_user_fpu_state(thread.fpu_state.0.get().cast::<u8>());
+                            crate::hal::set_fs_base(thread.fs_base);
                             crate::hal::run_user_context(&context as *const CpuContext);
+                            crate::hal::set_fs_base(0);
                             crate::hal::set_user_fpu_state(core::ptr::null_mut());
                             Ok(())
                         }

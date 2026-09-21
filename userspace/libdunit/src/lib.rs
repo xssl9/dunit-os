@@ -45,6 +45,8 @@ pub const SYSCALL_MPROTECT: usize = 35;
 pub const SYSCALL_SHARED_VM_CREATE: usize = 36;
 pub const SYSCALL_SHARED_VM_MAP: usize = 37;
 pub const SYSCALL_SHARED_VM_CLOSE: usize = 38;
+pub const SYSCALL_SET_THREAD_POINTER: usize = 39;
+pub const SYSCALL_GET_THREAD_POINTER: usize = 40;
 
 pub const VM_PROT_READ: usize = 1;
 pub const VM_PROT_WRITE: usize = 2;
@@ -947,6 +949,14 @@ pub fn shared_vm_map(id: u64, addr: usize, prot: usize) -> isize {
 
 pub fn shared_vm_close(id: u64) -> isize {
     syscall1(SYSCALL_SHARED_VM_CLOSE, id as usize)
+}
+
+pub fn set_thread_pointer(base: usize) -> isize {
+    syscall1(SYSCALL_SET_THREAD_POINTER, base)
+}
+
+pub fn get_thread_pointer() -> usize {
+    syscall0(SYSCALL_GET_THREAD_POINTER) as usize
 }
 
 pub fn get_pid() -> u32 {

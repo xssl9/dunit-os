@@ -823,6 +823,12 @@ pub extern "C" fn kernel_main(
         } else {
             screen_log("[FAIL] VM mapping smoke failed", true);
         }
+        screen_log("[ .. ] Running TLS ABI smoke test", false);
+        if command::run_tls_smoke() {
+            screen_log("[ OK ] TLS ABI smoke passed", false);
+        } else {
+            screen_log("[FAIL] TLS ABI smoke failed", true);
+        }
     }
 
     screen_log("[ OK ] System initialization complete", false);

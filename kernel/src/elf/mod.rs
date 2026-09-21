@@ -45,6 +45,7 @@ pub const ELF_DATA_LSB: u8 = 1;
 pub const ELF_MACHINE_X86_64: u16 = 0x3E;
 pub const ELF_TYPE_EXEC: u16 = 2;
 pub const PT_LOAD: u32 = 1;
+pub const PT_TLS: u32 = 7;
 pub const PF_X: u32 = 0x1;
 pub const PF_W: u32 = 0x2;
 pub const PF_R: u32 = 0x4;
@@ -211,6 +212,11 @@ pub fn prepare_process_elf(pid: ProcessId, data: &[u8], argv: &[String]) -> Resu
     let prepared = crate::process::with_process_mut(pid, |process| {
         if load_into_process_address_space(&parser, process).is_err() {
             crate::memory::serial_write("[ELF-TEST] process load failed\r\n");
+            return Err(crate::process::ProcessError::InvalidUserContext);
+        }
+
+        if install_initial_tls(&parser, process).is_err() {
+            crate::memory::serial_write("[ELF-TEST] TLS image setup failed\r\n");
             return Err(crate::process::ProcessError::InvalidUserContext);
         }
 
@@ -408,6 +414,34 @@ fn load_into_process_address_space(
         ensure_process_page(address_space, virt, PageFlags::WRITABLE)?;
     }
 
+    Ok(())
+}
+
+fn install_initial_tls(parser: &ElfParser, process: &mut Process) -> Result<(), ElfError> {
+    let mut tls = None;
+    for ph in parser.program_headers()? {
+        if ph.p_type != PT_TLS {
+            continue;
+        }
+        if tls.is_some() || ph.p_filesz > ph.p_memsz {
+            return Err(ElfError::InvalidProgramHeader);
+        }
+        let start = ph.p_offset as usize;
+        let end = start.checked_add(ph.p_filesz as usize)
+            .ok_or(ElfError::InvalidProgramHeader)?;
+        if end > parser.data.len() || ph.p_memsz == 0 || ph.p_memsz > 1024 * 1024 {
+            return Err(ElfError::InvalidProgramHeader);
+        }
+        let align = (ph.p_align as usize).max(1);
+        if !align.is_power_of_two() || align > PAGE_SIZE {
+            return Err(ElfError::InvalidProgramHeader);
+        }
+        tls = Some((&parser.data[start..end], ph.p_memsz as usize, align));
+    }
+    if let Some((image, mem_size, align)) = tls {
+        process.install_tls_template(image, mem_size, align)
+            .map_err(|_| ElfError::InvalidProgramHeader)?;
+    }
     Ok(())
 }
 
