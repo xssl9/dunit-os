@@ -52,6 +52,18 @@ pub enum Syscall {
     GetThreadPointer = 40,
     FutexWait = 41,
     FutexWake = 42,
+    HandleCreateMemory = 43,
+    HandleCreateEndpoint = 44,
+    HandleRead = 45,
+    HandleWrite = 46,
+    HandleMap = 47,
+    HandleDup = 48,
+    HandleRights = 49,
+    HandleClose = 50,
+    HandleSignal = 51,
+    HandleTakeSignals = 52,
+    HandleDisplayAcquire = 53,
+    HandleTransfer = 54,
 }
 
 impl Syscall {
@@ -101,6 +113,18 @@ impl Syscall {
             40 => Some(Syscall::GetThreadPointer),
             41 => Some(Syscall::FutexWait),
             42 => Some(Syscall::FutexWake),
+            43 => Some(Syscall::HandleCreateMemory),
+            44 => Some(Syscall::HandleCreateEndpoint),
+            45 => Some(Syscall::HandleRead),
+            46 => Some(Syscall::HandleWrite),
+            47 => Some(Syscall::HandleMap),
+            48 => Some(Syscall::HandleDup),
+            49 => Some(Syscall::HandleRights),
+            50 => Some(Syscall::HandleClose),
+            51 => Some(Syscall::HandleSignal),
+            52 => Some(Syscall::HandleTakeSignals),
+            53 => Some(Syscall::HandleDisplayAcquire),
+            54 => Some(Syscall::HandleTransfer),
             _ => None,
         }
     }
@@ -125,6 +149,8 @@ pub const ENOMEM: i64 = -12;
 pub const EINTR: i64 = -4;
 pub const EMSGSIZE: i64 = -90;
 pub const ENOBUFS: i64 = -105;
+pub const EPERM: i64 = -1;
+pub const EBUSY: i64 = -16;
 
 /// Параметры фреймбуфера ядра. Раньше четыре `pub static mut` скаляра,
 /// записываемые один раз из `lib.rs` и читаемые из системных вызовов display;
@@ -529,6 +555,179 @@ pub extern "C" fn syscall_handler(
             .unwrap_or(EINVAL),
         Syscall::FutexWait => sys_futex_wait(arg0, arg1, arg2),
         Syscall::FutexWake => sys_futex_wake(arg0, arg1),
+        Syscall::HandleCreateMemory => sys_handle_create_memory(arg0 as usize),
+        Syscall::HandleCreateEndpoint => sys_handle_create_endpoint(arg0),
+        Syscall::HandleRead => sys_handle_read(arg0 as u32, arg1 as *mut u8, arg2 as usize),
+        Syscall::HandleWrite => sys_handle_write(arg0 as u32, arg1 as *const u8, arg2 as usize),
+        Syscall::HandleMap => sys_handle_map(arg0 as u32, arg1 as usize, arg2 as usize),
+        Syscall::HandleDup => sys_handle_dup(arg0 as u32, arg1 as u32),
+        Syscall::HandleRights => sys_handle_rights(arg0 as u32),
+        Syscall::HandleClose => sys_handle_close(arg0 as u32),
+        Syscall::HandleSignal => sys_handle_signal(arg0 as u32, arg1),
+        Syscall::HandleTakeSignals => sys_handle_take_signals(),
+        Syscall::HandleDisplayAcquire => sys_handle_display_acquire(),
+        Syscall::HandleTransfer => sys_handle_transfer(arg0 as u32, arg1),
+    }
+}
+
+fn handle_error_to_errno(error: crate::handle::HandleError) -> i64 {
+    use crate::handle::HandleError;
+    match error {
+        HandleError::BadHandle => EBADF,
+        HandleError::AccessDenied => EPERM,
+        HandleError::WrongType => EINVAL,
+        HandleError::DisplayBusy => EBUSY,
+        HandleError::TooLarge => EINVAL,
+        HandleError::MapFailed => ENOMEM,
+        HandleError::NoSuchTarget => ENOENT,
+    }
+}
+
+fn sys_handle_create_memory(len: usize) -> i64 {
+    match crate::process::current_process_mut() {
+        Some(process) => process
+            .handle_create_memory(len)
+            .map(|h| h as i64)
+            .unwrap_or_else(handle_error_to_errno),
+        None => EINVAL,
+    }
+}
+
+fn sys_handle_create_endpoint(target_pid: u64) -> i64 {
+    match crate::process::current_process_mut() {
+        Some(process) => {
+            process.handle_create_endpoint(crate::process::ProcessId(target_pid)) as i64
+        }
+        None => EINVAL,
+    }
+}
+
+fn sys_handle_read(handle: u32, user_buf: *mut u8, len: usize) -> i64 {
+    if len == 0 || !is_valid_user_pointer(user_buf as u64, len) {
+        return EINVAL;
+    }
+    // Читаем во временный буфер ядра, затем копируем в userspace через
+    // проверенный путь copy_buffer_to_user.
+    let mut scratch = alloc::vec![0u8; len];
+    let copied = match crate::process::current_process_mut() {
+        Some(process) => match process.handle_memory_read(handle, &mut scratch) {
+            Ok(n) => n,
+            Err(error) => return handle_error_to_errno(error),
+        },
+        None => return EINVAL,
+    };
+    if let Err(error) = copy_buffer_to_user(user_buf, &scratch[..copied]) {
+        return error;
+    }
+    copied as i64
+}
+
+fn sys_handle_write(handle: u32, user_buf: *const u8, len: usize) -> i64 {
+    if len == 0 || !is_valid_user_pointer(user_buf as u64, len) {
+        return EINVAL;
+    }
+    let data = match copy_buffer_from_user(user_buf, len) {
+        Ok(data) => data,
+        Err(error) => return error,
+    };
+    match crate::process::current_process_mut() {
+        Some(process) => process
+            .handle_memory_write(handle, &data)
+            .map(|n| n as i64)
+            .unwrap_or_else(handle_error_to_errno),
+        None => EINVAL,
+    }
+}
+
+fn sys_handle_map(handle: u32, addr: usize, len: usize) -> i64 {
+    match crate::process::current_process_mut() {
+        Some(process) => process
+            .handle_map(handle, addr, len)
+            .map(|mapped| mapped as i64)
+            .unwrap_or_else(handle_error_to_errno),
+        None => EINVAL,
+    }
+}
+
+fn sys_handle_dup(handle: u32, new_rights: u32) -> i64 {
+    match crate::process::current_process_mut() {
+        Some(process) => process
+            .handle_dup(handle, new_rights)
+            .map(|h| h as i64)
+            .unwrap_or_else(handle_error_to_errno),
+        None => EINVAL,
+    }
+}
+
+fn sys_handle_rights(handle: u32) -> i64 {
+    match crate::process::current_process_mut() {
+        Some(process) => process
+            .handle_rights(handle)
+            .map(|r| r as i64)
+            .unwrap_or_else(handle_error_to_errno),
+        None => EINVAL,
+    }
+}
+
+fn sys_handle_close(handle: u32) -> i64 {
+    match crate::process::current_process_mut() {
+        Some(process) => process
+            .handle_close(handle)
+            .map(|_| 0)
+            .unwrap_or_else(handle_error_to_errno),
+        None => EINVAL,
+    }
+}
+
+fn sys_handle_signal(handle: u32, value: u64) -> i64 {
+    match crate::process::current_process_mut() {
+        Some(process) => process
+            .handle_signal(handle, value)
+            .map(|_| 0)
+            .unwrap_or_else(handle_error_to_errno),
+        None => EINVAL,
+    }
+}
+
+fn sys_handle_take_signals() -> i64 {
+    match crate::process::current_process_mut() {
+        Some(process) => process.handle_take_signals() as i64,
+        None => EINVAL,
+    }
+}
+
+fn sys_handle_display_acquire() -> i64 {
+    match crate::process::current_process_mut() {
+        Some(process) => process
+            .handle_display_acquire()
+            .map(|h| h as i64)
+            .unwrap_or_else(handle_error_to_errno),
+        None => EINVAL,
+    }
+}
+
+fn sys_handle_transfer(handle: u32, target_pid: u64) -> i64 {
+    let target = crate::process::ProcessId(target_pid);
+    // Проверяем существование цели ДО изъятия объекта из таблицы-источника,
+    // чтобы неудачная передача не «съела» capability.
+    let process = match crate::process::current_process_mut() {
+        Some(process) => process,
+        None => return EINVAL,
+    };
+    let self_pid = process.pid;
+    if target != self_pid && !crate::process::process_exists(target) {
+        return ENOENT;
+    }
+    let (object, rights) = match process.handle_take_for_transfer(handle) {
+        Ok(pair) => pair,
+        Err(error) => return handle_error_to_errno(error),
+    };
+    if target == self_pid {
+        return process.handle_receive(object, rights) as i64;
+    }
+    match crate::process::with_process_mut(target, |t| Ok(t.handle_receive(object, rights))) {
+        Ok(new_handle) => new_handle as i64,
+        Err(_) => ENOENT,
     }
 }
 

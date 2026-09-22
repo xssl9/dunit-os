@@ -8,6 +8,10 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use core::cell::UnsafeCell;
 
+use crate::handle::{
+    Handle, HandleError, HandleObject, RIGHT_DISPLAY_MASTER, RIGHT_MAP, RIGHT_READ, RIGHT_SIGNAL,
+    RIGHT_TRANSFER, RIGHT_WRITE,
+};
 use crate::memory::pmm::{get_pmm, PhysicalAddress};
 use crate::memory::vmm::{ActiveAddressSpace, AddressSpace, PageFlags, VirtualAddress};
 use crate::sync::{InterruptGuard, IrqSafeSpinLock};
@@ -271,6 +275,10 @@ pub struct Process {
     tls_mem_size: usize,
     tls_align: usize,
     tls_allocation: Option<(usize, usize)>,
+    /// Таблица хэндлов процесса (capabilities с правами).
+    handle_table: crate::handle::HandleTable,
+    /// Счётчик доставленных, но ещё не считанных сигналов (право SIGNAL).
+    pending_signals: u64,
 }
 
 const USER_MMAP_BASE: usize = 0x0000_0010_0000_0000;
@@ -328,6 +336,8 @@ impl Process {
             tls_mem_size: 0,
             tls_align: 1,
             tls_allocation: None,
+            handle_table: crate::handle::HandleTable::new(),
+            pending_signals: 0,
         };
         process.reserve_stdio();
         process
@@ -367,6 +377,8 @@ impl Process {
             tls_mem_size: 0,
             tls_align: 1,
             tls_allocation: None,
+            handle_table: crate::handle::HandleTable::new(),
+            pending_signals: 0,
         };
         process.reserve_stdio();
         Ok(process)
@@ -822,6 +834,13 @@ impl Process {
         }
         self.guard_regions.clear();
         self.tls_allocation = None;
+        // Освобождаем capability-ресурсы: если процесс держал мастер-право на
+        // дисплей, вернуть его системе; затем очистить таблицу хэндлов.
+        for object in self.handle_table.drain_objects() {
+            if matches!(object, crate::handle::HandleObject::Display) {
+                crate::handle::release_display(self.pid);
+            }
+        }
     }
 
     pub fn fd_count(&self) -> usize {
@@ -832,6 +851,162 @@ impl Process {
         self.fd_table.insert(0, FdEntry::stdin());
         self.fd_table.insert(1, FdEntry::stdout());
         self.fd_table.insert(2, FdEntry::stderr());
+    }
+
+    // --- Таблица хэндлов (capabilities с правами) ------------------------------
+
+    /// Создаёт объект памяти нужного размера и возвращает хэндл с полным набором
+    /// прав для памяти: READ|WRITE|MAP|TRANSFER.
+    pub fn handle_create_memory(&mut self, len: usize) -> Result<Handle, HandleError> {
+        if len == 0 || len > crate::handle::MAX_MEMORY_OBJECT {
+            return Err(HandleError::TooLarge);
+        }
+        let data = alloc::vec![0u8; len];
+        Ok(self.handle_table.insert(
+            HandleObject::Memory(data),
+            RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_TRANSFER,
+        ))
+    }
+
+    /// Создаёт конечную точку для сигналов процессу `target`. Право SIGNAL|TRANSFER.
+    pub fn handle_create_endpoint(&mut self, target: ProcessId) -> Handle {
+        self.handle_table
+            .insert(HandleObject::Endpoint(target), RIGHT_SIGNAL | RIGHT_TRANSFER)
+    }
+
+    pub fn handle_rights(&self, handle: Handle) -> Result<u32, HandleError> {
+        self.handle_table.rights(handle)
+    }
+
+    pub fn handle_dup(&mut self, handle: Handle, new_rights: u32) -> Result<Handle, HandleError> {
+        self.handle_table.duplicate(handle, new_rights)
+    }
+
+    /// Закрывает хэндл; если это было мастер-право на дисплей — возвращает его.
+    pub fn handle_close(&mut self, handle: Handle) -> Result<(), HandleError> {
+        let entry = self.handle_table.remove(handle)?;
+        if matches!(entry.object, HandleObject::Display) {
+            crate::handle::release_display(self.pid);
+        }
+        Ok(())
+    }
+
+    /// Читает из объекта памяти (нужно право READ). Возвращает число байт.
+    pub fn handle_memory_read(&self, handle: Handle, out: &mut [u8]) -> Result<usize, HandleError> {
+        let entry = self.handle_table.require(handle, RIGHT_READ)?;
+        match &entry.object {
+            HandleObject::Memory(data) => {
+                let n = out.len().min(data.len());
+                out[..n].copy_from_slice(&data[..n]);
+                Ok(n)
+            }
+            _ => Err(HandleError::WrongType),
+        }
+    }
+
+    /// Пишет в объект памяти (нужно право WRITE). Возвращает число байт.
+    pub fn handle_memory_write(&mut self, handle: Handle, src: &[u8]) -> Result<usize, HandleError> {
+        let entry = self.handle_table.require_mut(handle, RIGHT_WRITE)?;
+        match &mut entry.object {
+            HandleObject::Memory(data) => {
+                let n = src.len().min(data.len());
+                data[..n].copy_from_slice(&src[..n]);
+                Ok(n)
+            }
+            _ => Err(HandleError::WrongType),
+        }
+    }
+
+    /// Отображает содержимое объекта памяти в адресное пространство процесса
+    /// (нужно право MAP). Возвращает виртуальный адрес отображения.
+    pub fn handle_map(&mut self, handle: Handle, addr: usize, len: usize) -> Result<usize, HandleError> {
+        // Проверяем право и достаём байты до вызова map_anonymous, чтобы не
+        // держать заимствование таблицы хэндлов через &mut self.
+        {
+            let entry = self.handle_table.require(handle, RIGHT_MAP)?;
+            if !matches!(entry.object, HandleObject::Memory(_)) {
+                return Err(HandleError::WrongType);
+            }
+        }
+        let map_len = {
+            let entry = self.handle_table.get(handle)?;
+            match &entry.object {
+                HandleObject::Memory(data) => len.min(data.len()),
+                _ => return Err(HandleError::WrongType),
+            }
+        };
+        let mapped = self
+            .map_anonymous(addr, len.max(1), true, false, false, true)
+            .map_err(|_| HandleError::MapFailed)?;
+        // Адресное пространство вызывающего процесса активно во время системного
+        // вызова, поэтому пишем прямо в только что отображённый пользовательский
+        // регион.
+        let entry = self.handle_table.get(handle)?;
+        if let HandleObject::Memory(data) = &entry.object {
+            unsafe {
+                core::ptr::copy_nonoverlapping(data.as_ptr(), mapped as *mut u8, map_len);
+            }
+        }
+        Ok(mapped)
+    }
+
+    /// Доставляет сигнал через конечную точку (нужно право SIGNAL).
+    pub fn handle_signal(&mut self, handle: Handle, value: u64) -> Result<(), HandleError> {
+        let entry = self.handle_table.require(handle, RIGHT_SIGNAL)?;
+        let target = match &entry.object {
+            HandleObject::Endpoint(pid) => *pid,
+            _ => return Err(HandleError::WrongType),
+        };
+        if target == self.pid {
+            // Доставка самому себе: мутируем напрямую, без повторного взятия
+            // &mut на этот же процесс через таблицу процессов (иначе алиасинг).
+            self.add_pending_signal(value);
+            return Ok(());
+        }
+        with_process_mut(target, |process| {
+            process.add_pending_signal(value);
+            Ok(())
+        })
+        .map_err(|_| HandleError::NoSuchTarget)
+    }
+
+    /// Забирает и обнуляет счётчик доставленных сигналов процесса.
+    pub fn handle_take_signals(&mut self) -> u64 {
+        core::mem::take(&mut self.pending_signals)
+    }
+
+    pub fn add_pending_signal(&mut self, value: u64) {
+        self.pending_signals = self.pending_signals.saturating_add(value);
+    }
+
+    /// Захватывает мастер-право на дисплей (эксклюзивно). Возвращает хэндл с
+    /// правом DISPLAY_MASTER|TRANSFER либо `DisplayBusy`.
+    pub fn handle_display_acquire(&mut self) -> Result<Handle, HandleError> {
+        if !crate::handle::try_acquire_display(self.pid) {
+            return Err(HandleError::DisplayBusy);
+        }
+        Ok(self
+            .handle_table
+            .insert(HandleObject::Display, RIGHT_DISPLAY_MASTER | RIGHT_TRANSFER))
+    }
+
+    /// Забирает хэндл из таблицы для передачи; проверяет право TRANSFER.
+    /// Мастер-право на дисплей не переносится (эксклюзивный системный ресурс с
+    /// отдельным учётом владельца) — попытка её передать отклоняется.
+    pub fn handle_take_for_transfer(
+        &mut self,
+        handle: Handle,
+    ) -> Result<(HandleObject, u32), HandleError> {
+        let entry = self.handle_table.require(handle, RIGHT_TRANSFER)?;
+        if matches!(entry.object, HandleObject::Display) {
+            return Err(HandleError::WrongType);
+        }
+        self.handle_table.take_for_transfer(handle)
+    }
+
+    /// Принимает переданный объект в свою таблицу, сохраняя (сужённые) права.
+    pub fn handle_receive(&mut self, object: HandleObject, rights: u32) -> Handle {
+        self.handle_table.insert(object, rights)
     }
 }
 

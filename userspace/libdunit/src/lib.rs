@@ -49,6 +49,26 @@ pub const SYSCALL_SET_THREAD_POINTER: usize = 39;
 pub const SYSCALL_GET_THREAD_POINTER: usize = 40;
 pub const SYSCALL_FUTEX_WAIT: usize = 41;
 pub const SYSCALL_FUTEX_WAKE: usize = 42;
+pub const SYSCALL_HANDLE_CREATE_MEMORY: usize = 43;
+pub const SYSCALL_HANDLE_CREATE_ENDPOINT: usize = 44;
+pub const SYSCALL_HANDLE_READ: usize = 45;
+pub const SYSCALL_HANDLE_WRITE: usize = 46;
+pub const SYSCALL_HANDLE_MAP: usize = 47;
+pub const SYSCALL_HANDLE_DUP: usize = 48;
+pub const SYSCALL_HANDLE_RIGHTS: usize = 49;
+pub const SYSCALL_HANDLE_CLOSE: usize = 50;
+pub const SYSCALL_HANDLE_SIGNAL: usize = 51;
+pub const SYSCALL_HANDLE_TAKE_SIGNALS: usize = 52;
+pub const SYSCALL_HANDLE_DISPLAY_ACQUIRE: usize = 53;
+pub const SYSCALL_HANDLE_TRANSFER: usize = 54;
+
+/// Права хэндлов (capabilities). Совпадают с битами в ядре (kernel/src/handle.rs).
+pub const RIGHT_READ: u32 = 1 << 0;
+pub const RIGHT_WRITE: u32 = 1 << 1;
+pub const RIGHT_MAP: u32 = 1 << 2;
+pub const RIGHT_SIGNAL: u32 = 1 << 3;
+pub const RIGHT_TRANSFER: u32 = 1 << 4;
+pub const RIGHT_DISPLAY_MASTER: u32 = 1 << 5;
 
 pub const VM_PROT_READ: usize = 1;
 pub const VM_PROT_WRITE: usize = 2;
@@ -58,8 +78,10 @@ pub const VM_MAP_ANONYMOUS: usize = 1 << 5;
 /// Add one inaccessible page before and after the returned usable range.
 pub const VM_MAP_GUARD: usize = 1 << 6;
 
+pub const EPERM: isize = -1;
 pub const EAGAIN: isize = -11;
 pub const ENOMEM: isize = -12;
+pub const EBUSY: isize = -16;
 pub const EINTR: isize = -4;
 pub const EIO: isize = -5;
 pub const EBADF: isize = -9;
@@ -978,6 +1000,86 @@ pub fn futex_wait(word: &AtomicU32, expected: u32, timeout_ms: u64) -> isize {
 /// Returns the number of threads woken, or a negative errno.
 pub fn futex_wake(word: &AtomicU32, count: usize) -> isize {
     syscall2(SYSCALL_FUTEX_WAKE, word as *const AtomicU32 as usize, count)
+}
+
+// --- Таблица хэндлов (capabilities с правами) --------------------------------
+
+/// Создаёт объект памяти `len` байт. Возвращает хэндл (>0) или отрицательный
+/// errno. Начальные права: READ|WRITE|MAP|TRANSFER.
+pub fn handle_create_memory(len: usize) -> isize {
+    syscall1(SYSCALL_HANDLE_CREATE_MEMORY, len)
+}
+
+/// Создаёт конечную точку для сигналов процессу `target_pid`. Права SIGNAL|TRANSFER.
+pub fn handle_create_endpoint(target_pid: u32) -> isize {
+    syscall1(SYSCALL_HANDLE_CREATE_ENDPOINT, target_pid as usize)
+}
+
+/// Читает из объекта памяти за хэндлом (нужно право READ). Возвращает число
+/// прочитанных байт или отрицательный errno.
+pub fn handle_read(handle: u32, buf: &mut [u8]) -> isize {
+    syscall3(
+        SYSCALL_HANDLE_READ,
+        handle as usize,
+        buf.as_mut_ptr() as usize,
+        buf.len(),
+    )
+}
+
+/// Пишет в объект памяти за хэндлом (нужно право WRITE). Возвращает число
+/// записанных байт или отрицательный errno.
+pub fn handle_write(handle: u32, buf: &[u8]) -> isize {
+    syscall3(
+        SYSCALL_HANDLE_WRITE,
+        handle as usize,
+        buf.as_ptr() as usize,
+        buf.len(),
+    )
+}
+
+/// Отображает объект памяти в адресное пространство (нужно право MAP).
+/// `addr == 0` — выбрать адрес автоматически. Возвращает виртуальный адрес.
+pub fn handle_map(handle: u32, addr: usize, len: usize) -> isize {
+    syscall3(SYSCALL_HANDLE_MAP, handle as usize, addr, len)
+}
+
+/// Дублирует хэндл, сужая права до `new_rights` (обязано быть подмножеством
+/// текущих прав). Возвращает новый хэндл или отрицательный errno.
+pub fn handle_dup(handle: u32, new_rights: u32) -> isize {
+    syscall2(SYSCALL_HANDLE_DUP, handle as usize, new_rights as usize)
+}
+
+/// Возвращает маску прав хэндла (>=0) или отрицательный errno.
+pub fn handle_rights(handle: u32) -> isize {
+    syscall1(SYSCALL_HANDLE_RIGHTS, handle as usize)
+}
+
+/// Закрывает хэндл. Возвращает 0 или отрицательный errno.
+pub fn handle_close(handle: u32) -> isize {
+    syscall1(SYSCALL_HANDLE_CLOSE, handle as usize)
+}
+
+/// Доставляет сигнал через конечную точку (нужно право SIGNAL). Возвращает 0
+/// или отрицательный errno.
+pub fn handle_signal(handle: u32, value: u64) -> isize {
+    syscall2(SYSCALL_HANDLE_SIGNAL, handle as usize, value as usize)
+}
+
+/// Забирает и обнуляет счётчик доставленных сигналов процесса.
+pub fn handle_take_signals() -> isize {
+    syscall0(SYSCALL_HANDLE_TAKE_SIGNALS)
+}
+
+/// Захватывает мастер-право на дисплей (эксклюзивно). Возвращает хэндл с правом
+/// DISPLAY_MASTER или отрицательный errno (EBUSY, если дисплей занят).
+pub fn handle_display_acquire() -> isize {
+    syscall0(SYSCALL_HANDLE_DISPLAY_ACQUIRE)
+}
+
+/// Передаёт хэндл процессу `target_pid` (нужно право TRANSFER). Возвращает новый
+/// хэндл в таблице цели или отрицательный errno.
+pub fn handle_transfer(handle: u32, target_pid: u32) -> isize {
+    syscall2(SYSCALL_HANDLE_TRANSFER, handle as usize, target_pid as usize)
 }
 
 pub fn get_pid() -> u32 {

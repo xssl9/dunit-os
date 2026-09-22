@@ -1,0 +1,11 @@
+[package]
+name = "handle_test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libdunit = { path = "../../libdunit" }
+
+[[bin]]
+name = "handle_test"
+path = "src/main.rs"

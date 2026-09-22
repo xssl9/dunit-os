@@ -17,6 +17,7 @@ pub mod elf;
 pub mod fs;
 pub mod gui;
 pub mod hal;
+pub mod handle;
 pub mod initrd;
 pub mod input;
 pub mod interrupts;
