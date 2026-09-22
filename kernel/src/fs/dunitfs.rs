@@ -1,5 +1,6 @@
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::UnsafeCell;
 
 use crate::drivers::block::{self, BlockDeviceInfo};
 use crate::fs::vfs::{
@@ -17,10 +18,15 @@ const METADATA_START: u64 = 1;
 const METADATA_BLOCKS: u64 = (MAX_NODES * NODE_SIZE / BLOCK_SIZE) as u64;
 const DATA_START: u64 = METADATA_START + METADATA_BLOCKS;
 
-static mut MOUNTED_FS: Option<DunitFs> = None;
+/// Единственная смонтированная ФС DunitFS. Раньше `static mut Option<..>`; теперь
+/// `UnsafeCell`-newtype без `static mut`. Монтирование/размонтирование и доступ
+/// идут кооперативно на одном CPU.
+struct MountedFsCell(UnsafeCell<Option<DunitFs>>);
+unsafe impl Sync for MountedFsCell {}
+static MOUNTED_FS: MountedFsCell = MountedFsCell(UnsafeCell::new(None));
 
 pub fn is_mounted() -> bool {
-    unsafe { MOUNTED_FS.is_some() }
+    unsafe { (*MOUNTED_FS.0.get()).is_some() }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,7 +83,7 @@ pub fn format(
     partition_start: u64,
     partition_blocks: u64,
 ) -> core::result::Result<(), DunitFsError> {
-    if unsafe { MOUNTED_FS.is_some() } {
+    if unsafe { (*MOUNTED_FS.0.get()).is_some() } {
         return Err(DunitFsError::AlreadyMounted);
     }
     validate_geometry(device, partition_start, partition_blocks)?;
@@ -116,13 +122,14 @@ pub fn mount_global(
     partition_blocks: u64,
 ) -> core::result::Result<(), DunitFsError> {
     unsafe {
-        if MOUNTED_FS.is_some() {
+        let slot = MOUNTED_FS.0.get();
+        if (*slot).is_some() {
             return Err(DunitFsError::AlreadyMounted);
         }
-        MOUNTED_FS = Some(DunitFs::load(device, partition_start, partition_blocks)?);
-        let fs = MOUNTED_FS.as_mut().ok_or(DunitFsError::Io)?;
+        *slot = Some(DunitFs::load(device, partition_start, partition_blocks)?);
+        let fs = (*slot).as_mut().ok_or(DunitFsError::Io)?;
         if let Err(error) = vfs.mount(path, fs) {
-            MOUNTED_FS = None;
+            *slot = None;
             return Err(DunitFsError::Vfs(error));
         }
     }
@@ -130,7 +137,7 @@ pub fn mount_global(
 }
 
 pub fn auto_mount(vfs: &mut VirtualFileSystem) -> bool {
-    if unsafe { MOUNTED_FS.is_some() } {
+    if unsafe { (*MOUNTED_FS.0.get()).is_some() } {
         return true;
     }
 

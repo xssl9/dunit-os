@@ -1,3 +1,4 @@
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicUsize, Ordering};
 
 const MOUSE_EVENT_QUEUE_LEN: usize = 64;
@@ -12,8 +13,12 @@ static MOUSE_EVENT_READ: AtomicUsize = AtomicUsize::new(0);
 static MOUSE_EVENT_WRITE: AtomicUsize = AtomicUsize::new(0);
 static MOUSE_EVENT_LOCK: AtomicBool = AtomicBool::new(false);
 
-static mut MOUSE_EVENTS: [MouseEvent; MOUSE_EVENT_QUEUE_LEN] =
-    [MouseEvent::empty(); MOUSE_EVENT_QUEUE_LEN];
+/// Кольцо событий мыши. Раньше `static mut` массив; теперь `UnsafeCell`-newtype,
+/// доступ к которому всегда под `MOUSE_EVENT_LOCK` (индексы — отдельные атомики).
+struct MouseEventsCell(UnsafeCell<[MouseEvent; MOUSE_EVENT_QUEUE_LEN]>);
+unsafe impl Sync for MouseEventsCell {}
+static MOUSE_EVENTS: MouseEventsCell =
+    MouseEventsCell(UnsafeCell::new([MouseEvent::empty(); MOUSE_EVENT_QUEUE_LEN]));
 
 #[derive(Clone, Copy)]
 pub struct MouseEvent {
@@ -123,7 +128,7 @@ pub fn pop_mouse_event() -> Option<MouseEvent> {
         return None;
     }
 
-    let event = unsafe { MOUSE_EVENTS[read] };
+    let event = unsafe { (*MOUSE_EVENTS.0.get())[read] };
     MOUSE_EVENT_READ.store((read + 1) % MOUSE_EVENT_QUEUE_LEN, Ordering::Relaxed);
     MOUSE_EVENT_LOCK.store(false, Ordering::Release);
     Some(event)
@@ -141,7 +146,7 @@ fn push_mouse_event(event: MouseEvent) {
         );
     }
     unsafe {
-        MOUSE_EVENTS[write] = event;
+        (*MOUSE_EVENTS.0.get())[write] = event;
     }
     MOUSE_EVENT_WRITE.store(next, Ordering::Relaxed);
     MOUSE_EVENT_LOCK.store(false, Ordering::Release);

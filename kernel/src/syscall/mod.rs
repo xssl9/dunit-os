@@ -2,7 +2,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 #[cfg(feature = "boot-smoke-tests")]
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 #[repr(u64)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +50,8 @@ pub enum Syscall {
     SharedVmClose = 38,
     SetThreadPointer = 39,
     GetThreadPointer = 40,
+    FutexWait = 41,
+    FutexWake = 42,
 }
 
 impl Syscall {
@@ -96,6 +99,8 @@ impl Syscall {
             38 => Some(Syscall::SharedVmClose),
             39 => Some(Syscall::SetThreadPointer),
             40 => Some(Syscall::GetThreadPointer),
+            41 => Some(Syscall::FutexWait),
+            42 => Some(Syscall::FutexWake),
             _ => None,
         }
     }
@@ -121,10 +126,13 @@ pub const EINTR: i64 = -4;
 pub const EMSGSIZE: i64 = -90;
 pub const ENOBUFS: i64 = -105;
 
-pub static mut KERNEL_FB_ADDR: u64 = 0;
-pub static mut KERNEL_FB_WIDTH: u32 = 0;
-pub static mut KERNEL_FB_HEIGHT: u32 = 0;
-pub static mut KERNEL_FB_PITCH: u32 = 0;
+/// Параметры фреймбуфера ядра. Раньше четыре `pub static mut` скаляра,
+/// записываемые один раз из `lib.rs` и читаемые из системных вызовов display;
+/// теперь атомики — простые скаляры не нуждаются в локе.
+pub static KERNEL_FB_ADDR: AtomicU64 = AtomicU64::new(0);
+pub static KERNEL_FB_WIDTH: AtomicU32 = AtomicU32::new(0);
+pub static KERNEL_FB_HEIGHT: AtomicU32 = AtomicU32::new(0);
+pub static KERNEL_FB_PITCH: AtomicU32 = AtomicU32::new(0);
 
 #[repr(C)]
 pub struct FbInfo {
@@ -191,6 +199,10 @@ pub struct UserFileStat {
 }
 
 const USER_SPACE_START: u64 = 0x0000_0000_0000_0000;
+// Inclusive top of the canonical lower half: highest byte a user pointer may
+// occupy. Checks use `end <= USER_SPACE_END`. This is numerically equivalent to
+// the exclusive bound `process::USER_ADDRESS_END` (0x0000_8000_0000_0000): a
+// byte at `base` is rejected iff `base > USER_SPACE_END` iff `base >= 0x8000_...`.
 const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
 const MAX_FD: u32 = 1024;
 const MAX_USER_COPY: usize = 64 * 1024;
@@ -239,10 +251,11 @@ pub struct WaitStatus {
 
 #[cfg(feature = "boot-smoke-tests")]
 #[repr(align(4096))]
-struct UserSmokeStack([u8; 4096]);
+struct UserSmokeStack(UnsafeCell<[u8; 4096]>);
+unsafe impl Sync for UserSmokeStack {}
 
 #[cfg(feature = "boot-smoke-tests")]
-static mut USER_SMOKE_STACK: UserSmokeStack = UserSmokeStack([0; 4096]);
+static USER_SMOKE_STACK: UserSmokeStack = UserSmokeStack(UnsafeCell::new([0; 4096]));
 
 struct SyscallLogWriter;
 
@@ -514,6 +527,8 @@ pub extern "C" fn syscall_handler(
         Syscall::GetThreadPointer => crate::process::current_thread_pointer()
             .map(|_| unsafe { crate::hal::get_fs_base() as i64 })
             .unwrap_or(EINVAL),
+        Syscall::FutexWait => sys_futex_wait(arg0, arg1, arg2),
+        Syscall::FutexWake => sys_futex_wake(arg0, arg1),
     }
 }
 
@@ -1061,14 +1076,14 @@ fn sys_receive_message(msg: *mut u8, len: usize) -> i64 {
 
 fn sys_get_framebuffer(info: *mut FbInfo) -> i64 {
     unsafe {
-        if KERNEL_FB_ADDR == 0 {
+        if KERNEL_FB_ADDR.load(Ordering::Relaxed) == 0 {
             return EINVAL;
         }
         let fb = FbInfo {
-            addr: KERNEL_FB_ADDR,
-            width: KERNEL_FB_WIDTH,
-            height: KERNEL_FB_HEIGHT,
-            pitch: KERNEL_FB_PITCH,
+            addr: KERNEL_FB_ADDR.load(Ordering::Relaxed),
+            width: KERNEL_FB_WIDTH.load(Ordering::Relaxed),
+            height: KERNEL_FB_HEIGHT.load(Ordering::Relaxed),
+            pitch: KERNEL_FB_PITCH.load(Ordering::Relaxed),
         };
         let bytes = core::slice::from_raw_parts(
             &fb as *const FbInfo as *const u8,
@@ -1159,14 +1174,14 @@ fn sys_get_system_stats(info: *mut SystemStats) -> i64 {
 
 fn sys_draw_pixel(x: u32, y: u32, color: u32) -> i64 {
     unsafe {
-        if KERNEL_FB_ADDR == 0 {
+        if KERNEL_FB_ADDR.load(Ordering::Relaxed) == 0 {
             return EINVAL;
         }
-        let fb = KERNEL_FB_ADDR as *mut u32;
-        let w = KERNEL_FB_WIDTH as usize;
-        let h = KERNEL_FB_HEIGHT as usize;
+        let fb = KERNEL_FB_ADDR.load(Ordering::Relaxed) as *mut u32;
+        let w = KERNEL_FB_WIDTH.load(Ordering::Relaxed) as usize;
+        let h = KERNEL_FB_HEIGHT.load(Ordering::Relaxed) as usize;
         if (x as usize) < w && (y as usize) < h {
-            let pitch_pixels = KERNEL_FB_PITCH as usize / 4;
+            let pitch_pixels = KERNEL_FB_PITCH.load(Ordering::Relaxed) as usize / 4;
             core::ptr::write_volatile(fb.add(y as usize * pitch_pixels + x as usize), color);
         }
     }
@@ -1175,13 +1190,13 @@ fn sys_draw_pixel(x: u32, y: u32, color: u32) -> i64 {
 
 fn sys_draw_rect(x: u32, y: u32, w: u32, h: u32, color: u32) -> i64 {
     unsafe {
-        if KERNEL_FB_ADDR == 0 {
+        if KERNEL_FB_ADDR.load(Ordering::Relaxed) == 0 {
             return EINVAL;
         }
-        let fb = KERNEL_FB_ADDR as *mut u32;
-        let fb_w = KERNEL_FB_WIDTH as usize;
-        let fb_h = KERNEL_FB_HEIGHT as usize;
-        let pitch_pixels = KERNEL_FB_PITCH as usize / 4;
+        let fb = KERNEL_FB_ADDR.load(Ordering::Relaxed) as *mut u32;
+        let fb_w = KERNEL_FB_WIDTH.load(Ordering::Relaxed) as usize;
+        let fb_h = KERNEL_FB_HEIGHT.load(Ordering::Relaxed) as usize;
+        let pitch_pixels = KERNEL_FB_PITCH.load(Ordering::Relaxed) as usize / 4;
         for dy in 0..h as usize {
             for dx in 0..w as usize {
                 let px = x as usize + dx;
@@ -1505,6 +1520,30 @@ fn sys_wait_event(timeout_ms: u64) -> i64 {
     }
 }
 
+/// Dunit-native futex wait. Parks the caller iff the u32 at `addr` still equals
+/// `expected`, keyed by (owning process, user vaddr). `timeout_ms == 0` means no
+/// deadline. Returns EAGAIN on value mismatch, EFAULT if the word is unmapped.
+fn sys_futex_wait(addr: u64, expected: u64, timeout_ms: u64) -> i64 {
+    if addr % 4 != 0 || !is_valid_user_pointer(addr, 4) {
+        return EINVAL;
+    }
+    let deadline = (timeout_ms != 0).then(|| crate::clock::Deadline::after_ms(timeout_ms).tick());
+    match crate::process::futex_wait(addr, expected as u32, deadline) {
+        Ok(crate::process::FutexWaitOutcome::Parked) => USER_CONTEXT_RETURN_MAGIC,
+        Ok(crate::process::FutexWaitOutcome::ValueMismatch) => EAGAIN,
+        Err(crate::process::ProcessError::InvalidMemoryRange) => EFAULT,
+        Err(error) => process_error_to_errno(error),
+    }
+}
+
+/// Wake up to `count` futex waiters on `addr`. `count == 0` wakes all waiters.
+fn sys_futex_wake(addr: u64, count: u64) -> i64 {
+    if addr % 4 != 0 || !is_valid_user_pointer(addr, 4) {
+        return EINVAL;
+    }
+    crate::process::futex_wake(addr, count as usize) as i64
+}
+
 fn sys_debug_log(code: u64) -> i64 {
     match code {
         #[cfg(feature = "boot-smoke-tests")]
@@ -1566,7 +1605,7 @@ pub fn run_userspace_syscall_smoke() -> bool {
 
     let entry = user_syscall_smoke_entry as *const () as usize;
     let stack_top = unsafe {
-        let stack_base = core::ptr::addr_of_mut!(USER_SMOKE_STACK.0) as *mut u8;
+        let stack_base = USER_SMOKE_STACK.0.get() as *mut u8;
         stack_base.add(core::mem::size_of::<UserSmokeStack>()) as usize
     };
 

@@ -1,5 +1,6 @@
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::UnsafeCell;
 
 #[derive(Debug)]
 pub struct InitrdFile {
@@ -36,7 +37,12 @@ impl Initrd {
     }
 }
 
-static mut INITRD_INSTANCE: Option<Initrd> = None;
+/// Синглтон initrd. Раньше `static mut Option<..>`; теперь `UnsafeCell`-newtype
+/// без `static mut`. Инициализируется один раз в `init` при загрузке, дальше к
+/// нему обращается лишь кооперативный путь на одном CPU.
+struct InitrdCell(UnsafeCell<Option<Initrd>>);
+unsafe impl Sync for InitrdCell {}
+static INITRD_INSTANCE: InitrdCell = InitrdCell(UnsafeCell::new(None));
 
 /// Initialize the initrd store and return the number of files it actually
 /// holds. No initrd archive is wired into the boot path yet, so this currently
@@ -44,8 +50,8 @@ static mut INITRD_INSTANCE: Option<Initrd> = None;
 /// archive was located and unpacked.
 pub fn init() -> usize {
     unsafe {
-        INITRD_INSTANCE = Some(Initrd::new());
-        INITRD_INSTANCE
+        *INITRD_INSTANCE.0.get() = Some(Initrd::new());
+        (*INITRD_INSTANCE.0.get())
             .as_ref()
             .map(Initrd::file_count)
             .unwrap_or(0)
@@ -54,9 +60,14 @@ pub fn init() -> usize {
 
 /// Number of files currently held by the initrd store, or 0 before init.
 pub fn file_count() -> usize {
-    unsafe { INITRD_INSTANCE.as_ref().map(Initrd::file_count).unwrap_or(0) }
+    unsafe {
+        (*INITRD_INSTANCE.0.get())
+            .as_ref()
+            .map(Initrd::file_count)
+            .unwrap_or(0)
+    }
 }
 
 pub fn get_initrd() -> Option<&'static mut Initrd> {
-    unsafe { INITRD_INSTANCE.as_mut() }
+    unsafe { (*INITRD_INSTANCE.0.get()).as_mut() }
 }

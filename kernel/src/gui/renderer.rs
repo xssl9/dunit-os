@@ -144,7 +144,13 @@ const MAX_BACKBUFFER_WIDTH: usize = 1920;
 const MAX_BACKBUFFER_HEIGHT: usize = 1080;
 const MAX_BACKBUFFER_PIXELS: usize = MAX_BACKBUFFER_WIDTH * MAX_BACKBUFFER_HEIGHT;
 
-static mut GUI_BACK_BUFFER: [u32; MAX_BACKBUFFER_PIXELS] = [0; MAX_BACKBUFFER_PIXELS];
+/// Задний буфер GUI. Раньше `static mut [u32; N]`; теперь `UnsafeCell`-newtype
+/// без `static mut`: `BackBuffer::init` берёт сырой указатель на него ровно один
+/// раз, дальше владельцем пикселей выступает `Framebuffer`.
+struct GuiBackBuffer(core::cell::UnsafeCell<[u32; MAX_BACKBUFFER_PIXELS]>);
+unsafe impl Sync for GuiBackBuffer {}
+static GUI_BACK_BUFFER: GuiBackBuffer =
+    GuiBackBuffer(core::cell::UnsafeCell::new([0; MAX_BACKBUFFER_PIXELS]));
 
 pub struct BackBuffer {
     canvas: Framebuffer,
@@ -162,7 +168,7 @@ impl BackBuffer {
 
         Some(Self {
             canvas: Framebuffer::new(
-                core::ptr::addr_of_mut!(GUI_BACK_BUFFER).cast::<u32>(),
+                GUI_BACK_BUFFER.0.get().cast::<u32>(),
                 width,
                 height,
                 width * 4,

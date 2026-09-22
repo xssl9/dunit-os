@@ -3,6 +3,7 @@ use crate::drivers::registry::{self, DeviceClass};
 use crate::memory::vmm;
 use crate::serial::{write_dec, write_hex, write_hex16, write_hex8, write_mac};
 use crate::serial_write;
+use crate::sync::SpinLock;
 
 const PCI_CLASS_NETWORK: u8 = 0x02;
 const VENDOR_INTEL: u16 = 0x8086;
@@ -35,12 +36,12 @@ pub struct NetSnapshot {
     pub mac_ready_nics: usize,
 }
 
-static mut NET_SNAPSHOT: NetSnapshot = NetSnapshot {
+static NET_SNAPSHOT: SpinLock<NetSnapshot> = SpinLock::new(NetSnapshot {
     total_nics: 0,
     supported_nics: 0,
     mmio_ready_nics: 0,
     mac_ready_nics: 0,
-};
+});
 
 pub fn init() {
     let mut index = 0usize;
@@ -95,14 +96,12 @@ pub fn init() {
         index += 1;
     });
 
-    unsafe {
-        NET_SNAPSHOT = NetSnapshot {
-            total_nics: total,
-            supported_nics: supported,
-            mmio_ready_nics: mmio_ready,
-            mac_ready_nics: mac_ready,
-        };
-    }
+    *NET_SNAPSHOT.lock() = NetSnapshot {
+        total_nics: total,
+        supported_nics: supported,
+        mmio_ready_nics: mmio_ready,
+        mac_ready_nics: mac_ready,
+    };
 
     if total == 0 {
         serial_write("[NET] no PCI network controller detected\r\n");
@@ -120,7 +119,7 @@ pub fn init() {
 }
 
 pub fn snapshot() -> NetSnapshot {
-    unsafe { NET_SNAPSHOT }
+    *NET_SNAPSHOT.lock()
 }
 
 fn classify_nic(dev: PciDevice) -> NicKind {

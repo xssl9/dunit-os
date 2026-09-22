@@ -1,6 +1,7 @@
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::UnsafeCell;
 use core::fmt;
 
 use super::memfs::MemFs;
@@ -46,6 +47,7 @@ static VM_PEER_BYTES: &[u8] = include_bytes!("../../../build/userspace/vm_peer")
 static VM_GUARD_FAULT_BYTES: &[u8] = include_bytes!("../../../build/userspace/vm_guard_fault");
 static VM_PROTECT_FAULT_BYTES: &[u8] = include_bytes!("../../../build/userspace/vm_protect_fault");
 static TLS_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/tls_test");
+static FUTEX_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/futex_test");
 
 pub struct AssetEntry {
     pub path: &'static str,
@@ -314,7 +316,7 @@ impl VirtualFileSystem {
     }
 
     pub fn open_at(&mut self, cwd: &str, path: &str, flags: OpenFlags) -> Result<FileDescriptor> {
-        let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut VFS_PATH_BUFFER)? };
+        let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut *VFS_PATH_BUFFER.0.get())? };
         let handle = unsafe { (&mut *fs).open(relative_path, flags)? };
 
         let fd = self.next_fd;
@@ -356,7 +358,7 @@ impl VirtualFileSystem {
     }
 
     pub fn readdir_at(&mut self, cwd: &str, path: &str) -> Result<Vec<DirEntry>> {
-        let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut VFS_PATH_BUFFER)? };
+        let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut *VFS_PATH_BUFFER.0.get())? };
         unsafe { (&mut *fs).readdir(relative_path) }
     }
 
@@ -366,32 +368,32 @@ impl VirtualFileSystem {
         path: &str,
         entries: &mut [DirEntry],
     ) -> Result<usize> {
-        let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut VFS_PATH_BUFFER)? };
+        let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut *VFS_PATH_BUFFER.0.get())? };
         unsafe { (&mut *fs).readdir_into(relative_path, entries) }
     }
 
     pub fn create_at(&mut self, cwd: &str, path: &str) -> Result<()> {
-        let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut VFS_PATH_BUFFER)? };
+        let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut *VFS_PATH_BUFFER.0.get())? };
         unsafe { (&mut *fs).create(relative_path) }
     }
 
     pub fn mkdir_at(&mut self, cwd: &str, path: &str) -> Result<()> {
-        let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut VFS_PATH_BUFFER)? };
+        let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut *VFS_PATH_BUFFER.0.get())? };
         unsafe { (&mut *fs).mkdir(relative_path) }
     }
 
     pub fn remove_at(&mut self, cwd: &str, path: &str) -> Result<()> {
-        let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut VFS_PATH_BUFFER)? };
+        let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut *VFS_PATH_BUFFER.0.get())? };
         unsafe { (&mut *fs).remove(relative_path) }
     }
 
     pub fn truncate_at(&mut self, cwd: &str, path: &str) -> Result<()> {
-        let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut VFS_PATH_BUFFER)? };
+        let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut *VFS_PATH_BUFFER.0.get())? };
         unsafe { (&mut *fs).truncate(relative_path) }
     }
 
     pub fn stat_at(&mut self, cwd: &str, path: &str) -> Result<FileStat> {
-        let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut VFS_PATH_BUFFER)? };
+        let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut *VFS_PATH_BUFFER.0.get())? };
         unsafe { (&mut *fs).stat(relative_path) }
     }
 
@@ -473,9 +475,22 @@ fn pop_path_component(out: &[u8; 256], len: &mut usize) {
     *len = if idx == 0 { 1 } else { idx };
 }
 
-static mut VFS_INSTANCE: Option<VirtualFileSystem> = None;
-static mut ROOT_MEMFS: MemFs = MemFs::empty();
-static mut VFS_PATH_BUFFER: [u8; 256] = [0; 256];
+/// Синглтон VFS, корневая MemFs и переиспользуемый буфер для нормализации путей.
+/// Раньше три `static mut`; теперь `UnsafeCell`-newtype без `static mut`. Всё это
+/// инициализируется на этапе загрузки и используется кооперативно на одном CPU;
+/// раздача `&'static mut` через `as_mut()`/`.get()` сохраняет прежнюю семантику
+/// (в т.ч. монтирование `&'static mut ROOT_MEMFS` в VFS).
+struct VfsInstanceCell(UnsafeCell<Option<VirtualFileSystem>>);
+unsafe impl Sync for VfsInstanceCell {}
+static VFS_INSTANCE: VfsInstanceCell = VfsInstanceCell(UnsafeCell::new(None));
+
+struct RootMemFsCell(UnsafeCell<MemFs>);
+unsafe impl Sync for RootMemFsCell {}
+static ROOT_MEMFS: RootMemFsCell = RootMemFsCell(UnsafeCell::new(MemFs::empty()));
+
+struct VfsPathBufferCell(UnsafeCell<[u8; 256]>);
+unsafe impl Sync for VfsPathBufferCell {}
+static VFS_PATH_BUFFER: VfsPathBufferCell = VfsPathBufferCell(UnsafeCell::new([0; 256]));
 const GUI_SHORTCUTS_CONFIG: &[u8] = b"super+q=close_window\nsuper+enter=open_terminal\n";
 
 fn serial_log(msg: &str) {
@@ -485,11 +500,11 @@ fn serial_log(msg: &str) {
 fn register_assets() {
     unsafe {
         for dir in ASSET_DIRS.iter() {
-            let _ = ROOT_MEMFS.mkdir(dir);
+            let _ = (*ROOT_MEMFS.0.get()).mkdir(dir);
         }
 
         for asset in ASSETS.iter() {
-            ROOT_MEMFS.add_static_file(asset.path, asset.data);
+            (*ROOT_MEMFS.0.get()).add_static_file(asset.path, asset.data);
         }
     }
 }
@@ -501,161 +516,162 @@ pub fn init() -> Result<()> {
 
         let mut elf_demo = Vec::new();
         elf_demo.extend_from_slice(ELF_DEMO_BYTES);
-        ROOT_MEMFS.add_file("/app/elf_demo", elf_demo);
+        (*ROOT_MEMFS.0.get()).add_file("/app/elf_demo", elf_demo);
 
         let mut fs_test = Vec::new();
         fs_test.extend_from_slice(FS_TEST_BYTES);
-        ROOT_MEMFS.add_file("/app/fs_test", fs_test);
+        (*ROOT_MEMFS.0.get()).add_file("/app/fs_test", fs_test);
 
         let mut exit_test = Vec::new();
         exit_test.extend_from_slice(EXIT_TEST_BYTES);
-        ROOT_MEMFS.add_file("/app/exit_test", exit_test);
+        (*ROOT_MEMFS.0.get()).add_file("/app/exit_test", exit_test);
 
         let mut args_test = Vec::new();
         args_test.extend_from_slice(ARGS_TEST_BYTES);
-        ROOT_MEMFS.add_file("/app/args_test", args_test);
+        (*ROOT_MEMFS.0.get()).add_file("/app/args_test", args_test);
 
         let mut cwd_test = Vec::new();
         cwd_test.extend_from_slice(CWD_TEST_BYTES);
-        ROOT_MEMFS.add_file("/app/cwd_test", cwd_test);
+        (*ROOT_MEMFS.0.get()).add_file("/app/cwd_test", cwd_test);
 
         let mut path_test = Vec::new();
         path_test.extend_from_slice(PATH_TEST_BYTES);
-        ROOT_MEMFS.add_file("/app/path_test", path_test);
+        (*ROOT_MEMFS.0.get()).add_file("/app/path_test", path_test);
 
         let mut image_demo = Vec::new();
         image_demo.extend_from_slice(IMAGE_DEMO_BYTES);
-        ROOT_MEMFS.add_file("/app/image_demo", image_demo);
+        (*ROOT_MEMFS.0.get()).add_file("/app/image_demo", image_demo);
 
         let mut bmp_viewer = Vec::new();
         bmp_viewer.extend_from_slice(BMP_VIEWER_BYTES);
-        ROOT_MEMFS.add_file("/app/bmp_viewer", bmp_viewer);
+        (*ROOT_MEMFS.0.get()).add_file("/app/bmp_viewer", bmp_viewer);
 
         register_assets();
-        let _ = ROOT_MEMFS.mkdir("/cfg/gui");
-        let _ = ROOT_MEMFS.mkdir("/persist");
+        let _ = (*ROOT_MEMFS.0.get()).mkdir("/cfg/gui");
+        let _ = (*ROOT_MEMFS.0.get()).mkdir("/persist");
         let mut gui_shortcuts = Vec::new();
         gui_shortcuts.extend_from_slice(GUI_SHORTCUTS_CONFIG);
-        ROOT_MEMFS.add_file("/cfg/gui/shortcuts.conf", gui_shortcuts);
+        (*ROOT_MEMFS.0.get()).add_file("/cfg/gui/shortcuts.conf", gui_shortcuts);
 
         let mut scheduler_test = Vec::new();
         scheduler_test.extend_from_slice(SCHEDULER_TEST_BYTES);
-        ROOT_MEMFS.add_file("/app/scheduler_test", scheduler_test);
+        (*ROOT_MEMFS.0.get()).add_file("/app/scheduler_test", scheduler_test);
 
         let mut spawn_ready_test = Vec::new();
         spawn_ready_test.extend_from_slice(SPAWN_READY_TEST_BYTES);
-        ROOT_MEMFS.add_file("/app/spawn_ready_test", spawn_ready_test);
+        (*ROOT_MEMFS.0.get()).add_file("/app/spawn_ready_test", spawn_ready_test);
 
         let mut yield_child = Vec::new();
         yield_child.extend_from_slice(YIELD_CHILD_BYTES);
-        ROOT_MEMFS.add_file("/app/yield_child", yield_child);
+        (*ROOT_MEMFS.0.get()).add_file("/app/yield_child", yield_child);
 
         let mut yield_test = Vec::new();
         yield_test.extend_from_slice(YIELD_TEST_BYTES);
-        ROOT_MEMFS.add_file("/app/yield_test", yield_test);
+        (*ROOT_MEMFS.0.get()).add_file("/app/yield_test", yield_test);
 
         let mut resumable_child = Vec::new();
         resumable_child.extend_from_slice(RESUMABLE_CHILD_BYTES);
-        ROOT_MEMFS.add_file("/app/resumable_child", resumable_child);
+        (*ROOT_MEMFS.0.get()).add_file("/app/resumable_child", resumable_child);
 
         let mut resumable_test = Vec::new();
         resumable_test.extend_from_slice(RESUMABLE_TEST_BYTES);
-        ROOT_MEMFS.add_file("/app/resumable_test", resumable_test);
+        (*ROOT_MEMFS.0.get()).add_file("/app/resumable_test", resumable_test);
 
         let mut ipc_child = Vec::new();
         ipc_child.extend_from_slice(IPC_CHILD_BYTES);
-        ROOT_MEMFS.add_file("/app/ipc_child", ipc_child);
+        (*ROOT_MEMFS.0.get()).add_file("/app/ipc_child", ipc_child);
 
         let mut ipc_parent = Vec::new();
         ipc_parent.extend_from_slice(IPC_PARENT_BYTES);
-        ROOT_MEMFS.add_file("/app/ipc_parent", ipc_parent);
+        (*ROOT_MEMFS.0.get()).add_file("/app/ipc_parent", ipc_parent);
 
         let mut runtime_stress = Vec::new();
         runtime_stress.extend_from_slice(RUNTIME_STRESS_BYTES);
-        ROOT_MEMFS.add_file("/app/runtime_stress", runtime_stress);
+        (*ROOT_MEMFS.0.get()).add_file("/app/runtime_stress", runtime_stress);
 
         let mut input_test = Vec::new();
         input_test.extend_from_slice(INPUT_TEST_BYTES);
-        ROOT_MEMFS.add_file("/app/input_test", input_test);
+        (*ROOT_MEMFS.0.get()).add_file("/app/input_test", input_test);
 
         let mut file_api_test = Vec::new();
         file_api_test.extend_from_slice(FILE_API_TEST_BYTES);
-        ROOT_MEMFS.add_file("/app/file_api_test", file_api_test);
+        (*ROOT_MEMFS.0.get()).add_file("/app/file_api_test", file_api_test);
 
         let mut env_test = Vec::new();
         env_test.extend_from_slice(ENV_TEST_BYTES);
-        ROOT_MEMFS.add_file("/app/env_test", env_test);
+        (*ROOT_MEMFS.0.get()).add_file("/app/env_test", env_test);
 
         let mut calc = Vec::new();
         calc.extend_from_slice(CALC_BYTES);
-        ROOT_MEMFS.add_file("/app/calc", calc);
+        (*ROOT_MEMFS.0.get()).add_file("/app/calc", calc);
 
         let mut gui_ping = Vec::new();
         gui_ping.extend_from_slice(GUI_PING_BYTES);
-        ROOT_MEMFS.add_file("/app/gui_ping", gui_ping);
+        (*ROOT_MEMFS.0.get()).add_file("/app/gui_ping", gui_ping);
 
         let mut gui_terminal_stub = Vec::new();
         gui_terminal_stub.extend_from_slice(GUI_TERMINAL_STUB_BYTES);
-        ROOT_MEMFS.add_file("/app/gui_terminal_stub", gui_terminal_stub);
+        (*ROOT_MEMFS.0.get()).add_file("/app/gui_terminal_stub", gui_terminal_stub);
 
         let mut gui_calculator = Vec::new();
         gui_calculator.extend_from_slice(GUI_CALCULATOR_BYTES);
-        ROOT_MEMFS.add_file("/app/gui_calculator", gui_calculator);
+        (*ROOT_MEMFS.0.get()).add_file("/app/gui_calculator", gui_calculator);
 
         let mut gui_stats = Vec::new();
         gui_stats.extend_from_slice(GUI_STATS_BYTES);
-        ROOT_MEMFS.add_file("/app/gui_stats", gui_stats);
+        (*ROOT_MEMFS.0.get()).add_file("/app/gui_stats", gui_stats);
 
         let mut gui_file_manager = Vec::new();
         gui_file_manager.extend_from_slice(GUI_FILE_MANAGER_BYTES);
-        ROOT_MEMFS.add_file("/app/gui_file_manager", gui_file_manager);
+        (*ROOT_MEMFS.0.get()).add_file("/app/gui_file_manager", gui_file_manager);
 
         let mut stdin_test = Vec::new();
         stdin_test.extend_from_slice(STDIN_TEST_BYTES);
-        ROOT_MEMFS.add_file("/app/stdin_test", stdin_test);
+        (*ROOT_MEMFS.0.get()).add_file("/app/stdin_test", stdin_test);
 
         let mut dtop = Vec::new();
         dtop.extend_from_slice(DTOP_BYTES);
-        ROOT_MEMFS.add_file("/app/dtop", dtop);
+        (*ROOT_MEMFS.0.get()).add_file("/app/dtop", dtop);
 
         let mut fault_pf = Vec::new();
         fault_pf.extend_from_slice(FAULT_PF_BYTES);
-        ROOT_MEMFS.add_file("/app/fault_pf", fault_pf);
+        (*ROOT_MEMFS.0.get()).add_file("/app/fault_pf", fault_pf);
 
         let mut fault_ud = Vec::new();
         fault_ud.extend_from_slice(FAULT_UD_BYTES);
-        ROOT_MEMFS.add_file("/app/fault_ud", fault_ud);
+        (*ROOT_MEMFS.0.get()).add_file("/app/fault_ud", fault_ud);
 
         let mut preempt_child = Vec::new();
         preempt_child.extend_from_slice(PREEMPT_CHILD_BYTES);
-        ROOT_MEMFS.add_file("/app/preempt_child", preempt_child);
+        (*ROOT_MEMFS.0.get()).add_file("/app/preempt_child", preempt_child);
 
         let mut preempt_test = Vec::new();
         preempt_test.extend_from_slice(PREEMPT_TEST_BYTES);
-        ROOT_MEMFS.add_file("/app/preempt_test", preempt_test);
+        (*ROOT_MEMFS.0.get()).add_file("/app/preempt_test", preempt_test);
 
         let mut kill_target = Vec::new();
         kill_target.extend_from_slice(KILL_TARGET_BYTES);
-        ROOT_MEMFS.add_file("/app/kill_target", kill_target);
+        (*ROOT_MEMFS.0.get()).add_file("/app/kill_target", kill_target);
 
         let mut thread_test = Vec::new();
         thread_test.extend_from_slice(THREAD_TEST_BYTES);
-        ROOT_MEMFS.add_file("/app/thread_test", thread_test);
+        (*ROOT_MEMFS.0.get()).add_file("/app/thread_test", thread_test);
 
         let mut wait_test = Vec::new();
         wait_test.extend_from_slice(WAIT_TEST_BYTES);
-        ROOT_MEMFS.add_file("/app/wait_test", wait_test);
+        (*ROOT_MEMFS.0.get()).add_file("/app/wait_test", wait_test);
 
-        ROOT_MEMFS.add_file("/app/vm_test", VM_TEST_BYTES.to_vec());
-        ROOT_MEMFS.add_file("/app/vm_peer", VM_PEER_BYTES.to_vec());
-        ROOT_MEMFS.add_file("/app/vm_guard_fault", VM_GUARD_FAULT_BYTES.to_vec());
-        ROOT_MEMFS.add_file("/app/vm_protect_fault", VM_PROTECT_FAULT_BYTES.to_vec());
-        ROOT_MEMFS.add_file("/app/tls_test", TLS_TEST_BYTES.to_vec());
+        (*ROOT_MEMFS.0.get()).add_file("/app/vm_test", VM_TEST_BYTES.to_vec());
+        (*ROOT_MEMFS.0.get()).add_file("/app/vm_peer", VM_PEER_BYTES.to_vec());
+        (*ROOT_MEMFS.0.get()).add_file("/app/vm_guard_fault", VM_GUARD_FAULT_BYTES.to_vec());
+        (*ROOT_MEMFS.0.get()).add_file("/app/vm_protect_fault", VM_PROTECT_FAULT_BYTES.to_vec());
+        (*ROOT_MEMFS.0.get()).add_file("/app/tls_test", TLS_TEST_BYTES.to_vec());
+        (*ROOT_MEMFS.0.get()).add_file("/app/futex_test", FUTEX_TEST_BYTES.to_vec());
 
-        vfs.mount("/", &mut ROOT_MEMFS)?;
+        vfs.mount("/", &mut *ROOT_MEMFS.0.get())?;
         serial_log("[MEMFS] mounted as /\r\n");
 
-        VFS_INSTANCE = Some(vfs);
+        *VFS_INSTANCE.0.get() = Some(vfs);
     }
 
     serial_log("[VFS] init OK\r\n");
@@ -663,19 +679,19 @@ pub fn init() -> Result<()> {
 }
 
 pub fn get_vfs() -> Option<&'static mut VirtualFileSystem> {
-    unsafe { VFS_INSTANCE.as_mut() }
+    unsafe { (*VFS_INSTANCE.0.get()).as_mut() }
 }
 
 pub fn static_file(path: &str) -> Option<&'static [u8]> {
-    unsafe { ROOT_MEMFS.static_file(path) }
+    unsafe { (*ROOT_MEMFS.0.get()).static_file(path) }
 }
 
 pub fn register_device_node(path: &str) {
     unsafe {
-        ROOT_MEMFS.add_device(path);
+        (*ROOT_MEMFS.0.get()).add_device(path);
     }
 }
 
 pub fn root_memfs_stats() -> crate::fs::memfs::MemFsStats {
-    unsafe { ROOT_MEMFS.stats() }
+    unsafe { (*ROOT_MEMFS.0.get()).stats() }
 }

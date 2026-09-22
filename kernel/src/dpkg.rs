@@ -1,5 +1,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 pub struct Package {
     name: &'static str,
@@ -7,22 +9,27 @@ pub struct Package {
     description: &'static str,
 }
 
-static mut INSTALLED_PACKAGES: Option<Vec<Package>> = None;
-static mut INITIALIZED: bool = false;
+/// Список установленных пакетов. Раньше `static mut Option<Vec<..>>`; теперь
+/// `UnsafeCell`-newtype без `static mut`. Менеджер пакетов работает кооперативно
+/// на одном CPU. Флаг инициализации вынесен в атомик.
+struct PackagesCell(UnsafeCell<Option<Vec<Package>>>);
+unsafe impl Sync for PackagesCell {}
+static INSTALLED_PACKAGES: PackagesCell = PackagesCell(UnsafeCell::new(None));
+static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 pub fn init() {
     unsafe {
-        INSTALLED_PACKAGES = Some(Vec::new());
-        INITIALIZED = true;
+        *INSTALLED_PACKAGES.0.get() = Some(Vec::new());
     }
+    INITIALIZED.store(true, Ordering::Relaxed);
 }
 
 fn ensure_base_packages() {
     unsafe {
-        if !INITIALIZED {
+        if !INITIALIZED.load(Ordering::Relaxed) {
             return;
         }
-        if let Some(ref mut packages) = INSTALLED_PACKAGES {
+        if let Some(packages) = (*INSTALLED_PACKAGES.0.get()).as_mut() {
             if packages.is_empty() {
                 packages.push(Package {
                     name: "dunit-base",
@@ -51,7 +58,7 @@ fn ensure_base_packages() {
 
 pub fn is_installed(name: &str) -> bool {
     unsafe {
-        if let Some(ref packages) = INSTALLED_PACKAGES {
+        if let Some(packages) = (*INSTALLED_PACKAGES.0.get()).as_ref() {
             packages.iter().any(|p| p.name == name)
         } else {
             false
@@ -60,18 +67,17 @@ pub fn is_installed(name: &str) -> bool {
 }
 
 pub fn install(name: &'static str, version: &'static str, description: &'static str) -> bool {
+    if is_installed(name) {
+        return false;
+    }
     unsafe {
-        if let Some(ref mut packages) = INSTALLED_PACKAGES {
-            if !is_installed(name) {
-                packages.push(Package {
-                    name,
-                    version,
-                    description,
-                });
-                true
-            } else {
-                false
-            }
+        if let Some(packages) = (*INSTALLED_PACKAGES.0.get()).as_mut() {
+            packages.push(Package {
+                name,
+                version,
+                description,
+            });
+            true
         } else {
             false
         }
@@ -80,7 +86,7 @@ pub fn install(name: &'static str, version: &'static str, description: &'static 
 
 pub fn remove(name: &str) -> bool {
     unsafe {
-        if let Some(ref mut packages) = INSTALLED_PACKAGES {
+        if let Some(packages) = (*INSTALLED_PACKAGES.0.get()).as_mut() {
             let len_before = packages.len();
             packages.retain(|p| p.name != name);
             packages.len() < len_before
@@ -93,7 +99,7 @@ pub fn remove(name: &str) -> bool {
 pub fn list() -> String {
     ensure_base_packages();
     unsafe {
-        if let Some(ref packages) = INSTALLED_PACKAGES {
+        if let Some(packages) = (*INSTALLED_PACKAGES.0.get()).as_ref() {
             let mut result = String::from("Installed packages:\n");
             for pkg in packages {
                 result.push_str("  ");

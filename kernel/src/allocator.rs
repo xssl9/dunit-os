@@ -14,6 +14,7 @@
 //! будущий userspace поверх libc, которому нужна честная растущая куча.
 
 use core::alloc::{GlobalAlloc, Layout};
+use core::cell::UnsafeCell;
 use core::ptr;
 
 use crate::sync::IrqSafeSpinLock;
@@ -280,19 +281,22 @@ pub fn init_heap(heap_start: usize, heap_size: usize) {
     ALLOCATOR.init(heap_start, heap_size);
 }
 
+/// Статическое хранилище под начальную кучу ядра. Обёрнуто в `UnsafeCell`-newtype
+/// вместо `static mut`, чтобы не было `&'static mut`-алиасинга: `init` читает лишь
+/// адрес и размер буфера один раз при загрузке, а дальше памятью распоряжается
+/// сам аллокатор через сырые указатели.
 #[repr(align(4096))]
-struct AlignedHeap([u8; 2 * 1024 * 1024]);
+struct AlignedHeap(UnsafeCell<[u8; 2 * 1024 * 1024]>);
+unsafe impl Sync for AlignedHeap {}
 
-static mut KERNEL_HEAP: AlignedHeap = AlignedHeap([0; 2 * 1024 * 1024]);
+static KERNEL_HEAP: AlignedHeap = AlignedHeap(UnsafeCell::new([0; 2 * 1024 * 1024]));
 
 pub fn init() {
     crate::memory::serial_write("[HEAP] START\r\n");
 
-    unsafe {
-        let heap_start = KERNEL_HEAP.0.as_ptr() as usize;
-        let heap_size = core::mem::size_of_val(&KERNEL_HEAP.0);
-        init_heap(heap_start, heap_size);
-    }
+    let heap_start = KERNEL_HEAP.0.get() as *const u8 as usize;
+    let heap_size = core::mem::size_of::<[u8; 2 * 1024 * 1024]>();
+    init_heap(heap_start, heap_size);
 
     crate::memory::serial_write("[HEAP] OK (PMM-backed, growable)\r\n");
 }

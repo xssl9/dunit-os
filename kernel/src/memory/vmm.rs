@@ -1,5 +1,6 @@
 use super::pmm::{get_pmm, PhysicalAddress};
 use alloc::vec::Vec;
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 const PAGE_SIZE: usize = 4096;
@@ -192,7 +193,7 @@ impl AddressSpace {
             .map(|mapping| mapping.map(|(_, flags)| flags))
     }
 
-    fn user_page_mapping(
+    pub fn user_page_mapping(
         &self,
         virt: VirtualAddress,
     ) -> Result<Option<(PhysicalAddress, PageFlags)>, AddressSpaceError> {
@@ -673,10 +674,29 @@ pub unsafe fn switch_to_root_frame(root_frame: usize) {
 static HHDM_OFFSET: AtomicU64 = AtomicU64::new(0);
 static KERNEL_ROOT_FRAME: AtomicUsize = AtomicUsize::new(UNINITIALIZED_ROOT);
 static MMIO_LOCK: AtomicBool = AtomicBool::new(false);
-static mut MMIO_FREE_RANGES: [MmioRange; MAX_MMIO_RANGES] = [MmioRange::EMPTY; MAX_MMIO_RANGES];
-static mut MMIO_FREE_COUNT: usize = 0;
-static mut MMIO_ALLOCATIONS: [MmioRange; MAX_MMIO_RANGES] = [MmioRange::EMPTY; MAX_MMIO_RANGES];
-static mut MMIO_ALLOCATION_COUNT: usize = 0;
+
+/// MMIO virtual-range bookkeeping. Previously four `static mut` arrays/counters;
+/// now bundled into one struct behind an `UnsafeCell`. Every access happens only
+/// while `MMIO_LOCK` is held (see `lock_mmio`/`unlock_mmio`), so the manual
+/// spinlock already serialises all readers and writers — the cell just removes
+/// the `static mut` aliasing UB. `init` touches it once at boot before any lock
+/// contention exists.
+struct MmioState {
+    free_ranges: [MmioRange; MAX_MMIO_RANGES],
+    free_count: usize,
+    allocations: [MmioRange; MAX_MMIO_RANGES],
+    allocation_count: usize,
+}
+
+struct MmioStateCell(UnsafeCell<MmioState>);
+unsafe impl Sync for MmioStateCell {}
+
+static MMIO_STATE: MmioStateCell = MmioStateCell(UnsafeCell::new(MmioState {
+    free_ranges: [MmioRange::EMPTY; MAX_MMIO_RANGES],
+    free_count: 0,
+    allocations: [MmioRange::EMPTY; MAX_MMIO_RANGES],
+    allocation_count: 0,
+}));
 
 pub fn init() {
     super::serial_write("[VMM] START\r\n");
@@ -693,12 +713,13 @@ pub fn init() {
         super::serial_write("[VMM] canonical kernel root already initialized\r\n");
     }
     unsafe {
-        MMIO_FREE_RANGES[0] = MmioRange {
+        let state = &mut *MMIO_STATE.0.get();
+        state.free_ranges[0] = MmioRange {
             start: KERNEL_MMIO_BASE,
             length: KERNEL_MMIO_SIZE,
         };
-        MMIO_FREE_COUNT = 1;
-        MMIO_ALLOCATION_COUNT = 0;
+        state.free_count = 1;
+        state.allocation_count = 0;
     }
     super::serial_write("[VMM] OK\r\n");
 }
@@ -803,9 +824,10 @@ pub fn unmap_mmio_region(virt: usize, length: usize) -> bool {
 
     lock_mmio();
     let allocation_exists = unsafe {
-        (0..MMIO_ALLOCATION_COUNT).any(|index| {
-            MMIO_ALLOCATIONS[index].start == virt_start
-                && MMIO_ALLOCATIONS[index].length == map_length
+        let state = &*MMIO_STATE.0.get();
+        (0..state.allocation_count).any(|index| {
+            state.allocations[index].start == virt_start
+                && state.allocations[index].length == map_length
         })
     };
     if !allocation_exists {
@@ -844,67 +866,69 @@ fn unlock_mmio() {
 }
 
 unsafe fn allocate_mmio_range(length: usize) -> Option<usize> {
-    if MMIO_ALLOCATION_COUNT >= MAX_MMIO_RANGES {
+    let state = &mut *MMIO_STATE.0.get();
+    if state.allocation_count >= MAX_MMIO_RANGES {
         return None;
     }
-    let index = (0..MMIO_FREE_COUNT).find(|index| MMIO_FREE_RANGES[*index].length >= length)?;
-    let start = MMIO_FREE_RANGES[index].start;
-    MMIO_FREE_RANGES[index].start += length;
-    MMIO_FREE_RANGES[index].length -= length;
-    if MMIO_FREE_RANGES[index].length == 0 {
+    let index = (0..state.free_count).find(|index| state.free_ranges[*index].length >= length)?;
+    let start = state.free_ranges[index].start;
+    state.free_ranges[index].start += length;
+    state.free_ranges[index].length -= length;
+    if state.free_ranges[index].length == 0 {
         let mut cursor = index;
-        while cursor + 1 < MMIO_FREE_COUNT {
-            MMIO_FREE_RANGES[cursor] = MMIO_FREE_RANGES[cursor + 1];
+        while cursor + 1 < state.free_count {
+            state.free_ranges[cursor] = state.free_ranges[cursor + 1];
             cursor += 1;
         }
-        MMIO_FREE_COUNT -= 1;
-        MMIO_FREE_RANGES[MMIO_FREE_COUNT] = MmioRange::EMPTY;
+        state.free_count -= 1;
+        state.free_ranges[state.free_count] = MmioRange::EMPTY;
     }
-    MMIO_ALLOCATIONS[MMIO_ALLOCATION_COUNT] = MmioRange { start, length };
-    MMIO_ALLOCATION_COUNT += 1;
+    state.allocations[state.allocation_count] = MmioRange { start, length };
+    state.allocation_count += 1;
     Some(start)
 }
 
 unsafe fn release_mmio_range(start: usize, length: usize) {
-    let Some(allocation_index) = (0..MMIO_ALLOCATION_COUNT).find(|index| {
-        MMIO_ALLOCATIONS[*index].start == start && MMIO_ALLOCATIONS[*index].length == length
+    let state = &mut *MMIO_STATE.0.get();
+    let Some(allocation_index) = (0..state.allocation_count).find(|index| {
+        state.allocations[*index].start == start && state.allocations[*index].length == length
     }) else {
         return;
     };
     let mut cursor = allocation_index;
-    while cursor + 1 < MMIO_ALLOCATION_COUNT {
-        MMIO_ALLOCATIONS[cursor] = MMIO_ALLOCATIONS[cursor + 1];
+    while cursor + 1 < state.allocation_count {
+        state.allocations[cursor] = state.allocations[cursor + 1];
         cursor += 1;
     }
-    MMIO_ALLOCATION_COUNT -= 1;
-    MMIO_ALLOCATIONS[MMIO_ALLOCATION_COUNT] = MmioRange::EMPTY;
+    state.allocation_count -= 1;
+    state.allocations[state.allocation_count] = MmioRange::EMPTY;
 
-    if MMIO_FREE_COUNT >= MAX_MMIO_RANGES {
+    if state.free_count >= MAX_MMIO_RANGES {
         return;
     }
-    let insert_at = (0..MMIO_FREE_COUNT)
-        .find(|index| MMIO_FREE_RANGES[*index].start > start)
-        .unwrap_or(MMIO_FREE_COUNT);
-    let mut move_index = MMIO_FREE_COUNT;
+    let insert_at = (0..state.free_count)
+        .find(|index| state.free_ranges[*index].start > start)
+        .unwrap_or(state.free_count);
+    let mut move_index = state.free_count;
     while move_index > insert_at {
-        MMIO_FREE_RANGES[move_index] = MMIO_FREE_RANGES[move_index - 1];
+        state.free_ranges[move_index] = state.free_ranges[move_index - 1];
         move_index -= 1;
     }
-    MMIO_FREE_RANGES[insert_at] = MmioRange { start, length };
-    MMIO_FREE_COUNT += 1;
+    state.free_ranges[insert_at] = MmioRange { start, length };
+    state.free_count += 1;
 
     let mut index = 0usize;
-    while index + 1 < MMIO_FREE_COUNT {
-        let current_end = MMIO_FREE_RANGES[index].start + MMIO_FREE_RANGES[index].length;
-        if current_end == MMIO_FREE_RANGES[index + 1].start {
-            MMIO_FREE_RANGES[index].length += MMIO_FREE_RANGES[index + 1].length;
+    while index + 1 < state.free_count {
+        let current_end = state.free_ranges[index].start + state.free_ranges[index].length;
+        if current_end == state.free_ranges[index + 1].start {
+            state.free_ranges[index].length += state.free_ranges[index + 1].length;
             let mut shift = index + 1;
-            while shift + 1 < MMIO_FREE_COUNT {
-                MMIO_FREE_RANGES[shift] = MMIO_FREE_RANGES[shift + 1];
+            while shift + 1 < state.free_count {
+                state.free_ranges[shift] = state.free_ranges[shift + 1];
                 shift += 1;
             }
-            MMIO_FREE_COUNT -= 1;
-            MMIO_FREE_RANGES[MMIO_FREE_COUNT] = MmioRange::EMPTY;
+            state.free_count -= 1;
+            state.free_ranges[state.free_count] = MmioRange::EMPTY;
         } else {
             index += 1;
         }

@@ -217,22 +217,33 @@ impl PhysicalMemoryManager {
     }
 }
 
-static mut PMM_BITMAP: [u8; BITMAP_BYTES] = [0; BITMAP_BYTES];
-static mut PMM_INSTANCE: Option<PhysicalMemoryManager> = None;
-static mut REGION_CACHE: [MemRegion; MAX_REGIONS] = [MemRegion {
-    base: 0,
-    length: 0,
-    region_type: 0,
-    _pad: 0,
-}; MAX_REGIONS];
+/// Static backing storage for the physical-frame bitmap. Wrapped in an
+/// `UnsafeCell` newtype instead of `static mut` so there is no `&'static mut`
+/// aliasing UB: `init` takes a single mutable slice out of it exactly once and
+/// hands ownership to the `PhysicalMemoryManager`, which is then published
+/// read-only through `PMM_INSTANCE`.
+struct BitmapStorage(UnsafeCell<[u8; BITMAP_BYTES]>);
+unsafe impl Sync for BitmapStorage {}
+static PMM_BITMAP: BitmapStorage = BitmapStorage(UnsafeCell::new([0; BITMAP_BYTES]));
 
+/// Write-once singleton: initialised during `init`, only read afterwards via
+/// `get_pmm`. The manager itself uses atomics + an internal cell for its mutable
+/// state, so a shared `&PhysicalMemoryManager` is sufficient for callers.
+static PMM_INSTANCE: crate::sync::OnceCell<PhysicalMemoryManager> = crate::sync::OnceCell::new();
+
+// Символы карты памяти, экспортируемые ассемблерным/C-кодом HAL до входа в Rust.
+// Это `extern "C" static mut` по необходимости: их определяет и заполняет ранний
+// загрузчик, Rust здесь лишь читатель. Их нельзя завернуть в `UnsafeCell`/лок,
+// поэтому единственная безопасная мера — читать их ровно один раз через
+// `read_volatile` в `copy_regions_from_boot` (ниже), после чего вся дальнейшая
+// работа PMM идёт с локальной копией.
 extern "C" {
     static mut boot_mem_regions: [MemRegion; 32];
     static mut boot_mem_region_count: u64;
 }
 
 #[inline(never)]
-fn copy_regions_from_boot() -> usize {
+fn copy_regions_from_boot(cache: &mut [MemRegion; MAX_REGIONS]) -> usize {
     unsafe {
         let n = (boot_mem_region_count as usize).min(MAX_REGIONS);
         if n == 0 {
@@ -241,7 +252,7 @@ fn copy_regions_from_boot() -> usize {
 
         for i in 0..n {
             let src = &boot_mem_regions[i];
-            REGION_CACHE[i] = MemRegion {
+            cache[i] = MemRegion {
                 base: core::ptr::read_volatile(&src.base),
                 length: core::ptr::read_volatile(&src.length),
                 region_type: core::ptr::read_volatile(&src.region_type),
@@ -273,14 +284,20 @@ pub fn init() -> bool {
     serial_write("[PMM] init start\r\n");
     serial_write("[PMM] scanning regions\r\n");
 
-    let copied = copy_regions_from_boot();
+    let mut region_cache = [MemRegion {
+        base: 0,
+        length: 0,
+        region_type: 0,
+        _pad: 0,
+    }; MAX_REGIONS];
+    let copied = copy_regions_from_boot(&mut region_cache);
     if copied == 0 {
         serial_write("[PMM] FAIL\r\n");
         return false;
     }
     serial_write("[PMM] regions copied\r\n");
 
-    let regions = unsafe { &REGION_CACHE[..copied] };
+    let regions = &region_cache[..copied];
     let (pool_start, pool_end) = match usable_pool_bounds(regions) {
         Some(bounds) => bounds,
         None => {
@@ -302,9 +319,12 @@ pub fn init() -> bool {
         return false;
     }
 
+    // Take the single mutable slice out of the static bitmap storage. `init`
+    // runs once at boot before the PMM is published, so this is the only live
+    // mutable borrow of PMM_BITMAP for the whole program.
     let bitmap = unsafe {
-        let slice = core::slice::from_raw_parts_mut(PMM_BITMAP.as_mut_ptr(), bitmap_size);
-        core::mem::transmute::<&mut [u8], &'static mut [u8]>(slice)
+        let base = PMM_BITMAP.0.get() as *mut u8;
+        core::slice::from_raw_parts_mut(base, bitmap_size)
     };
 
     serial_write("[PMM] pool ready\r\n");
@@ -325,26 +345,22 @@ pub fn init() -> bool {
     }
     serial_write("[PMM] usable regions ready\r\n");
 
-    unsafe {
-        PMM_INSTANCE = Some(pmm);
-    }
+    let _ = PMM_INSTANCE.set(pmm);
 
     serial_write("[PMM] OK\r\n");
     true
 }
 
 pub fn init_pmm(memory_start: usize, memory_size: usize, bitmap: &'static mut [u8]) {
-    unsafe {
-        PMM_INSTANCE = Some(PhysicalMemoryManager::new(
-            memory_start,
-            memory_size,
-            bitmap,
-        ));
-    }
+    let _ = PMM_INSTANCE.set(PhysicalMemoryManager::new(
+        memory_start,
+        memory_size,
+        bitmap,
+    ));
 }
 
 pub fn get_pmm() -> Option<&'static PhysicalMemoryManager> {
-    unsafe { PMM_INSTANCE.as_ref() }
+    PMM_INSTANCE.get()
 }
 
 /// Returns (total_bytes, free_bytes) for the physical frame pool, or (0, 0)

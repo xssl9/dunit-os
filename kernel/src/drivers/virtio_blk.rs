@@ -3,6 +3,7 @@ use crate::drivers::pci::{self, PciBar};
 use crate::hal;
 use crate::memory::pmm::{get_pmm, PhysicalAddress};
 use crate::memory::vmm;
+use crate::sync::SpinLock;
 
 const VIRTIO_VENDOR_ID: u16 = 0x1AF4;
 const VIRTIO_BLK_LEGACY_DEVICE_ID: u16 = 0x1001;
@@ -49,7 +50,11 @@ struct VirtioBlkDevice {
     used_idx: u16,
 }
 
-static mut VD0: Option<VirtioBlkDevice> = None;
+/// Единственное устройство virtio-blk. Раньше `static mut Option<..>`; теперь за
+/// `SpinLock` (кооперативный лок, без запрета прерываний — `transfer` опрашивает
+/// кольцо до 10M итераций, и держать IF выключенным всё это время нельзя). На
+/// одном CPU обращения к нему только кооперативные.
+static VD0: SpinLock<Option<VirtioBlkDevice>> = SpinLock::new(None);
 
 pub fn init() {
     let Some(device) = find_legacy_virtio_blk() else {
@@ -58,8 +63,8 @@ pub fn init() {
     };
 
     match init_device(device) {
-        Some(vd0) => unsafe {
-            VD0 = Some(vd0);
+        Some(vd0) => {
+            *VD0.lock() = Some(vd0);
             block::register_device(
                 BlockDeviceInfo {
                     name: VD0_NAME,
@@ -74,7 +79,7 @@ pub fn init() {
             crate::serial_write("[VIRTIO-BLK] registered vd0 sectors=");
             write_dec(vd0.capacity_sectors);
             crate::serial_write("\r\n");
-        },
+        }
         None => crate::serial_write("[VIRTIO-BLK] init failed\r\n"),
     }
 }
@@ -176,7 +181,8 @@ fn transfer(lba: u64, buf: &mut [u8], write: bool) -> Result<usize, BlockError> 
         return Err(BlockError::BufferTooSmall);
     }
 
-    let dev = unsafe { VD0.as_mut().ok_or(BlockError::NotFound)? };
+    let mut guard = VD0.lock();
+    let dev = guard.as_mut().ok_or(BlockError::NotFound)?;
     if lba >= dev.capacity_sectors {
         return Err(BlockError::OutOfRange);
     }

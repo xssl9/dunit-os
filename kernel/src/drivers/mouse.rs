@@ -1,8 +1,24 @@
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 static PACKET_SIZE: AtomicUsize = AtomicUsize::new(3);
-static mut PACKET: [u8; 4] = [0; 4];
-static mut PACKET_INDEX: usize = 0;
+
+/// Буфер собираемого PS/2-пакета мыши. Был двумя `static mut` (массив + индекс);
+/// теперь одна структура за `UnsafeCell`, доступ к которой всегда сериализован
+/// `PACKET_LOCK` (см. `push_packet_byte`). `init` трогает индекс один раз при
+/// загрузке, до появления гонок.
+struct MousePacket {
+    bytes: [u8; 4],
+    index: usize,
+}
+
+struct MousePacketCell(UnsafeCell<MousePacket>);
+unsafe impl Sync for MousePacketCell {}
+
+static PACKET: MousePacketCell = MousePacketCell(UnsafeCell::new(MousePacket {
+    bytes: [0; 4],
+    index: 0,
+}));
 static PACKET_LOCK: AtomicBool = AtomicBool::new(false);
 
 pub fn init() {
@@ -41,7 +57,7 @@ pub fn init() {
         let _ = mouse_read_ack();
 
         drain_output();
-        PACKET_INDEX = 0;
+        (*PACKET.0.get()).index = 0;
     }
 }
 
@@ -88,28 +104,29 @@ pub fn push_packet_byte(byte: u8) {
 
 fn push_packet_byte_locked(byte: u8) {
     unsafe {
-        if PACKET_INDEX == 0 && (byte & 0x08) == 0 {
+        let packet = &mut *PACKET.0.get();
+        if packet.index == 0 && (byte & 0x08) == 0 {
             return;
         }
 
-        PACKET[PACKET_INDEX] = byte;
-        PACKET_INDEX += 1;
+        packet.bytes[packet.index] = byte;
+        packet.index += 1;
 
         let packet_size = PACKET_SIZE.load(Ordering::Relaxed);
-        if PACKET_INDEX == packet_size {
-            let dx = PACKET[1] as i8 as i32;
-            let dy = -(PACKET[2] as i8 as i32);
+        if packet.index == packet_size {
+            let dx = packet.bytes[1] as i8 as i32;
+            let dy = -(packet.bytes[2] as i8 as i32);
             let mut wheel = 0;
             if packet_size == 4 {
-                let raw = PACKET[3] & 0x0F;
+                let raw = packet.bytes[3] & 0x0F;
                 wheel = if (raw & 0x08) != 0 {
                     (raw | 0xF0) as i8 as i32
                 } else {
                     raw as i32
                 };
             }
-            crate::input::push_mouse_relative(dx, dy, PACKET[0] & 0x07, wheel);
-            PACKET_INDEX = 0;
+            crate::input::push_mouse_relative(dx, dy, packet.bytes[0] & 0x07, wheel);
+            packet.index = 0;
         }
     }
 }

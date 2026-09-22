@@ -1,3 +1,4 @@
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 const MAX_DEVICES: usize = 32;
@@ -21,18 +22,34 @@ pub struct DeviceRegistration {
 }
 
 static REGISTRY_LOCK: AtomicBool = AtomicBool::new(false);
-static mut DEVICES: [Option<DeviceRegistration>; MAX_DEVICES] = [None; MAX_DEVICES];
-static mut DEVICE_COUNT: usize = 0;
+
+/// Device table. Was two `static mut` (array + count); now one struct behind an
+/// `UnsafeCell`, accessed only while `REGISTRY_LOCK` is held — the spinlock
+/// already serialises all readers and writers, the cell just removes the
+/// `static mut` aliasing UB.
+struct RegistryState {
+    devices: [Option<DeviceRegistration>; MAX_DEVICES],
+    count: usize,
+}
+
+struct RegistryCell(UnsafeCell<RegistryState>);
+unsafe impl Sync for RegistryCell {}
+
+static REGISTRY: RegistryCell = RegistryCell(UnsafeCell::new(RegistryState {
+    devices: [None; MAX_DEVICES],
+    count: 0,
+}));
 
 pub fn register(name: &'static str, class: DeviceClass, driver: &'static str) {
     lock_registry();
 
     unsafe {
+        let state = &mut *REGISTRY.0.get();
         let mut index = 0usize;
-        while index < DEVICE_COUNT {
-            if let Some(device) = DEVICES[index] {
+        while index < state.count {
+            if let Some(device) = state.devices[index] {
                 if device.name == name {
-                    DEVICES[index] = Some(DeviceRegistration {
+                    state.devices[index] = Some(DeviceRegistration {
                         name,
                         class,
                         driver,
@@ -45,13 +62,13 @@ pub fn register(name: &'static str, class: DeviceClass, driver: &'static str) {
             index += 1;
         }
 
-        if DEVICE_COUNT < DEVICES.len() {
-            DEVICES[DEVICE_COUNT] = Some(DeviceRegistration {
+        if state.count < state.devices.len() {
+            state.devices[state.count] = Some(DeviceRegistration {
                 name,
                 class,
                 driver,
             });
-            DEVICE_COUNT += 1;
+            state.count += 1;
         }
     }
 
@@ -62,12 +79,16 @@ pub fn register(name: &'static str, class: DeviceClass, driver: &'static str) {
 pub fn snapshot(out: &mut [Option<DeviceRegistration>]) -> usize {
     lock_registry();
 
-    let count = unsafe { DEVICE_COUNT.min(out.len()) };
-    let mut index = 0usize;
-    while index < count {
-        out[index] = unsafe { DEVICES[index] };
-        index += 1;
-    }
+    let count = unsafe {
+        let state = &*REGISTRY.0.get();
+        let count = state.count.min(out.len());
+        let mut index = 0usize;
+        while index < count {
+            out[index] = state.devices[index];
+            index += 1;
+        }
+        count
+    };
 
     REGISTRY_LOCK.store(false, Ordering::Release);
     count

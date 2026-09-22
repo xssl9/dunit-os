@@ -1,6 +1,7 @@
 use crate::process::ProcessId;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use core::cell::UnsafeCell;
 
 pub const MAX_MESSAGE_SIZE: usize = 256;
 pub const MAX_QUEUE_MESSAGES: usize = 128;
@@ -200,7 +201,13 @@ impl IpcManager {
     }
 }
 
-static mut IPC_MANAGER_INSTANCE: Option<IpcManager> = None;
+/// Синглтон IPC-менеджера. Раньше `static mut Option<..>`; теперь `UnsafeCell`-
+/// newtype без `static mut`. Инициализируется один раз в `init` при загрузке,
+/// далее к нему обращается только кооперативный путь ядра на одном CPU, поэтому
+/// раздача `&'static mut` через `as_mut()` сохраняет прежнюю семантику.
+struct IpcManagerCell(UnsafeCell<Option<IpcManager>>);
+unsafe impl Sync for IpcManagerCell {}
+static IPC_MANAGER_INSTANCE: IpcManagerCell = IpcManagerCell(UnsafeCell::new(None));
 
 /// Initialize the IPC manager and return its measured startup stats. At init
 /// there are no message queues (they are created lazily per target PID on the
@@ -208,7 +215,7 @@ static mut IPC_MANAGER_INSTANCE: Option<IpcManager> = None;
 /// real counts instead of claiming queues/shared memory were pre-created.
 pub fn init() -> IpcStats {
     unsafe {
-        IPC_MANAGER_INSTANCE = Some(IpcManager::new());
+        *IPC_MANAGER_INSTANCE.0.get() = Some(IpcManager::new());
     }
     let stats = ipc_stats();
     crate::memory::serial_write("[IPC] manager ready: bounded byte message queues (lazy per-PID)\r\n");
@@ -216,7 +223,7 @@ pub fn init() -> IpcStats {
 }
 
 pub fn get_ipc_manager() -> Option<&'static mut IpcManager> {
-    unsafe { IPC_MANAGER_INSTANCE.as_mut() }
+    unsafe { (*IPC_MANAGER_INSTANCE.0.get()).as_mut() }
 }
 
 pub fn send_bytes(sender: ProcessId, target: ProcessId, data: &[u8]) -> Result<(), IpcError> {

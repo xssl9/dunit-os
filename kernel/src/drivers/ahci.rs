@@ -1,3 +1,4 @@
+use core::cell::UnsafeCell;
 use core::sync::atomic::{fence, AtomicBool, AtomicUsize, Ordering};
 
 use crate::drivers::block::{self, BlockDeviceInfo, BlockError};
@@ -78,7 +79,13 @@ static AHCI_FOUND: AtomicUsize = AtomicUsize::new(0);
 static AHCI_INITIALIZED: AtomicUsize = AtomicUsize::new(0);
 static AHCI_DISK_COUNT: AtomicUsize = AtomicUsize::new(0);
 static AHCI_LAST_ERROR: AtomicUsize = AtomicUsize::new(0);
-static mut DISKS: [Option<AhciDisk>; MAX_DISKS] = [None; MAX_DISKS];
+/// Таблица обнаруженных AHCI-дисков. Был `static mut` массив; теперь за
+/// `UnsafeCell`. Обращения времени выполнения (`disk_transfer`) идут под
+/// `AHCI_LOCK`; обращения на этапе обнаружения (сброс, публикация, регистрация)
+/// сериализованы загрузкой.
+struct DisksCell(UnsafeCell<[Option<AhciDisk>; MAX_DISKS]>);
+unsafe impl Sync for DisksCell {}
+static DISKS: DisksCell = DisksCell(UnsafeCell::new([None; MAX_DISKS]));
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AhciError {
@@ -175,7 +182,7 @@ pub fn init() {
     AHCI_INITIALIZED.store(0, Ordering::Relaxed);
     AHCI_DISK_COUNT.store(0, Ordering::Relaxed);
     AHCI_LAST_ERROR.store(0, Ordering::Relaxed);
-    unsafe { DISKS = [None; MAX_DISKS] };
+    unsafe { *DISKS.0.get() = [None; MAX_DISKS] };
 
     pci::for_each_device(|dev| {
         if dev.class_code != AHCI_CLASS
@@ -280,7 +287,7 @@ fn bring_up_controller(dev: PciDevice) -> Result<(), AhciError> {
                 // Controller discovery is serialized, so publishing the disk
                 // before advancing the count makes 0..count always contiguous.
                 let index = AHCI_DISK_COUNT.load(Ordering::Relaxed);
-                unsafe { DISKS[index] = Some(disk) };
+                unsafe { (*DISKS.0.get())[index] = Some(disk) };
                 AHCI_DISK_COUNT.store(index + 1, Ordering::Relaxed);
                 serial_write("[AHCI] SATA disk port=");
                 write_dec(port_number as u64);
@@ -469,7 +476,7 @@ unsafe fn transfer(
     let sectors = (length / SECTOR_SIZE) as u64;
     lock_ahci();
     let result = unsafe {
-        let Some(disk) = DISKS[index].as_mut() else {
+        let Some(disk) = (*DISKS.0.get())[index].as_mut() else {
             AHCI_LOCK.store(false, Ordering::Release);
             return Err(BlockError::NotFound);
         };
@@ -621,7 +628,7 @@ fn issue_slot(port: usize) -> Result<(), AhciError> {
 fn register_disks() {
     let count = AHCI_DISK_COUNT.load(Ordering::Relaxed).min(MAX_DISKS);
     for index in 0..count {
-        let Some(disk) = (unsafe { DISKS[index] }) else {
+        let Some(disk) = (unsafe { (*DISKS.0.get())[index] }) else {
             continue;
         };
         let (name, read_fn, write_fn): (

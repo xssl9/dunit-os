@@ -4,7 +4,7 @@ extern crate alloc;
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::{self, null_mut};
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -47,6 +47,8 @@ pub const SYSCALL_SHARED_VM_MAP: usize = 37;
 pub const SYSCALL_SHARED_VM_CLOSE: usize = 38;
 pub const SYSCALL_SET_THREAD_POINTER: usize = 39;
 pub const SYSCALL_GET_THREAD_POINTER: usize = 40;
+pub const SYSCALL_FUTEX_WAIT: usize = 41;
+pub const SYSCALL_FUTEX_WAKE: usize = 42;
 
 pub const VM_PROT_READ: usize = 1;
 pub const VM_PROT_WRITE: usize = 2;
@@ -957,6 +959,25 @@ pub fn set_thread_pointer(base: usize) -> isize {
 
 pub fn get_thread_pointer() -> usize {
     syscall0(SYSCALL_GET_THREAD_POINTER) as usize
+}
+
+/// Park the calling thread while `*word == expected`, keyed by the word's
+/// address in this process. `timeout_ms == 0` blocks with no deadline. Returns
+/// 0 on a normal wake, EAGAIN if the value already differed, EFAULT if the word
+/// is unmapped, EINVAL if unaligned. `word` must be 4-byte aligned.
+pub fn futex_wait(word: &AtomicU32, expected: u32, timeout_ms: u64) -> isize {
+    syscall3(
+        SYSCALL_FUTEX_WAIT,
+        word as *const AtomicU32 as usize,
+        expected as usize,
+        timeout_ms as usize,
+    )
+}
+
+/// Wake up to `count` threads parked on `word`. `count == 0` wakes all waiters.
+/// Returns the number of threads woken, or a negative errno.
+pub fn futex_wake(word: &AtomicU32, count: usize) -> isize {
+    syscall2(SYSCALL_FUTEX_WAKE, word as *const AtomicU32 as usize, count)
 }
 
 pub fn get_pid() -> u32 {

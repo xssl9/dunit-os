@@ -1,4 +1,7 @@
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
+
+use crate::sync::SpinLock;
 
 const MAX_BLOCK_DEVICES: usize = 8;
 pub const RAMBLK0_NAME: &str = "ramblk0";
@@ -37,10 +40,26 @@ struct BlockDeviceRegistration {
 }
 
 static BLOCK_LOCK: AtomicBool = AtomicBool::new(false);
-static mut BLOCK_DEVICES: [Option<BlockDeviceRegistration>; MAX_BLOCK_DEVICES] =
-    [None; MAX_BLOCK_DEVICES];
-static mut BLOCK_DEVICE_COUNT: usize = 0;
-static mut RAMBLK0_DATA: [u8; RAMBLK0_BYTES] = [0; RAMBLK0_BYTES];
+
+/// Таблица блочных устройств. Была двумя `static mut` (массив + счётчик); теперь
+/// одна структура за `UnsafeCell`, доступ к которой всегда под `BLOCK_LOCK`.
+struct BlockTable {
+    devices: [Option<BlockDeviceRegistration>; MAX_BLOCK_DEVICES],
+    count: usize,
+}
+
+struct BlockTableCell(UnsafeCell<BlockTable>);
+unsafe impl Sync for BlockTableCell {}
+
+static BLOCK_TABLE: BlockTableCell = BlockTableCell(UnsafeCell::new(BlockTable {
+    devices: [None; MAX_BLOCK_DEVICES],
+    count: 0,
+}));
+
+/// Бэкенд RAM-диска ramblk0. Раньше `static mut [u8; N]` без всякого лока (опора
+/// на кооперативность); теперь `SpinLock` — коллбеки чтения/записи блока трогают
+/// его вне `BLOCK_LOCK`, а копия блока быстрая.
+static RAMBLK0_DATA: SpinLock<[u8; RAMBLK0_BYTES]> = SpinLock::new([0; RAMBLK0_BYTES]);
 
 pub fn init() {
     seed_ramblk0();
@@ -72,12 +91,16 @@ pub fn register_device(
 pub fn snapshot(out: &mut [Option<BlockDeviceInfo>]) -> usize {
     lock_block();
 
-    let count = unsafe { BLOCK_DEVICE_COUNT.min(out.len()) };
-    let mut index = 0usize;
-    while index < count {
-        out[index] = unsafe { BLOCK_DEVICES[index].map(|device| device.info) };
-        index += 1;
-    }
+    let count = unsafe {
+        let table = &*BLOCK_TABLE.0.get();
+        let count = table.count.min(out.len());
+        let mut index = 0usize;
+        while index < count {
+            out[index] = table.devices[index].map(|device| device.info);
+            index += 1;
+        }
+        count
+    };
 
     BLOCK_LOCK.store(false, Ordering::Release);
     count
@@ -101,11 +124,12 @@ fn register(device: BlockDeviceRegistration) {
     lock_block();
 
     unsafe {
+        let table = &mut *BLOCK_TABLE.0.get();
         let mut index = 0usize;
-        while index < BLOCK_DEVICE_COUNT {
-            if let Some(existing) = BLOCK_DEVICES[index] {
+        while index < table.count {
+            if let Some(existing) = table.devices[index] {
                 if existing.info.name == device.info.name {
-                    BLOCK_DEVICES[index] = Some(device);
+                    table.devices[index] = Some(device);
                     BLOCK_LOCK.store(false, Ordering::Release);
                     publish_device(device.info);
                     return;
@@ -114,9 +138,9 @@ fn register(device: BlockDeviceRegistration) {
             index += 1;
         }
 
-        if BLOCK_DEVICE_COUNT < BLOCK_DEVICES.len() {
-            BLOCK_DEVICES[BLOCK_DEVICE_COUNT] = Some(device);
-            BLOCK_DEVICE_COUNT += 1;
+        if table.count < table.devices.len() {
+            table.devices[table.count] = Some(device);
+            table.count += 1;
         }
     }
 
@@ -129,9 +153,10 @@ fn find_device(name: &str) -> Option<BlockDeviceRegistration> {
 
     let mut found = None;
     unsafe {
+        let table = &*BLOCK_TABLE.0.get();
         let mut index = 0usize;
-        while index < BLOCK_DEVICE_COUNT {
-            if let Some(device) = BLOCK_DEVICES[index] {
+        while index < table.count {
+            if let Some(device) = table.devices[index] {
                 if device.info.name == name {
                     found = Some(device);
                     break;
@@ -155,18 +180,15 @@ fn publish_device(info: BlockDeviceInfo) {
 
 fn seed_ramblk0() {
     let message = b"Dunit OS ramblk0 block device\n";
-    unsafe {
-        let mut index = 0usize;
-        while index < RAMBLK0_DATA.len() {
-            RAMBLK0_DATA[index] = 0;
-            index += 1;
-        }
+    let mut data = RAMBLK0_DATA.lock();
+    for byte in data.iter_mut() {
+        *byte = 0;
+    }
 
-        let mut msg_index = 0usize;
-        while msg_index < message.len() && msg_index < RAMBLK0_DATA.len() {
-            RAMBLK0_DATA[msg_index] = message[msg_index];
-            msg_index += 1;
-        }
+    let mut msg_index = 0usize;
+    while msg_index < message.len() && msg_index < data.len() {
+        data[msg_index] = message[msg_index];
+        msg_index += 1;
     }
 }
 
@@ -179,10 +201,8 @@ fn ramblk0_read(lba: u64, buf: &mut [u8]) -> Result<usize, BlockError> {
     }
 
     let offset = lba as usize * RAMBLK0_BLOCK_SIZE;
-    unsafe {
-        buf[..RAMBLK0_BLOCK_SIZE]
-            .copy_from_slice(&RAMBLK0_DATA[offset..offset + RAMBLK0_BLOCK_SIZE]);
-    }
+    let data = RAMBLK0_DATA.lock();
+    buf[..RAMBLK0_BLOCK_SIZE].copy_from_slice(&data[offset..offset + RAMBLK0_BLOCK_SIZE]);
     Ok(RAMBLK0_BLOCK_SIZE)
 }
 
@@ -195,10 +215,8 @@ fn ramblk0_write(lba: u64, buf: &[u8]) -> Result<usize, BlockError> {
     }
 
     let offset = lba as usize * RAMBLK0_BLOCK_SIZE;
-    unsafe {
-        RAMBLK0_DATA[offset..offset + RAMBLK0_BLOCK_SIZE]
-            .copy_from_slice(&buf[..RAMBLK0_BLOCK_SIZE]);
-    }
+    let mut data = RAMBLK0_DATA.lock();
+    data[offset..offset + RAMBLK0_BLOCK_SIZE].copy_from_slice(&buf[..RAMBLK0_BLOCK_SIZE]);
     Ok(RAMBLK0_BLOCK_SIZE)
 }
 

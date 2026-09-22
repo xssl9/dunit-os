@@ -45,7 +45,11 @@ fn shared_vm_release(id: u64, count: usize) {
         }
     }
 }
-static mut PROCESS_TABLE: Option<Vec<ProcessRecord>> = None;
+/// Таблица процессов. Раньше `static mut Option<Vec<..>>`; теперь `UnsafeCell`-
+/// newtype без `static mut`. Единственная точка доступа — `process_table_mut`.
+struct ProcessTableCell(UnsafeCell<Option<Vec<ProcessRecord>>>);
+unsafe impl Sync for ProcessTableCell {}
+static PROCESS_TABLE: ProcessTableCell = ProcessTableCell(UnsafeCell::new(None));
 static CURRENT_PID: AtomicU64 = AtomicU64::new(0);
 static PROCESS_EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 static PROCESS_YIELD_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -69,6 +73,9 @@ static WAIT_QUEUE: IrqSafeSpinLock<Vec<WaitEntry>> = IrqSafeSpinLock::new(Vec::n
 enum WaitKey {
     Timer,
     Ipc(ProcessId),
+    /// Dunit-native futex key: threads share their owner's address space, so
+    /// (owner, user virtual address of the word) uniquely names a futex word.
+    Word { owner: ProcessId, addr: u64 },
 }
 
 #[derive(Clone, Copy)]
@@ -77,9 +84,23 @@ struct WaitEntry {
     key: WaitKey,
     deadline: Option<u64>,
 }
-static mut TERMINAL_STDIN_BUFFER: [u8; 256] = [0; 256];
-static mut TERMINAL_STDIN_LEN: usize = 0;
-static mut TERMINAL_STDIN_READY: bool = false;
+/// Буфер строки stdin терминала для процесса, ожидающего ввод. Раньше три
+/// `static mut`; теперь одна структура за `UnsafeCell`-newtype. Доступ идёт
+/// кооперативно (подача из оболочки и чтение из syscall на одном CPU); какой
+/// именно PID вправе читать, определяет отдельный атомик TERMINAL_STDIN_WAITING_PID.
+struct TerminalStdin {
+    buffer: [u8; 256],
+    len: usize,
+    ready: bool,
+}
+
+struct TerminalStdinCell(UnsafeCell<TerminalStdin>);
+unsafe impl Sync for TerminalStdinCell {}
+static TERMINAL_STDIN: TerminalStdinCell = TerminalStdinCell(UnsafeCell::new(TerminalStdin {
+    buffer: [0; 256],
+    len: 0,
+    ready: false,
+}));
 
 pub const WAIT_KIND_EMPTY: i32 = -1;
 pub const WAIT_KIND_SPAWN_PREPARED: i32 = -2;
@@ -254,6 +275,9 @@ pub struct Process {
 
 const USER_MMAP_BASE: usize = 0x0000_0010_0000_0000;
 const USER_MMAP_END: usize = 0x0000_7000_0000_0000;
+// Exclusive top of the user half: first address past the canonical lower half.
+// Checks use `base >= USER_ADDRESS_END`, equivalent to `base > 0x7FFF_FFFF_FFFF`
+// (see `syscall::USER_SPACE_END`, the inclusive form of the same boundary).
 const USER_ADDRESS_END: u64 = 0x0000_8000_0000_0000;
 const USER_PAGE_SIZE: usize = 4096;
 
@@ -959,10 +983,11 @@ pub fn allocate_pid() -> ProcessId {
 
 fn process_table_mut() -> &'static mut Vec<ProcessRecord> {
     unsafe {
-        if PROCESS_TABLE.is_none() {
-            PROCESS_TABLE = Some(Vec::new());
+        let slot = PROCESS_TABLE.0.get();
+        if (*slot).is_none() {
+            *slot = Some(Vec::new());
         }
-        PROCESS_TABLE.as_mut().unwrap()
+        (*slot).as_mut().unwrap()
     }
 }
 
@@ -1054,8 +1079,9 @@ pub fn set_foreground_process(pid: Option<ProcessId>, sink: ProcessOutputSink) {
     if pid.is_none() {
         TERMINAL_STDIN_WAITING_PID.store(0, Ordering::SeqCst);
         unsafe {
-            TERMINAL_STDIN_LEN = 0;
-            TERMINAL_STDIN_READY = false;
+            let stdin = &mut *TERMINAL_STDIN.0.get();
+            stdin.len = 0;
+            stdin.ready = false;
         }
     }
 }
@@ -1110,10 +1136,11 @@ pub fn provide_terminal_stdin(pid: ProcessId, data: &[u8]) -> Result<(), Process
         return Err(ProcessError::NoSuchProcess);
     }
     unsafe {
-        let len = data.len().min(TERMINAL_STDIN_BUFFER.len());
-        TERMINAL_STDIN_BUFFER[..len].copy_from_slice(&data[..len]);
-        TERMINAL_STDIN_LEN = len;
-        TERMINAL_STDIN_READY = true;
+        let stdin = &mut *TERMINAL_STDIN.0.get();
+        let len = data.len().min(stdin.buffer.len());
+        stdin.buffer[..len].copy_from_slice(&data[..len]);
+        stdin.len = len;
+        stdin.ready = true;
     }
     Ok(())
 }
@@ -1124,13 +1151,14 @@ pub fn take_terminal_stdin_for_current(out: &mut [u8]) -> Result<Option<usize>, 
         return Ok(None);
     }
     unsafe {
-        if !TERMINAL_STDIN_READY {
+        let stdin = &mut *TERMINAL_STDIN.0.get();
+        if !stdin.ready {
             return Ok(None);
         }
-        let len = TERMINAL_STDIN_LEN.min(out.len());
-        out[..len].copy_from_slice(&TERMINAL_STDIN_BUFFER[..len]);
-        TERMINAL_STDIN_LEN = 0;
-        TERMINAL_STDIN_READY = false;
+        let len = stdin.len.min(out.len());
+        out[..len].copy_from_slice(&stdin.buffer[..len]);
+        stdin.len = 0;
+        stdin.ready = false;
         TERMINAL_STDIN_WAITING_PID.store(0, Ordering::SeqCst);
         Ok(Some(len))
     }
@@ -1540,6 +1568,105 @@ pub fn wake_expired_waiters() {
             index += 1;
         }
     }
+}
+
+/// Outcome of a futex-style compare-and-block attempt.
+pub enum FutexWaitOutcome {
+    /// The word matched `expected`; the caller was parked and must return the
+    /// user-context-return sentinel (it will resume on wake).
+    Parked,
+    /// The word did not match `expected`; the caller should report EAGAIN.
+    ValueMismatch,
+}
+
+/// Read a `u32` at `addr` from `owner`'s address space, or None if the page is
+/// not a present, user-accessible mapping. Checking PRESENT|USER (not just a
+/// non-zero page-table entry) keeps this sound once COW/lazy/swapped pages
+/// exist: a non-present entry must never be dereferenced through phys_to_virt.
+fn read_user_u32(owner: ProcessId, addr: u64) -> Option<u32> {
+    use crate::memory::vmm::PageFlags;
+    let table = process_table_mut();
+    let index = process_record_index(table, owner)?;
+    let process = table[index].process.as_ref()?;
+    let address_space = process.address_space()?;
+    let (phys, flags) = address_space
+        .user_page_mapping(VirtualAddress(addr as usize))
+        .ok()??;
+    if !flags.contains(PageFlags::PRESENT | PageFlags::USER) {
+        return None;
+    }
+    // addr is 4-byte aligned and 4 bytes never cross a page boundary.
+    let virt = crate::memory::vmm::phys_to_virt(phys.as_usize()) as *const u32;
+    Some(unsafe { virt.read_unaligned() })
+}
+
+/// Compare-and-block on a futex word. Under a single IRQ guard + WAIT_QUEUE
+/// lock (same ordering as `block_current` / the wake path) so the compare is
+/// atomic w.r.t. `futex_wake`. Returns Parked when the caller was blocked,
+/// ValueMismatch when the word differs from `expected` (map to EAGAIN), or an
+/// error (an unmapped word yields InvalidMemoryRange -> EFAULT at the syscall).
+pub fn futex_wait(
+    addr: u64,
+    expected: u32,
+    deadline: Option<u64>,
+) -> Result<FutexWaitOutcome, ProcessError> {
+    let _irq = InterruptGuard::new();
+    let entity = current_entity_id().ok_or(ProcessError::NoCurrentProcess)?;
+    let owner = owner_of(entity).ok_or(ProcessError::NoSuchProcess)?;
+    // Hold the wait queue lock across the compare so a concurrent wake cannot
+    // slip in between the value check and the enqueue.
+    let mut queue = WAIT_QUEUE.lock();
+    let current = read_user_u32(owner, addr).ok_or(ProcessError::InvalidMemoryRange)?;
+    if current != expected {
+        return Ok(FutexWaitOutcome::ValueMismatch);
+    }
+    let table = process_table_mut();
+    let index = process_record_index(table, entity).ok_or(ProcessError::NoSuchProcess)?;
+    let record = &mut table[index];
+    if record.state != ProcessState::Running {
+        return Err(ProcessError::NotRunnable);
+    }
+    let process = record.process.as_mut().ok_or(ProcessError::ProcessNotPrepared)?;
+    if process.is_kernel {
+        return Err(ProcessError::InvalidUserContext);
+    }
+    unsafe {
+        crate::hal::syscall_capture_user_context(&mut process.context, 0);
+    }
+    record.state = ProcessState::Blocked;
+    process.state = ProcessState::Blocked;
+    queue.push(WaitEntry {
+        entity,
+        key: WaitKey::Word { owner, addr },
+        deadline,
+    });
+    PROCESS_YIELD_REQUESTED.store(true, Ordering::SeqCst);
+    PROCESS_SCHEDULE_HINT.store(0, Ordering::SeqCst);
+    Ok(FutexWaitOutcome::Parked)
+}
+
+/// Wake up to `max` waiters parked on the futex word at `addr` in the current
+/// address space. `max == 0` means wake all waiters. Returns the count woken.
+pub fn futex_wake(addr: u64, max: usize) -> usize {
+    let _irq = InterruptGuard::new();
+    let Some(owner) = current_pid() else { return 0; };
+    let target = WaitKey::Word { owner, addr };
+    let mut queue = WAIT_QUEUE.lock();
+    let wake_all = max == 0;
+    let mut woken = 0;
+    let mut index = 0;
+    while index < queue.len() {
+        if queue[index].key == target {
+            if !wake_all && woken >= max {
+                break;
+            }
+            wake_entry(queue.remove(index));
+            woken += 1;
+        } else {
+            index += 1;
+        }
+    }
+    woken
 }
 
 pub fn is_pid_blocked(pid: ProcessId) -> bool {

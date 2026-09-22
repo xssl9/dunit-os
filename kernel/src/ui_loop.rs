@@ -5,6 +5,7 @@ use crate::serial_write;
 use crate::window_manager::{self, AppType};
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::UnsafeCell;
 
 const BG: u32 = 0x030504;
 const PANEL: u32 = 0x11161b;
@@ -90,13 +91,29 @@ const BLUR_WEIGHTS: [u32; BLUR_RADIUS * 2 + 1] = [1, 4, 10, 16, 19, 16, 10, 4, 1
 const BLUR_WEIGHT_SUM: u32 = 81;
 const GUI_VERBOSE_PROTO_LOGS: bool = false;
 
-static mut BLUR_TEMP: [u32; MAX_BLUR_PIXELS] = [0; MAX_BLUR_PIXELS];
-static mut BLUR_CACHE: [u32; MAX_BLUR_PIXELS] = [0; MAX_BLUR_PIXELS];
-static mut BLUR_CACHE_WIDTH: usize = 0;
-static mut BLUR_CACHE_HEIGHT: usize = 0;
-static mut BLUR_CACHE_READY: bool = false;
-static mut WALLPAPER_READY: bool = false;
-static mut GUI_TERMINAL_EXEC_OUTPUT: *mut GuiAppRuntime = core::ptr::null_mut();
+struct BlurState {
+    temp: [u32; MAX_BLUR_PIXELS],
+    cache: [u32; MAX_BLUR_PIXELS],
+    cache_width: usize,
+    cache_height: usize,
+    cache_ready: bool,
+    wallpaper_ready: bool,
+}
+struct BlurStateCell(UnsafeCell<BlurState>);
+unsafe impl Sync for BlurStateCell {}
+static BLUR: BlurStateCell = BlurStateCell(UnsafeCell::new(BlurState {
+    temp: [0; MAX_BLUR_PIXELS],
+    cache: [0; MAX_BLUR_PIXELS],
+    cache_width: 0,
+    cache_height: 0,
+    cache_ready: false,
+    wallpaper_ready: false,
+}));
+
+struct GuiTermExecOutputCell(UnsafeCell<*mut GuiAppRuntime>);
+unsafe impl Sync for GuiTermExecOutputCell {}
+static GUI_TERMINAL_EXEC_OUTPUT: GuiTermExecOutputCell =
+    GuiTermExecOutputCell(UnsafeCell::new(core::ptr::null_mut()));
 
 #[derive(Clone, Copy)]
 struct UiState {
@@ -513,7 +530,8 @@ fn validate_wallpaper_bmp(data: &[u8]) -> bool {
 
 fn load_wallpaper() {
     unsafe {
-        if WALLPAPER_READY {
+        let blur = &*BLUR.0.get();
+        if blur.wallpaper_ready {
             return;
         }
     }
@@ -521,7 +539,8 @@ fn load_wallpaper() {
     if let Some(data) = vfs::static_file(WALLPAPER_PATH) {
         if validate_wallpaper_bmp(data) {
             unsafe {
-                WALLPAPER_READY = true;
+                let blur = &mut *BLUR.0.get();
+                blur.wallpaper_ready = true;
             }
             serial_write("[GUI] wallpaper loaded from VFS\r\n");
             return;
@@ -533,13 +552,15 @@ fn load_wallpaper() {
     }
 
     unsafe {
-        WALLPAPER_READY = false;
+        let blur = &mut *BLUR.0.get();
+        blur.wallpaper_ready = false;
     }
 }
 
 fn wallpaper_bytes() -> Option<&'static [u8]> {
     unsafe {
-        if WALLPAPER_READY {
+        let blur = &*BLUR.0.get();
+        if blur.wallpaper_ready {
             vfs::static_file(WALLPAPER_PATH)
         } else {
             None
@@ -1279,11 +1300,12 @@ fn gui_terminal_append_exec_bytes(app: &mut GuiAppRuntime, bytes: &[u8]) {
 
 pub fn gui_terminal_write_exec_output(bytes: &[u8]) {
     unsafe {
-        if GUI_TERMINAL_EXEC_OUTPUT.is_null() {
+        let sink = *GUI_TERMINAL_EXEC_OUTPUT.0.get();
+        if sink.is_null() {
             serial_write("[GUI-TERM-EXEC] stdout fallback: no GUI terminal sink\r\n");
             return;
         }
-        gui_terminal_append_exec_bytes(&mut *GUI_TERMINAL_EXEC_OUTPUT, bytes);
+        gui_terminal_append_exec_bytes(&mut *sink, bytes);
     }
 }
 
@@ -1422,7 +1444,7 @@ fn handle_gui_terminal_exec(state: &mut UiState, app_index: usize, cwd: &str, ar
     serial_write(args);
     serial_write("\r\n");
     unsafe {
-        GUI_TERMINAL_EXEC_OUTPUT = &mut state.gui_apps[app_index] as *mut GuiAppRuntime;
+        *GUI_TERMINAL_EXEC_OUTPUT.0.get() = &mut state.gui_apps[app_index] as *mut GuiAppRuntime;
     }
     let result = {
         let mut input = crate::command::NoExecInput;
@@ -1434,7 +1456,7 @@ fn handle_gui_terminal_exec(state: &mut UiState, app_index: usize, cwd: &str, ar
         )
     };
     unsafe {
-        GUI_TERMINAL_EXEC_OUTPUT = core::ptr::null_mut();
+        *GUI_TERMINAL_EXEC_OUTPUT.0.get() = core::ptr::null_mut();
     }
 
     let app = &mut state.gui_apps[app_index];
@@ -1973,19 +1995,24 @@ fn blur_sample_horizontal(x: usize, y: usize, width: usize, height: usize) -> u3
 }
 
 fn blur_temp_pixel(x: usize, y: usize, width: usize) -> u32 {
-    unsafe { BLUR_TEMP[y * width + x] }
+    unsafe {
+        let blur = &*BLUR.0.get();
+        blur.temp[y * width + x]
+    }
 }
 
 fn rebuild_blur_cache(width: usize, height: usize) {
     if width == 0 || height == 0 || width > MAX_BLUR_WIDTH || height > MAX_BLUR_HEIGHT {
         unsafe {
-            BLUR_CACHE_READY = false;
+            let blur = &mut *BLUR.0.get();
+            blur.cache_ready = false;
         }
         return;
     }
 
     unsafe {
-        if BLUR_CACHE_READY && BLUR_CACHE_WIDTH == width && BLUR_CACHE_HEIGHT == height {
+        let blur = &mut *BLUR.0.get();
+        if blur.cache_ready && blur.cache_width == width && blur.cache_height == height {
             return;
         }
 
@@ -1993,7 +2020,7 @@ fn rebuild_blur_cache(width: usize, height: usize) {
 
         for y in 0..height {
             for x in 0..width {
-                BLUR_TEMP[y * width + x] = blur_sample_horizontal(x, y, width, height);
+                blur.temp[y * width + x] = blur_sample_horizontal(x, y, width, height);
             }
         }
 
@@ -2015,23 +2042,24 @@ fn rebuild_blur_cache(width: usize, height: usize) {
                     b += (color & 0xff) * weight;
                 }
 
-                BLUR_CACHE[y * width + x] = ((r / BLUR_WEIGHT_SUM) << 16)
+                blur.cache[y * width + x] = ((r / BLUR_WEIGHT_SUM) << 16)
                     | ((g / BLUR_WEIGHT_SUM) << 8)
                     | (b / BLUR_WEIGHT_SUM);
             }
         }
 
-        BLUR_CACHE_WIDTH = width;
-        BLUR_CACHE_HEIGHT = height;
-        BLUR_CACHE_READY = true;
+        blur.cache_width = width;
+        blur.cache_height = height;
+        blur.cache_ready = true;
         serial_write("[GUI] two-pass blur cache ready\r\n");
     }
 }
 
 fn blurred_desktop_pixel(x: usize, y: usize, width: usize, height: usize) -> u32 {
     unsafe {
-        if BLUR_CACHE_READY && BLUR_CACHE_WIDTH == width && BLUR_CACHE_HEIGHT == height {
-            return BLUR_CACHE
+        let blur = &*BLUR.0.get();
+        if blur.cache_ready && blur.cache_width == width && blur.cache_height == height {
+            return blur.cache
                 [y.min(height.saturating_sub(1)) * width + x.min(width.saturating_sub(1))];
         }
     }

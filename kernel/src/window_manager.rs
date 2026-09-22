@@ -1,3 +1,5 @@
+use core::cell::UnsafeCell;
+
 const MAX_WINDOWS: usize = 10;
 
 #[derive(Clone, Copy)]
@@ -350,14 +352,20 @@ impl WindowManager {
     }
 }
 
-static mut WM_INSTANCE: Option<WindowManager> = None;
+/// Синглтон оконного менеджера. Раньше `static mut Option<..>`; теперь
+/// `UnsafeCell`-newtype без `static mut`. Инициализируется один раз в `init`,
+/// далее к нему обращается лишь кооперативный UI-путь на одном CPU, поэтому
+/// раздача `&'static mut` через `as_mut()` сохраняет прежнюю семантику.
+struct WmCell(UnsafeCell<Option<WindowManager>>);
+unsafe impl Sync for WmCell {}
+static WM_INSTANCE: WmCell = WmCell(UnsafeCell::new(None));
 
 pub fn init() {
     unsafe {
-        WM_INSTANCE = Some(WindowManager::new());
+        *WM_INSTANCE.0.get() = Some(WindowManager::new());
     }
 }
 
 pub fn get_wm() -> Option<&'static mut WindowManager> {
-    unsafe { WM_INSTANCE.as_mut() }
+    unsafe { (*WM_INSTANCE.0.get()).as_mut() }
 }

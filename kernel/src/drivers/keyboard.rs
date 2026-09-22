@@ -1,40 +1,56 @@
-static mut SCANCODE_BUFFER: [u8; 64] = [0; 64];
+use crate::sync::IrqSafeSpinLock;
+
 const SCANCODE_BUFFER_LEN: usize = 64;
-static mut BUFFER_READ: usize = 0;
-static mut BUFFER_WRITE: usize = 0;
-static mut SHIFT_DOWN: bool = false;
+
+/// Клавиатурный ринг-буфер + флаг Shift. Наполняется из обработчика IRQ
+/// (`push_scancode`), читается кооперативным путём (`read_scancode`,
+/// `scancode_to_char`). `IrqSafeSpinLock` запрещает прерывания на время доступа,
+/// поэтому IRQ клавиатуры не может вклиниться в середину чтения/записи буфера.
+struct KeyboardState {
+    buffer: [u8; SCANCODE_BUFFER_LEN],
+    read: usize,
+    write: usize,
+    shift_down: bool,
+}
+
+static KEYBOARD: IrqSafeSpinLock<KeyboardState> = IrqSafeSpinLock::new(KeyboardState {
+    buffer: [0; SCANCODE_BUFFER_LEN],
+    read: 0,
+    write: 0,
+    shift_down: false,
+});
 
 pub fn init() {}
 
 pub fn read_scancode() -> Option<u8> {
-    unsafe {
-        if BUFFER_READ != BUFFER_WRITE {
-            let scancode = SCANCODE_BUFFER[BUFFER_READ];
-            BUFFER_READ = (BUFFER_READ + 1) % SCANCODE_BUFFER_LEN;
-            Some(scancode)
-        } else {
-            None
-        }
+    let mut kb = KEYBOARD.lock();
+    if kb.read != kb.write {
+        let index = kb.read;
+        let scancode = kb.buffer[index];
+        kb.read = (index + 1) % SCANCODE_BUFFER_LEN;
+        Some(scancode)
+    } else {
+        None
     }
 }
 
 pub fn push_scancode(scancode: u8) {
-    unsafe {
-        match scancode {
-            0x2A | 0x36 => {
-                SHIFT_DOWN = true;
-            }
-            0xAA | 0xB6 => {
-                SHIFT_DOWN = false;
-            }
-            _ => {}
+    let mut kb = KEYBOARD.lock();
+    match scancode {
+        0x2A | 0x36 => {
+            kb.shift_down = true;
         }
+        0xAA | 0xB6 => {
+            kb.shift_down = false;
+        }
+        _ => {}
+    }
 
-        let next_write = (BUFFER_WRITE + 1) % SCANCODE_BUFFER_LEN;
-        if next_write != BUFFER_READ {
-            SCANCODE_BUFFER[BUFFER_WRITE] = scancode;
-            BUFFER_WRITE = next_write;
-        }
+    let next_write = (kb.write + 1) % SCANCODE_BUFFER_LEN;
+    if next_write != kb.read {
+        let index = kb.write;
+        kb.buffer[index] = scancode;
+        kb.write = next_write;
     }
 }
 
@@ -57,7 +73,7 @@ pub fn scancode_to_special_key(scancode: u8) -> Option<SpecialKey> {
 }
 
 pub fn scancode_to_char(scancode: u8) -> Option<char> {
-    let shifted = unsafe { SHIFT_DOWN };
+    let shifted = KEYBOARD.lock().shift_down;
 
     let ch = match scancode {
         0x02 => {

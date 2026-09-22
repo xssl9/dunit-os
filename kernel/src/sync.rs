@@ -221,3 +221,75 @@ impl<T> DerefMut for IrqSafeSpinLockGuard<'_, T> {
         &mut self.guard
     }
 }
+
+/// Write-once cell for `static` singletons that are initialised exactly once
+/// during early boot and then only read. Replaces the `static mut ... : Option<T>`
+/// + `unsafe { X = Some(..) }` / `unsafe { X.as_ref() }` pattern: `set` succeeds
+/// only for the first caller (serialised by an atomic), and `get` hands out a
+/// shared `&T` without `unsafe` at the call site. The stored `T` must provide its
+/// own interior synchronisation (e.g. atomics or a `SpinLock`) if it is mutated
+/// after publication — `OnceCell` guarantees single initialisation, not interior
+/// mutability.
+pub struct OnceCell<T> {
+    initialized: AtomicBool,
+    // `true` only while `set` is writing; readers spin until it clears so a
+    // concurrent `get` never observes a half-written value.
+    writing: AtomicBool,
+    value: UnsafeCell<Option<T>>,
+}
+
+unsafe impl<T: Send + Sync> Sync for OnceCell<T> {}
+unsafe impl<T: Send> Send for OnceCell<T> {}
+
+impl<T> OnceCell<T> {
+    pub const fn new() -> Self {
+        Self {
+            initialized: AtomicBool::new(false),
+            writing: AtomicBool::new(false),
+            value: UnsafeCell::new(None),
+        }
+    }
+
+    /// Initialise the cell. Returns `Ok(())` for the first caller and
+    /// `Err(value)` (handing the value back) if it was already initialised or a
+    /// concurrent `set` won the race.
+    pub fn set(&self, value: T) -> Result<(), T> {
+        if self
+            .writing
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return Err(value);
+        }
+        if self.initialized.load(Ordering::Acquire) {
+            self.writing.store(false, Ordering::Release);
+            return Err(value);
+        }
+        unsafe {
+            *self.value.get() = Some(value);
+        }
+        self.initialized.store(true, Ordering::Release);
+        self.writing.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    /// Shared reference to the value, or `None` before initialisation.
+    pub fn get(&self) -> Option<&T> {
+        if !self.initialized.load(Ordering::Acquire) {
+            return None;
+        }
+        // A `set` may still be clearing its flag; the store to `value` is already
+        // visible (initialized was released after it), so the reference is sound.
+        unsafe { (*self.value.get()).as_ref() }
+    }
+
+    pub fn is_initialized(&self) -> bool {
+        self.initialized.load(Ordering::Acquire)
+    }
+}
+
+impl<T> Default for OnceCell<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}

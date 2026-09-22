@@ -1,5 +1,6 @@
 use crate::serial::{write_dec, write_hex, write_hex16, write_hex8};
 use crate::{hal, serial_write};
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 const PCI_CONFIG_ADDRESS: u16 = 0xCF8;
@@ -65,13 +66,31 @@ pub struct PciBarInfo {
 
 static PCI_LOCK: AtomicBool = AtomicBool::new(false);
 static PCI_SCAN_READY: AtomicBool = AtomicBool::new(false);
-static mut PCI_DEVICES: [Option<PciDevice>; MAX_SNAPSHOT_DEVICES] = [None; MAX_SNAPSHOT_DEVICES];
-static mut PCI_TOTAL_DEVICES: usize = 0;
-static mut PCI_STORED_DEVICES: usize = 0;
-static mut PCI_USB_CONTROLLERS: usize = 0;
-static mut PCI_NETWORK_CONTROLLERS: usize = 0;
-static mut PCI_MSI_DEVICES: usize = 0;
-static mut PCI_MSIX_DEVICES: usize = 0;
+/// Кэш результатов сканирования PCI. Был массивом + шестью счётчиками в
+/// `static mut`; теперь одна структура за `UnsafeCell`, доступ к которой всегда
+/// под `PCI_LOCK`.
+struct PciCache {
+    devices: [Option<PciDevice>; MAX_SNAPSHOT_DEVICES],
+    total_devices: usize,
+    stored_devices: usize,
+    usb_controllers: usize,
+    network_controllers: usize,
+    msi_devices: usize,
+    msix_devices: usize,
+}
+
+struct PciCacheCell(UnsafeCell<PciCache>);
+unsafe impl Sync for PciCacheCell {}
+
+static PCI_CACHE: PciCacheCell = PciCacheCell(UnsafeCell::new(PciCache {
+    devices: [None; MAX_SNAPSHOT_DEVICES],
+    total_devices: 0,
+    stored_devices: 0,
+    usb_controllers: 0,
+    network_controllers: 0,
+    msi_devices: 0,
+    msix_devices: 0,
+}));
 
 pub fn init() {
     crate::drivers::registry::register("pci", crate::drivers::registry::DeviceClass::Bus, "pci");
@@ -114,16 +133,17 @@ pub fn snapshot() -> PciSnapshot {
 
     lock_cache();
     unsafe {
-        snapshot.total_devices = PCI_TOTAL_DEVICES;
-        snapshot.stored_devices = PCI_STORED_DEVICES;
-        snapshot.usb_controllers = PCI_USB_CONTROLLERS;
-        snapshot.network_controllers = PCI_NETWORK_CONTROLLERS;
-        snapshot.msi_devices = PCI_MSI_DEVICES;
-        snapshot.msix_devices = PCI_MSIX_DEVICES;
+        let cache = &*PCI_CACHE.0.get();
+        snapshot.total_devices = cache.total_devices;
+        snapshot.stored_devices = cache.stored_devices;
+        snapshot.usb_controllers = cache.usb_controllers;
+        snapshot.network_controllers = cache.network_controllers;
+        snapshot.msi_devices = cache.msi_devices;
+        snapshot.msix_devices = cache.msix_devices;
 
         let mut index = 0usize;
-        while index < PCI_STORED_DEVICES && index < snapshot.devices.len() {
-            snapshot.devices[index] = PCI_DEVICES[index];
+        while index < cache.stored_devices && index < snapshot.devices.len() {
+            snapshot.devices[index] = cache.devices[index];
             index += 1;
         }
     }
@@ -137,13 +157,14 @@ pub fn refresh_cache() {
 
     lock_cache();
     unsafe {
-        PCI_DEVICES = snapshot.devices;
-        PCI_TOTAL_DEVICES = snapshot.total_devices;
-        PCI_STORED_DEVICES = snapshot.stored_devices;
-        PCI_USB_CONTROLLERS = snapshot.usb_controllers;
-        PCI_NETWORK_CONTROLLERS = snapshot.network_controllers;
-        PCI_MSI_DEVICES = snapshot.msi_devices;
-        PCI_MSIX_DEVICES = snapshot.msix_devices;
+        let cache = &mut *PCI_CACHE.0.get();
+        cache.devices = snapshot.devices;
+        cache.total_devices = snapshot.total_devices;
+        cache.stored_devices = snapshot.stored_devices;
+        cache.usb_controllers = snapshot.usb_controllers;
+        cache.network_controllers = snapshot.network_controllers;
+        cache.msi_devices = snapshot.msi_devices;
+        cache.msix_devices = snapshot.msix_devices;
     }
     PCI_SCAN_READY.store(true, Ordering::Release);
     PCI_LOCK.store(false, Ordering::Release);

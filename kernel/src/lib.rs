@@ -34,6 +34,7 @@ pub mod ui_loop;
 pub mod window_manager;
 
 #[cfg(not(test))]
+use core::cell::UnsafeCell;
 use core::panic::PanicInfo;
 
 #[cfg(not(test))]
@@ -81,22 +82,38 @@ struct LimineFramebuffer {
     blue_mask_shift: u8,
 }
 
-static mut INPUT_BUFFER: [u8; 256] = [0; 256];
-static mut INPUT_LEN: usize = 0;
-
 // Command history
-static mut HISTORY_BUFFER: [[u8; 256]; 50] = [[0; 256]; 50];
-static mut HISTORY_LENS: [usize; 50] = [0; 50];
-static mut HISTORY_COUNT: usize = 0;
-static mut HISTORY_INDEX: usize = 0;
-static mut HISTORY_POSITION: isize = -1;
-static mut TERMINAL_CWD: [u8; 256] = {
-    let mut path = [0; 256];
-    path[0] = b'/';
-    path
-};
-static mut TERMINAL_CWD_LEN: usize = 1;
-static mut TERMINAL_DIR_ENTRIES: [fs::vfs::DirEntry; 32] = [fs::vfs::DirEntry::empty(); 32];
+/// Состояние оболочки терминала (ввод + история + cwd + буфер листинга). Раньше
+/// десять `static mut`; теперь одна структура за `UnsafeCell`-newtype без
+/// `static mut`. Всё это трогает только кооперативный путь оболочки на одном CPU.
+struct ShellState {
+    input_buffer: [u8; 256],
+    input_len: usize,
+    history_buffer: [[u8; 256]; 50],
+    history_lens: [usize; 50],
+    history_count: usize,
+    history_index: usize,
+    history_position: isize,
+    terminal_cwd: [u8; 256],
+    terminal_cwd_len: usize,
+    terminal_dir_entries: [fs::vfs::DirEntry; 32],
+}
+
+struct ShellStateCell(UnsafeCell<ShellState>);
+unsafe impl Sync for ShellStateCell {}
+
+static SHELL: ShellStateCell = ShellStateCell(UnsafeCell::new(ShellState {
+    input_buffer: [0; 256],
+    input_len: 0,
+    history_buffer: [[0; 256]; 50],
+    history_lens: [0; 50],
+    history_count: 0,
+    history_index: 0,
+    history_position: -1,
+    terminal_cwd: { let mut path = [0u8; 256]; path[0] = b'/'; path },
+    terminal_cwd_len: 1,
+    terminal_dir_entries: [fs::vfs::DirEntry::empty(); 32],
+}));
 
 /// Tiny fixed-capacity string builder for honest, measured boot lines.
 /// Avoids heap allocation on the early boot path.
@@ -148,15 +165,19 @@ pub(crate) use crate::serial::serial_write;
 
 fn terminal_set_cwd(path: &str) {
     unsafe {
+        let shell = &mut *SHELL.0.get();
         let bytes = path.as_bytes();
-        let len = bytes.len().min(TERMINAL_CWD.len());
-        TERMINAL_CWD[..len].copy_from_slice(&bytes[..len]);
-        TERMINAL_CWD_LEN = len;
+        let len = bytes.len().min(shell.terminal_cwd.len());
+        shell.terminal_cwd[..len].copy_from_slice(&bytes[..len]);
+        shell.terminal_cwd_len = len;
     }
 }
 
 fn terminal_cwd() -> &'static str {
-    unsafe { core::str::from_utf8(&TERMINAL_CWD[..TERMINAL_CWD_LEN]).unwrap_or("/") }
+    unsafe {
+        let shell = &*SHELL.0.get();
+        core::str::from_utf8(&shell.terminal_cwd[..shell.terminal_cwd_len]).unwrap_or("/")
+    }
 }
 
 fn terminal_exec(console: &mut terminal::FbConsole, cwd: &str, command_line: &str) {
@@ -304,8 +325,17 @@ fn terminal_collect_foreground_input(
 }
 
 #[no_mangle]
-static mut SCREEN_LOG_FB: Option<(*mut u32, usize)> = None;
-static mut SCREEN_LOG_Y: usize = 10;
+/// Состояние раннего экранного лога (fb-указатель + текущая Y). Раньше два
+/// `static mut`; теперь одна структура за `UnsafeCell`. Пишется/читается только
+/// кооперативным путём загрузки на одном CPU.
+struct ScreenLog {
+    fb: Option<(*mut u32, usize)>,
+    y: usize,
+}
+
+struct ScreenLogCell(UnsafeCell<ScreenLog>);
+unsafe impl Sync for ScreenLogCell {}
+static SCREEN_LOG: ScreenLogCell = ScreenLogCell(UnsafeCell::new(ScreenLog { fb: None, y: 10 }));
 const BOOT_BACKGROUND_BMP: &[u8] = include_bytes!("../../assets/gui/boot_blur.bmp");
 const BOOT_BACKGROUND_WIDTH: usize = 1024;
 const BOOT_BACKGROUND_HEIGHT: usize = 768;
@@ -456,14 +486,15 @@ fn screen_log_internal(text: &str, is_error: bool) {
     serial_write("\r\n");
 
     unsafe {
-        if let Some((fb_addr, width)) = SCREEN_LOG_FB {
-            if SCREEN_LOG_Y < 700 {
+        let log = &mut *SCREEN_LOG.0.get();
+        if let Some((fb_addr, width)) = log.fb {
+            if log.y < 700 {
                 if is_error {
-                    draw_error_text(fb_addr, width, 10, SCREEN_LOG_Y, text);
+                    draw_error_text(fb_addr, width, 10, log.y, text);
                 } else {
-                    draw_colored_text(fb_addr, width, 10, SCREEN_LOG_Y, text);
+                    draw_colored_text(fb_addr, width, 10, log.y, text);
                 }
-                SCREEN_LOG_Y += 10;
+                log.y += 10;
             }
         }
     }
@@ -590,12 +621,19 @@ pub extern "C" fn kernel_main(
         early_log_y += 10;
 
         unsafe {
-            SCREEN_LOG_FB = Some((fb_addr, width));
-            SCREEN_LOG_Y = early_log_y;
-            crate::syscall::KERNEL_FB_ADDR = fb.address as u64;
-            crate::syscall::KERNEL_FB_WIDTH = fb.width as u32;
-            crate::syscall::KERNEL_FB_HEIGHT = fb.height as u32;
-            crate::syscall::KERNEL_FB_PITCH = fb.pitch as u32;
+            {
+                let log = &mut *SCREEN_LOG.0.get();
+                log.fb = Some((fb_addr, width));
+                log.y = early_log_y;
+            }
+            crate::syscall::KERNEL_FB_ADDR
+                .store(fb.address as u64, core::sync::atomic::Ordering::Relaxed);
+            crate::syscall::KERNEL_FB_WIDTH
+                .store(fb.width as u32, core::sync::atomic::Ordering::Relaxed);
+            crate::syscall::KERNEL_FB_HEIGHT
+                .store(fb.height as u32, core::sync::atomic::Ordering::Relaxed);
+            crate::syscall::KERNEL_FB_PITCH
+                .store(fb.pitch as u32, core::sync::atomic::Ordering::Relaxed);
         }
         screen_log_early(fb_addr, width, early_log_y, "[KERNEL] screen log ready");
         early_log_y += 10;
@@ -871,7 +909,8 @@ pub extern "C" fn kernel_main(
                 console.draw_cursor(true);
 
                 unsafe {
-                    INPUT_LEN = 0;
+                    let shell = &mut *SHELL.0.get();
+                    shell.input_len = 0;
 
                     for _ in 0..16 {
                         let status: u8;
@@ -893,6 +932,7 @@ pub extern "C" fn kernel_main(
 
                     if let Some(scancode) = drivers::keyboard::read_scancode() {
                         unsafe {
+                            let shell = &mut *SHELL.0.get();
                             if scancode & 0x80 == 0 {
                                 // Check for arrow keys first
                                 if let Some(special_key) =
@@ -901,28 +941,30 @@ pub extern "C" fn kernel_main(
                                     match special_key {
                                         drivers::keyboard::SpecialKey::UpArrow => {
                                             // Navigate up in history
-                                            if HISTORY_COUNT > 0 {
-                                                if HISTORY_POSITION == -1 {
-                                                    HISTORY_POSITION = HISTORY_COUNT as isize - 1;
-                                                } else if HISTORY_POSITION > 0 {
-                                                    HISTORY_POSITION -= 1;
+                                            if shell.history_count > 0 {
+                                                if shell.history_position == -1 {
+                                                    shell.history_position =
+                                                        shell.history_count as isize - 1;
+                                                } else if shell.history_position > 0 {
+                                                    shell.history_position -= 1;
                                                 }
 
                                                 // Clear current input
-                                                for _ in 0..INPUT_LEN {
+                                                for _ in 0..shell.input_len {
                                                     console.draw_char('\x08');
                                                 }
 
                                                 // Load command from history
-                                                let hist_idx = HISTORY_POSITION as usize;
-                                                INPUT_LEN = HISTORY_LENS[hist_idx];
-                                                for i in 0..INPUT_LEN {
-                                                    INPUT_BUFFER[i] = HISTORY_BUFFER[hist_idx][i];
+                                                let hist_idx = shell.history_position as usize;
+                                                shell.input_len = shell.history_lens[hist_idx];
+                                                for i in 0..shell.input_len {
+                                                    shell.input_buffer[i] =
+                                                        shell.history_buffer[hist_idx][i];
                                                 }
 
                                                 // Display the command
                                                 let cmd = core::str::from_utf8(
-                                                    &INPUT_BUFFER[..INPUT_LEN],
+                                                    &shell.input_buffer[..shell.input_len],
                                                 )
                                                 .unwrap_or("");
                                                 console.write_str(cmd);
@@ -930,41 +972,45 @@ pub extern "C" fn kernel_main(
                                         }
                                         drivers::keyboard::SpecialKey::DownArrow => {
                                             // Navigate down in history
-                                            if HISTORY_COUNT > 0 && HISTORY_POSITION != -1 {
+                                            if shell.history_count > 0
+                                                && shell.history_position != -1
+                                            {
                                                 // Clear current input
-                                                for _ in 0..INPUT_LEN {
+                                                for _ in 0..shell.input_len {
                                                     console.draw_char('\x08');
                                                 }
 
-                                                if HISTORY_POSITION < (HISTORY_COUNT as isize - 1) {
-                                                    HISTORY_POSITION += 1;
+                                                if shell.history_position
+                                                    < (shell.history_count as isize - 1)
+                                                {
+                                                    shell.history_position += 1;
 
                                                     // Load command from history
-                                                    let hist_idx = HISTORY_POSITION as usize;
-                                                    INPUT_LEN = HISTORY_LENS[hist_idx];
-                                                    for i in 0..INPUT_LEN {
-                                                        INPUT_BUFFER[i] =
-                                                            HISTORY_BUFFER[hist_idx][i];
+                                                    let hist_idx = shell.history_position as usize;
+                                                    shell.input_len = shell.history_lens[hist_idx];
+                                                    for i in 0..shell.input_len {
+                                                        shell.input_buffer[i] =
+                                                            shell.history_buffer[hist_idx][i];
                                                     }
 
                                                     // Display the command
                                                     let cmd = core::str::from_utf8(
-                                                        &INPUT_BUFFER[..INPUT_LEN],
+                                                        &shell.input_buffer[..shell.input_len],
                                                     )
                                                     .unwrap_or("");
                                                     console.write_str(cmd);
                                                 } else {
                                                     // At the end of history, clear input
-                                                    HISTORY_POSITION = -1;
-                                                    INPUT_LEN = 0;
+                                                    shell.history_position = -1;
+                                                    shell.input_len = 0;
                                                 }
                                             }
                                         }
                                         _ => {}
                                     }
                                 } else if scancode == 0x0E {
-                                    if INPUT_LEN > 0 {
-                                        INPUT_LEN -= 1;
+                                    if shell.input_len > 0 {
+                                        shell.input_len -= 1;
                                         console.draw_char('\x08');
                                     }
                                 } else if let Some(ch) =
@@ -973,21 +1019,23 @@ pub extern "C" fn kernel_main(
                                     if ch == '\n' {
                                         console.write_str("\n");
 
-                                        let cmd_str =
-                                            core::str::from_utf8(&INPUT_BUFFER[..INPUT_LEN])
-                                                .unwrap_or("");
+                                        let cmd_str = core::str::from_utf8(
+                                            &shell.input_buffer[..shell.input_len],
+                                        )
+                                        .unwrap_or("");
 
                                         // Add non-empty commands to history
-                                        if INPUT_LEN > 0 {
-                                            let hist_idx = HISTORY_COUNT % 50;
-                                            HISTORY_LENS[hist_idx] = INPUT_LEN;
-                                            for i in 0..INPUT_LEN {
-                                                HISTORY_BUFFER[hist_idx][i] = INPUT_BUFFER[i];
+                                        if shell.input_len > 0 {
+                                            let hist_idx = shell.history_count % 50;
+                                            shell.history_lens[hist_idx] = shell.input_len;
+                                            for i in 0..shell.input_len {
+                                                shell.history_buffer[hist_idx][i] =
+                                                    shell.input_buffer[i];
                                             }
-                                            if HISTORY_COUNT < 50 {
-                                                HISTORY_COUNT += 1;
+                                            if shell.history_count < 50 {
+                                                shell.history_count += 1;
                                             }
-                                            HISTORY_POSITION = -1;
+                                            shell.history_position = -1;
                                         }
 
                                         let response = {
@@ -1033,14 +1081,13 @@ pub extern "C" fn kernel_main(
                                         }
 
                                         console.write_str("root@dunit:~# ");
-                                        unsafe {
-                                            INPUT_LEN = 0;
-                                        }
+                                        shell.input_len = 0;
                                     } else if ch == '\t' {
                                         // Tab autocomplete
-                                        let input =
-                                            core::str::from_utf8(&INPUT_BUFFER[..INPUT_LEN])
-                                                .unwrap_or("");
+                                        let input = core::str::from_utf8(
+                                            &shell.input_buffer[..shell.input_len],
+                                        )
+                                        .unwrap_or("");
 
                                         let mut matches: [&str; 64] = [""; 64];
                                         let mut match_count = 0;
@@ -1058,15 +1105,15 @@ pub extern "C" fn kernel_main(
                                             let completion = matches[0];
 
                                             // Clear current input
-                                            for _ in 0..INPUT_LEN {
+                                            for _ in 0..shell.input_len {
                                                 console.draw_char('\x08');
                                             }
 
                                             // Write completed command
-                                            INPUT_LEN = completion.len();
+                                            shell.input_len = completion.len();
                                             for (i, &b) in completion.as_bytes().iter().enumerate()
                                             {
-                                                INPUT_BUFFER[i] = b;
+                                                shell.input_buffer[i] = b;
                                             }
                                             console.write_str(completion);
                                         } else if match_count > 1 {
@@ -1079,15 +1126,17 @@ pub extern "C" fn kernel_main(
                                             console.write_str("\nroot@dunit:~# ");
 
                                             // Redisplay current input
-                                            let input_str =
-                                                core::str::from_utf8(&INPUT_BUFFER[..INPUT_LEN])
-                                                    .unwrap_or("");
+                                            let input_str = core::str::from_utf8(
+                                                &shell.input_buffer[..shell.input_len],
+                                            )
+                                            .unwrap_or("");
                                             console.write_str(input_str);
                                         }
                                     } else {
-                                        if INPUT_LEN < 255 {
-                                            INPUT_BUFFER[INPUT_LEN] = ch as u8;
-                                            INPUT_LEN += 1;
+                                        if shell.input_len < 255 {
+                                            let idx = shell.input_len;
+                                            shell.input_buffer[idx] = ch as u8;
+                                            shell.input_len += 1;
                                             console.draw_char(ch);
                                         }
                                     }
