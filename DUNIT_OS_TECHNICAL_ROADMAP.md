@@ -365,7 +365,7 @@ Dunit DWM — отдельный policy shell поверх GUI Server:
 
 ### M2 — GUI protocol + headless reference server (можно параллельно с M1)
 
-- [ ] Специфицировать protocol v1, state machines, object lifetimes, limits и errors.
+- [x] Специфицировать protocol v1, state machines, object lifetimes, limits и errors. Контракт v1.0: [protocols/gui-v1/README.md](protocols/gui-v1/README.md) — wire layout, negotiation, surface/buffer/configure/focus lifecycle, quotas, errors и нормативные сценарии. Это спецификация для следующих пунктов M2; decoder, headless tests и kernel binding M3 ещё не реализованы, public ABI не заморожен.
 - [ ] Реализовать host/headless protocol tests без framebuffer.
 - [ ] Перенести полезные pure structures/tests из `userspace/display_server`, не его текущий `egui` binary lifecycle.
 - [ ] Реализовать surface/buffer/focus/input models и fuzz/property tests.
