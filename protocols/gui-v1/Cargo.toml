@@ -1,0 +1,22 @@
+# Headless reference implementation of the Dunit GUI protocol v1.0.
+#
+# Pure `no_std + alloc` core so the same code can later be embedded in the
+# userspace GUI Server (M3) without a framebuffer or real IPC. Host tests run
+# via `cargo test` (see `tests/`) with zero external dependencies, matching the
+# offline build environment. The wire contract lives in ../README.md.
+[package]
+name = "gui_protocol_v1"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "gui_protocol_v1"
+path = "src/lib.rs"
+
+# No dependencies on purpose: the crate must build offline and stay portable to
+# the kernel/userspace `x86_64-unknown-none` target. Deterministic host tests
+# use only the std test harness; fuzz/property tooling is deferred to M2 item 4.
+
+[profile.release]
+panic = "abort"
+lto = true
