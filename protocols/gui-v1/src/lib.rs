@@ -20,6 +20,12 @@
 //!   focus/input *behaviour* are deliberately deferred to M2 item 4 and are
 //!   documented as such at their call sites; nothing here silently returns a
 //!   wrong result for them.
+//! * [`wm`] — a pure window-management + software-composition model ported from
+//!   the `userspace/display_server` prototype (its `egui` binary lifecycle is
+//!   dropped): a window stack, focus policy, top-most hit-testing, drag
+//!   interaction and a CPU compositor painting into an ARGB `Vec<u32>`. Kept
+//!   headless and deterministic; it is the substrate the focus/input models of
+//!   M2 item 4 build on.
 //!
 //! Determinism: the server never reads a wall clock or a host pointer. Time
 //! advances only through [`server::Server::tick`], and identifiers are handed
@@ -32,6 +38,7 @@ extern crate alloc;
 
 pub mod server;
 pub mod wire;
+pub mod wm;
 
 pub use wire::{
     ErrorCode, Event, Header, Opcode, Rect, Request, WireError, HEADER_LEN, MAGIC, MAX_PACKET,
