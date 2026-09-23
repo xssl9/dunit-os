@@ -14,12 +14,16 @@
 //!   *connection* layer end to end (negotiation state machine, version/feature
 //!   negotiation, HELLO timeout via an injected monotonic clock, DISCONNECT,
 //!   client-request serial monotonicity, opcode direction and the reserved DWM
-//!   policy range) and the shared object-namespace rules (fresh-ID
-//!   monotonicity, existence/type tracking, stale/reused/cross-connection ID
-//!   rejection). Surface visibility, buffer ownership, configure/commit and
-//!   focus/input *behaviour* are deliberately deferred to M2 item 4 and are
-//!   documented as such at their call sites; nothing here silently returns a
-//!   wrong result for them.
+//!   policy range), the shared object-namespace rules (fresh-ID monotonicity,
+//!   existence/type tracking, stale/reused/cross-connection ID rejection) and
+//!   the M2-item-4 *behavioural* models: the surface configure/ack/commit
+//!   lifecycle, buffer ownership (`AVAILABLE→PENDING→BUSY` + `BUFFER_RELEASE`),
+//!   frame callbacks completed at a composition tick, and the single-seat
+//!   focus/input router (pointer & keyboard enter/leave, motion/button/axis,
+//!   key/text, implicit grab). Policy decisions enter as verified external
+//!   events. One deferral remains, flagged at its call site: duplicate-import
+//!   detection (spec §7) needs a kernel memory-object identity the abstract
+//!   transport shim does not carry, left to the M3 kernel binding.
 //! * [`wm`] — a pure window-management + software-composition model ported from
 //!   the `userspace/display_server` prototype (its `egui` binary lifecycle is
 //!   dropped): a window stack, focus policy, top-most hit-testing, drag
