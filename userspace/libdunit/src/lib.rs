@@ -61,6 +61,7 @@ pub const SYSCALL_HANDLE_SIGNAL: usize = 51;
 pub const SYSCALL_HANDLE_TAKE_SIGNALS: usize = 52;
 pub const SYSCALL_HANDLE_DISPLAY_ACQUIRE: usize = 53;
 pub const SYSCALL_HANDLE_TRANSFER: usize = 54;
+pub const SYSCALL_HANDLE_INPUT_ACQUIRE: usize = 55;
 
 /// Права хэндлов (capabilities). Совпадают с битами в ядре (kernel/src/handle.rs).
 pub const RIGHT_READ: u32 = 1 << 0;
@@ -69,6 +70,7 @@ pub const RIGHT_MAP: u32 = 1 << 2;
 pub const RIGHT_SIGNAL: u32 = 1 << 3;
 pub const RIGHT_TRANSFER: u32 = 1 << 4;
 pub const RIGHT_DISPLAY_MASTER: u32 = 1 << 5;
+pub const RIGHT_INPUT_MASTER: u32 = 1 << 6;
 
 pub const VM_PROT_READ: usize = 1;
 pub const VM_PROT_WRITE: usize = 2;
@@ -1074,6 +1076,13 @@ pub fn handle_take_signals() -> isize {
 /// DISPLAY_MASTER или отрицательный errno (EBUSY, если дисплей занят).
 pub fn handle_display_acquire() -> isize {
     syscall0(SYSCALL_HANDLE_DISPLAY_ACQUIRE)
+}
+
+/// Захватывает эксклюзивный мастер-источник ввода (клавиатура/мышь). Возвращает
+/// хэндл с правом INPUT_MASTER|TRANSFER или отрицательный errno (EBUSY, если
+/// вводом уже владеет другой процесс).
+pub fn handle_input_acquire() -> isize {
+    syscall0(SYSCALL_HANDLE_INPUT_ACQUIRE)
 }
 
 /// Передаёт хэндл процессу `target_pid` (нужно право TRANSFER). Возвращает новый

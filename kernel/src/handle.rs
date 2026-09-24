@@ -10,6 +10,7 @@
 //! - `READ`/`WRITE`/`MAP` — объект памяти [`HandleObject::Memory`];
 //! - `SIGNAL` — конечная точка [`HandleObject::Endpoint`] (сигнал процессу);
 //! - `DISPLAY_MASTER` — эксклюзивное владение фреймбуфером [`HandleObject::Display`];
+//! - `INPUT_MASTER` — эксклюзивный источник ввода (клавиатура/мышь) [`HandleObject::Input`];
 //! - `TRANSFER` — можно ли передать хэндл другому процессу.
 
 use alloc::collections::BTreeMap;
@@ -24,13 +25,15 @@ pub const RIGHT_MAP: u32 = 1 << 2;
 pub const RIGHT_SIGNAL: u32 = 1 << 3;
 pub const RIGHT_TRANSFER: u32 = 1 << 4;
 pub const RIGHT_DISPLAY_MASTER: u32 = 1 << 5;
+pub const RIGHT_INPUT_MASTER: u32 = 1 << 6;
 
 pub const RIGHTS_ALL: u32 = RIGHT_READ
     | RIGHT_WRITE
     | RIGHT_MAP
     | RIGHT_SIGNAL
     | RIGHT_TRANSFER
-    | RIGHT_DISPLAY_MASTER;
+    | RIGHT_DISPLAY_MASTER
+    | RIGHT_INPUT_MASTER;
 
 /// Верхняя граница размера объекта памяти за одним хэндлом (защита от исчерпания
 /// кучи по запросу из userspace).
@@ -64,6 +67,8 @@ pub enum HandleObject {
     Endpoint(ProcessId),
     /// Мастер-владение дисплеем (эксклюзивно на всю систему). Право DISPLAY_MASTER.
     Display,
+    /// Мастер-источник ввода (эксклюзивно на всю систему). Право INPUT_MASTER.
+    Input,
 }
 
 impl HandleObject {
@@ -166,6 +171,7 @@ impl HandleTable {
             HandleObject::Memory(data) => HandleObject::Memory(data.clone()),
             HandleObject::Endpoint(pid) => HandleObject::Endpoint(*pid),
             HandleObject::Display => HandleObject::Display,
+            HandleObject::Input => HandleObject::Input,
         };
         Ok(self.insert(object, new_rights))
     }
@@ -215,4 +221,26 @@ pub fn release_display(pid: ProcessId) {
 
 pub fn display_owner() -> u64 {
     DISPLAY_MASTER_OWNER.load(Ordering::Acquire)
+}
+
+/// Владелец мастер-права на ввод: `0` — свободен, иначе pid владельца.
+/// Как и дисплей, эксклюзивен на всю систему, поэтому глобальный атомик.
+static INPUT_MASTER_OWNER: AtomicU64 = AtomicU64::new(0);
+
+/// Пытается захватить источник ввода за процессом `pid`. Идемпотентно для
+/// текущего владельца. Возвращает `false`, если вводом владеет другой процесс.
+pub fn try_acquire_input(pid: ProcessId) -> bool {
+    match INPUT_MASTER_OWNER.compare_exchange(0, pid.0, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => true,
+        Err(current) => current == pid.0,
+    }
+}
+
+/// Освобождает источник ввода, если им владеет `pid` (иначе no-op).
+pub fn release_input(pid: ProcessId) {
+    let _ = INPUT_MASTER_OWNER.compare_exchange(pid.0, 0, Ordering::AcqRel, Ordering::Acquire);
+}
+
+pub fn input_owner() -> u64 {
+    INPUT_MASTER_OWNER.load(Ordering::Acquire)
 }

@@ -49,6 +49,7 @@ static VM_PROTECT_FAULT_BYTES: &[u8] = include_bytes!("../../../build/userspace/
 static TLS_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/tls_test");
 static FUTEX_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/futex_test");
 static HANDLE_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/handle_test");
+static GUI_SERVER_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_server");
 
 pub struct AssetEntry {
     pub path: &'static str,
@@ -669,6 +670,7 @@ pub fn init() -> Result<()> {
         (*ROOT_MEMFS.0.get()).add_file("/app/tls_test", TLS_TEST_BYTES.to_vec());
         (*ROOT_MEMFS.0.get()).add_file("/app/futex_test", FUTEX_TEST_BYTES.to_vec());
         (*ROOT_MEMFS.0.get()).add_file("/app/handle_test", HANDLE_TEST_BYTES.to_vec());
+        (*ROOT_MEMFS.0.get()).add_file("/app/gui_server", GUI_SERVER_BYTES.to_vec());
 
         vfs.mount("/", &mut *ROOT_MEMFS.0.get())?;
         serial_log("[MEMFS] mounted as /\r\n");

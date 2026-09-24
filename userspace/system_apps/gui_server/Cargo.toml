@@ -1,0 +1,18 @@
+# Userspace Dunit GUI server (M3).
+#
+# First bring-up slice: proves the M2 headless protocol crate `gui_protocol_v1`
+# builds and links for the `x86_64-unknown-none` userspace target and that the
+# build/embed/spawn pipeline for a new system ELF works. The real compositor
+# (framebuffer, shared surfaces, focus/input routing) lands in later M3 items.
+[package]
+name = "gui_server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libdunit = { path = "../../libdunit" }
+gui_protocol_v1 = { path = "../../../protocols/gui-v1" }
+
+[[bin]]
+name = "gui_server"
+path = "src/main.rs"

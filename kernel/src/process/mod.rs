@@ -9,8 +9,8 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use core::cell::UnsafeCell;
 
 use crate::handle::{
-    Handle, HandleError, HandleObject, RIGHT_DISPLAY_MASTER, RIGHT_MAP, RIGHT_READ, RIGHT_SIGNAL,
-    RIGHT_TRANSFER, RIGHT_WRITE,
+    Handle, HandleError, HandleObject, RIGHT_DISPLAY_MASTER, RIGHT_INPUT_MASTER, RIGHT_MAP,
+    RIGHT_READ, RIGHT_SIGNAL, RIGHT_TRANSFER, RIGHT_WRITE,
 };
 use crate::memory::pmm::{get_pmm, PhysicalAddress};
 use crate::memory::vmm::{ActiveAddressSpace, AddressSpace, PageFlags, VirtualAddress};
@@ -840,6 +840,9 @@ impl Process {
             if matches!(object, crate::handle::HandleObject::Display) {
                 crate::handle::release_display(self.pid);
             }
+            if matches!(object, crate::handle::HandleObject::Input) {
+                crate::handle::release_input(self.pid);
+            }
         }
     }
 
@@ -887,6 +890,9 @@ impl Process {
         let entry = self.handle_table.remove(handle)?;
         if matches!(entry.object, HandleObject::Display) {
             crate::handle::release_display(self.pid);
+        }
+        if matches!(entry.object, HandleObject::Input) {
+            crate::handle::release_input(self.pid);
         }
         Ok(())
     }
@@ -990,6 +996,17 @@ impl Process {
             .insert(HandleObject::Display, RIGHT_DISPLAY_MASTER | RIGHT_TRANSFER))
     }
 
+    /// Захватывает мастер-право на источник ввода (эксклюзивно). Возвращает хэндл
+    /// с правом INPUT_MASTER|TRANSFER либо `DisplayBusy` (ресурс занят другим).
+    pub fn handle_input_acquire(&mut self) -> Result<Handle, HandleError> {
+        if !crate::handle::try_acquire_input(self.pid) {
+            return Err(HandleError::DisplayBusy);
+        }
+        Ok(self
+            .handle_table
+            .insert(HandleObject::Input, RIGHT_INPUT_MASTER | RIGHT_TRANSFER))
+    }
+
     /// Забирает хэндл из таблицы для передачи; проверяет право TRANSFER.
     /// Мастер-право на дисплей не переносится (эксклюзивный системный ресурс с
     /// отдельным учётом владельца) — попытка её передать отклоняется.
@@ -998,7 +1015,7 @@ impl Process {
         handle: Handle,
     ) -> Result<(HandleObject, u32), HandleError> {
         let entry = self.handle_table.require(handle, RIGHT_TRANSFER)?;
-        if matches!(entry.object, HandleObject::Display) {
+        if matches!(entry.object, HandleObject::Display | HandleObject::Input) {
             return Err(HandleError::WrongType);
         }
         self.handle_table.take_for_transfer(handle)
