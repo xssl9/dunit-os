@@ -1090,7 +1090,10 @@ fn write_terminal_foreground(data: &[u8]) {
             }
         }
         Some(crate::process::ProcessOutputSink::GuiTerminal) => {
+            #[cfg(feature = "legacy_gui")]
             crate::ui_loop::gui_terminal_write_exec_output(data);
+            #[cfg(not(feature = "legacy_gui"))]
+            let _ = data;
         }
         _ => {}
     }

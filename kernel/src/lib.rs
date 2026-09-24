@@ -15,6 +15,7 @@ pub mod dpkg;
 pub mod drivers;
 pub mod elf;
 pub mod fs;
+#[cfg(feature = "legacy_gui")]
 pub mod gui;
 pub mod hal;
 pub mod handle;
@@ -31,7 +32,9 @@ pub mod storage;
 pub mod sync;
 pub mod syscall;
 pub mod terminal;
+#[cfg(feature = "legacy_gui")]
 pub mod ui_loop;
+#[cfg(feature = "legacy_gui")]
 pub mod window_manager;
 
 #[cfg(not(test))]
@@ -756,9 +759,12 @@ pub extern "C" fn kernel_main(
         screen_log("[ OK ] Input drivers loaded", false);
 
         screen_log("[ .. ] Starting window manager", false);
-        serial_write("[WM] Calling window_manager::init()...\r\n");
-        window_manager::init();
-        serial_write("[WM] window_manager::init() returned\r\n");
+        #[cfg(feature = "legacy_gui")]
+        {
+            serial_write("[WM] Calling window_manager::init()...\r\n");
+            window_manager::init();
+            serial_write("[WM] window_manager::init() returned\r\n");
+        }
         screen_log("[ OK ] Window manager ready", false);
     } else {
         screen_log("[ .. ] Terminal mode: Minimal initialization", false);
@@ -1189,7 +1195,18 @@ pub extern "C" fn kernel_main(
 
         screen_log("[ OK ] Starting built-in GUI shell", false);
         serial_write("[GUI] Starting built-in desktop loop\r\n");
+        #[cfg(feature = "legacy_gui")]
         ui_loop::run_ui_loop(fb_addr, width, height, pitch);
+        #[cfg(not(feature = "legacy_gui"))]
+        {
+            let _ = (fb_addr, width, height, pitch);
+            serial_write("[GUI] legacy_gui disabled; desktop served by userspace gui_server\r\n");
+            loop {
+                unsafe {
+                    core::arch::asm!("hlt");
+                }
+            }
+        }
     } else {
         serial_write("[GRAPHICS] No framebuffer available\r\n");
         serial_write("[GRAPHICS] Running in headless mode\r\n");

@@ -55,8 +55,12 @@ bootloader = "0.9"
 bitflags = "2.11"
 
 [features]
-default = []
+default = ["legacy_gui"]
 boot-smoke-tests = []
+# Old in-kernel GUI (gui/renderer, ui_loop, window_manager). Kept on by default
+# until the userspace gui_server/compositor reaches parity; then flip off and
+# delete. Gating it proves the built-in desktop is cleanly excisable.
+legacy_gui = []
 
 [dev-dependencies]
 proptest = "1.4"
