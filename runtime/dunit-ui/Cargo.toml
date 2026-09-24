@@ -1,0 +1,20 @@
+# Dunit UI Runtime — DUI layer: a small declarative component-tree markup, a
+# retained tree with stable IDs, and a constraint/flex layout engine
+# (Row/Column/Stack/Grid/Scroll). Pure `no_std + alloc`, zero dependencies, so
+# the same code runs in host tests and inside the userspace GUI stack on
+# `x86_64-unknown-none`. DSS styling, widgets and motion land in later M4 slices.
+[package]
+name = "dunit_ui"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "dunit_ui"
+path = "src/lib.rs"
+
+# No dependencies: the DUI parser, retained tree and layout engine are all
+# hand-written. Host tests use only the std harness.
+
+[profile.release]
+panic = "abort"
+lto = true
