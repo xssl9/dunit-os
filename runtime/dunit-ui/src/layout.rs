@@ -162,8 +162,8 @@ fn arrange(tree: &Tree, id: NodeId, rect: Rect, desired: &[(f32, f32)], boxes: &
         Kind::Stack => {
             for &c in &node.children {
                 let ca = &tree.node(c).attrs;
-                let w = resolve_fill(ca.width, inner.w);
-                let h = resolve_fill(ca.height, inner.h);
+                let w = clamp_opt(resolve_fill(ca.width, inner.w), ca.min_w, ca.max_w);
+                let h = clamp_opt(resolve_fill(ca.height, inner.h), ca.min_h, ca.max_h);
                 let child = Rect {
                     x: inner.x + cross_offset(a.main_align, inner.w, w),
                     y: inner.y + cross_offset(a.cross_align, inner.h, h),
@@ -180,7 +180,7 @@ fn arrange(tree: &Tree, id: NodeId, rect: Rect, desired: &[(f32, f32)], boxes: &
             for &c in &node.children {
                 let ca = &tree.node(c).attrs;
                 let dh = desired[c.0 as usize].1;
-                let w = resolve_fill(ca.width, inner.w);
+                let w = clamp_opt(resolve_fill(ca.width, inner.w), ca.min_w, ca.max_w);
                 let child = Rect { x: inner.x, y, w, h: dh };
                 arrange(tree, c, child, desired, boxes);
                 y += dh + a.spacing;
@@ -264,7 +264,9 @@ fn arrange_line(
             Rect { x: inner.x + cross_pos, y: cursor, w: cross, h: main }
         };
         arrange(tree, c, rect, desired, boxes);
-        cursor += mains[i] + step_gap;
+        // Advance by the *clamped* main size so a min/max hit leaves no phantom
+        // gap (or overlap) before the next sibling.
+        cursor += main + step_gap;
     }
 }
 

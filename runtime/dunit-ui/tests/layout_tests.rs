@@ -126,3 +126,36 @@ fn min_max_constraints_clamp_size() {
     assert_eq!(a.h, 60.0);
     assert_eq!(a.w, 50.0); // stretched to 200 then clamped to max-width
 }
+
+#[test]
+fn grow_child_clamped_by_max_stays_contiguous() {
+    // Two grow children would split 200px (100 each), but #a is capped at 50.
+    // The clamp must not leave a phantom gap: #b starts right after #a, not at
+    // the pre-clamp 100 mark.
+    let (tree, lay) = r(
+        r#"Row { Stack #a grow=1 max-width=50 Stack #b grow=1 }"#,
+        200.0,
+        20.0,
+    );
+    let a = lay.rect(tree.by_name("a").unwrap());
+    let b = lay.rect(tree.by_name("b").unwrap());
+    assert_eq!(a.w, 50.0); // clamped down from 100
+    assert_eq!(a.x, 0.0);
+    assert_eq!(b.x, 50.0); // contiguous with #a, not 100
+    assert_eq!(b.w, 100.0);
+}
+
+#[test]
+fn stack_child_respects_own_max() {
+    // A Stack fills its Auto children to the viewport, but each child's own
+    // max clamps it back.
+    let (tree, lay) = r(
+        r#"Stack { Stack #a max-width=40 max-height=30 }"#,
+        100.0,
+        100.0,
+    );
+    let a = lay.rect(tree.by_name("a").unwrap());
+    assert_eq!(a.w, 40.0);
+    assert_eq!(a.h, 30.0);
+}
+
