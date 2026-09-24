@@ -1,0 +1,20 @@
+# Dunit Style — DSS layer: a small CSS-like bounded stylesheet with variables,
+# compound selectors and states, a defaults -> theme -> class -> state cascade,
+# and declarative motion (transition duration/easing + value interpolation).
+# Pure `no_std + alloc`, zero dependencies, so the same code runs in host tests
+# and inside the userspace GUI stack on `x86_64-unknown-none`.
+[package]
+name = "dunit_style"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "dunit_style"
+path = "src/lib.rs"
+
+# No dependencies: the DSS parser, cascade and motion engine are all
+# hand-written. Host tests use only the std harness.
+
+[profile.release]
+panic = "abort"
+lto = true
