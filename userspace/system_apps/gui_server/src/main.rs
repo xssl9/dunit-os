@@ -360,6 +360,14 @@ fn drive_protocol(
         return false;
     }
 
+    // 8.5) Damaged second frame: commit a new buffer that differs only in a
+    //      small rectangle and re-present ONLY that damaged region. Proves the
+    //      compositor honors client-declared damage instead of repainting the
+    //      whole surface every frame.
+    if !present_damaged_frame(server, conn, surface, token, w, h, fmt) {
+        return false;
+    }
+
     // 9) Focus/input routing: the compositor owns the input master and fans
     //    events out to clients through the protocol's single-seat router. Give
     //    the mapped surface pointer + keyboard focus, then inject a pointer
@@ -392,4 +400,135 @@ fn drive_protocol(
         libdunit::println("gui_server: FAIL input routing");
     }
     routed
+}
+
+/// Commit a second buffer to `surface` whose contents differ from the first
+/// only inside a small rectangle, declaring that rectangle as damage, then
+/// re-present ONLY the damaged sub-rect to the framebuffer. Returns true iff the
+/// protocol lifecycle and the clipped present both succeed.
+fn present_damaged_frame(
+    server: &mut Server,
+    conn: gui_protocol_v1::server::ConnId,
+    surface: u64,
+    token: u64,
+    w: u32,
+    h: u32,
+    fmt: u32,
+) -> bool {
+    use gui_protocol_v1::wire::Rect;
+
+    const BUFFER2: u64 = 3;
+    let bytes = (w * h * 4) as usize;
+    // Damage rectangle within the surface (compositor-space offset added below).
+    let (dx, dy, dw, dh) = (8u32, 8u32, 16u32, 16u32);
+
+    let buf = libdunit::handle_create_shared(bytes);
+    if buf <= 0 {
+        return false;
+    }
+    let buf = buf as u32;
+    let mapped = libdunit::handle_map(buf, 0, bytes);
+    if mapped <= 0 {
+        libdunit::handle_close(buf);
+        return false;
+    }
+    let pixels = mapped as usize as *mut u8;
+    // Fill: same gradient as frame 1 everywhere, except a solid-red damaged box.
+    unsafe {
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let off = (y * w as usize + x) * 4;
+                let in_damage = (x as u32) >= dx
+                    && (x as u32) < dx + dw
+                    && (y as u32) >= dy
+                    && (y as u32) < dy + dh;
+                if in_damage {
+                    core::ptr::write_volatile(pixels.add(off), 0x00); // B
+                    core::ptr::write_volatile(pixels.add(off + 1), 0x00); // G
+                    core::ptr::write_volatile(pixels.add(off + 2), 0xff); // R
+                    core::ptr::write_volatile(pixels.add(off + 3), 0xff); // X
+                } else {
+                    core::ptr::write_volatile(pixels.add(off), (x * 4) as u8);
+                    core::ptr::write_volatile(pixels.add(off + 1), (y * 4) as u8);
+                    core::ptr::write_volatile(pixels.add(off + 2), 0x80);
+                    core::ptr::write_volatile(pixels.add(off + 3), 0xff);
+                }
+            }
+        }
+    }
+
+    let ok = drive_damage(server, conn, surface, token, w, h, fmt, BUFFER2, dx, dy, dw, dh, pixels);
+    libdunit::handle_close(buf);
+    ok
+}
+
+/// Protocol + present half of a damaged frame: import/attach(damage)/commit the
+/// new buffer, complete the frame callback, then blit only the damaged rect.
+#[allow(clippy::too_many_arguments)]
+fn drive_damage(
+    server: &mut Server,
+    conn: gui_protocol_v1::server::ConnId,
+    surface: u64,
+    token: u64,
+    w: u32,
+    h: u32,
+    fmt: u32,
+    buffer: u64,
+    dx: u32,
+    dy: u32,
+    dw: u32,
+    dh: u32,
+    pixels: *const u8,
+) -> bool {
+    use gui_protocol_v1::wire::Rect;
+
+    let bytes = (w * h * 4) as usize;
+
+    // IMPORT_BUFFER (serial 7) -> RESULT.
+    let import = Request::ImportBuffer { width: w, height: h, stride: w * 4, format: fmt, offset: 0 }
+        .encode(buffer, 7);
+    if find(&server.deliver(conn, &import, Some(bytes as u64)), Opcode::Result).is_none() {
+        return false;
+    }
+    // ATTACH_BUFFER with a single damage rect (serial 8) -> RESULT.
+    let damage = {
+        let mut v = Vec::new();
+        v.push(Rect { x: dx as i32, y: dy as i32, w: dw, h: dh });
+        v
+    };
+    let attach = Request::AttachBuffer { buffer, damage }.encode(surface, 8);
+    if find(&server.deliver(conn, &attach, None), Opcode::Result).is_none() {
+        return false;
+    }
+    // COMMIT (serial 9, reuse the still-valid configure token) -> RESULT (+ the
+    // previous buffer's BUFFER_RELEASE, which we don't require here).
+    let commit = Request::Commit { configure: token, frame_callback: 1 }.encode(surface, 9);
+    if find(&server.deliver(conn, &commit, None), Opcode::Result).is_none() {
+        return false;
+    }
+    // Frame callback fires for the still-mapped surface.
+    let presented = server.composite().iter().any(|(c, p)| {
+        *c == conn && opcode_of(p) == Some(Opcode::FrameDone) && u32_at(p, 48) == 0
+    });
+    if !presented {
+        return false;
+    }
+
+    // Blit ONLY the damaged rect: pack its strided rows out of the surface
+    // buffer, then present at the surface's screen origin (100,100) + rect.
+    let mut region = Vec::with_capacity((dw * dh * 4) as usize);
+    for row in 0..dh as usize {
+        let src_y = dy as usize + row;
+        let base = (src_y * w as usize + dx as usize) * 4;
+        let len = dw as usize * 4;
+        let src = unsafe { core::slice::from_raw_parts(pixels.add(base), len) };
+        region.extend_from_slice(src);
+    }
+    let ok = libdunit::fb_present(&region, dw, dh, 100 + dx, 100 + dy) == 0;
+    if ok {
+        libdunit::println("gui_server: damage present OK");
+    } else {
+        libdunit::println("gui_server: FAIL damage present");
+    }
+    ok
 }

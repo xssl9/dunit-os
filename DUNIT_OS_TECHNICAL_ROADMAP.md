@@ -376,7 +376,7 @@ Dunit DWM — отдельный policy shell поверх GUI Server:
 
 - [x] Добавить display/input master handles и shared-buffer syscalls.
 - [x] Собрать `gui-server` как обычный ELF из Makefile/image manifest.
-- [ ] Реализовать software compositor, damage, frame callbacks, focus/input routing.
+- [x] Реализовать software compositor, damage, frame callbacks, focus/input routing.
 - [ ] Запустить два untrusted client processes одновременно.
 - [ ] Оставить старый kernel GUI под `legacy_gui` feature до parity, затем удалить.
 
