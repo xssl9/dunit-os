@@ -356,5 +356,40 @@ fn drive_protocol(
     // 8) Blit the committed surface's pixels to the framebuffer at the
     //    compositor's chosen placement. Gated by the kernel on display master.
     let data = unsafe { core::slice::from_raw_parts(pixels, bytes) };
-    libdunit::fb_present(data, w, h, 100, 100) == 0
+    if libdunit::fb_present(data, w, h, 100, 100) != 0 {
+        return false;
+    }
+
+    // 9) Focus/input routing: the compositor owns the input master and fans
+    //    events out to clients through the protocol's single-seat router. Give
+    //    the mapped surface pointer + keyboard focus, then inject a pointer
+    //    motion/button and a key press; the router must emit the corresponding
+    //    client-bound events (ENTER on focus change, then BUTTON/KEY). This is
+    //    the path real keyboard/mouse input from the input master will drive.
+    let target = Some((conn, surface));
+    let entered_ptr = server
+        .set_pointer_focus(target, 10, 10)
+        .iter()
+        .any(|(c, p)| *c == conn && opcode_of(p) == Some(Opcode::PointerEnter));
+    let _ = server.pointer_motion(12, 14);
+    let got_button = server
+        .pointer_button(0, true)
+        .iter()
+        .any(|(c, p)| *c == conn && opcode_of(p) == Some(Opcode::PointerButton));
+    let entered_kbd = server
+        .set_keyboard_focus(target, 0)
+        .iter()
+        .any(|(c, p)| *c == conn && opcode_of(p) == Some(Opcode::KeyEnter));
+    let got_key = server
+        .key(0x04, true, 0, false)
+        .iter()
+        .any(|(c, p)| *c == conn && opcode_of(p) == Some(Opcode::Key));
+
+    let routed = entered_ptr && got_button && entered_kbd && got_key;
+    if routed {
+        libdunit::println("gui_server: input routing OK");
+    } else {
+        libdunit::println("gui_server: FAIL input routing");
+    }
+    routed
 }
