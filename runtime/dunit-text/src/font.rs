@@ -298,25 +298,44 @@ fn lookup_cmap(cmap: &Cmap, ch: u32) -> u16 {
 
 fn parse_cmap(cmap: &[u8]) -> Result<Cmap> {
     let num_tables = be_u16_opt(cmap, 2).ok_or(TextError::UnexpectedEof)?;
-    let mut best4: Option<usize> = None;
-    let mut best12: Option<usize> = None;
+    // Track the best (highest-scoring) offset per supported format so we prefer
+    // a real Unicode subtable over, e.g., a Mac Roman one that happens to appear
+    // first in the directory.
+    let mut best4: Option<(i32, usize)> = None;
+    let mut best12: Option<(i32, usize)> = None;
     for i in 0..num_tables as usize {
         let rec = 4 + i * 8;
+        let platform = be_u16_opt(cmap, rec).ok_or(TextError::UnexpectedEof)?;
+        let encoding = be_u16_opt(cmap, rec + 2).ok_or(TextError::UnexpectedEof)?;
         let offset = be_u32(cmap, rec + 4).ok_or(TextError::UnexpectedEof)? as usize;
         let format = be_u16_opt(cmap, offset).unwrap_or(0);
+        let score = cmap_score(platform, encoding);
         match format {
-            4 if best4.is_none() => best4 = Some(offset),
-            12 if best12.is_none() => best12 = Some(offset),
+            4 if best4.map_or(true, |(s, _)| score > s) => best4 = Some((score, offset)),
+            12 if best12.map_or(true, |(s, _)| score > s) => best12 = Some((score, offset)),
             _ => {}
         }
     }
-    if let Some(off) = best12 {
+    // Format 12 covers the full range, so prefer it when both are present.
+    if let Some((_, off)) = best12 {
         return parse_cmap12(cmap, off);
     }
-    if let Some(off) = best4 {
+    if let Some((_, off)) = best4 {
         return parse_cmap4(cmap, off);
     }
     Err(TextError::UnsupportedFormat("cmap format"))
+}
+
+/// Rank a cmap subtable by how likely it is to be a usable Unicode mapping.
+/// Higher is better; platform 1 (Macintosh) is a last resort.
+fn cmap_score(platform: u16, encoding: u16) -> i32 {
+    match (platform, encoding) {
+        (0, _) => 4,           // Unicode platform, any encoding
+        (3, 10) => 3,          // Windows UCS-4 (full Unicode)
+        (3, 1) => 2,           // Windows BMP (UCS-2)
+        (3, _) => 1,           // other Windows encoding
+        _ => 0,                // Macintosh / unknown
+    }
 }
 
 fn parse_cmap4(cmap: &[u8], off: usize) -> Result<Cmap> {

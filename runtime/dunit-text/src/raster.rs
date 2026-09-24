@@ -37,6 +37,9 @@ impl GlyphBitmap {
 pub struct Raster {
     w: usize,
     h: usize,
+    /// Row stride: `w + 1`. The extra column absorbs the `+1` right-edge spill so
+    /// coverage never bleeds into the next row's first cell.
+    stride: usize,
     a: Vec<f32>,
 }
 
@@ -63,7 +66,8 @@ impl Raster {
             return None;
         }
 
-        let mut r = Raster { w, h, a: vec![0.0; w * h + 4] };
+        let stride = w + 1;
+        let mut r = Raster { w, h, stride, a: vec![0.0; stride * h + 1] };
 
         // Emit every contour edge in bitmap space (y flipped: row 0 = top).
         let lf = left as f32;
@@ -102,7 +106,7 @@ impl Raster {
         let y_start = fmaxf(p0.y, 0.0) as usize;
         let y_end = (ceilf(p1.y) as usize).min(self.h);
         for y in y_start..y_end {
-            let linestart = y * self.w;
+            let linestart = y * self.stride;
             let dy = fminf((y + 1) as f32, p1.y) - fmaxf(y as f32, p0.y);
             let xnext = x + dxdy * dy;
             let d = dy * dir;
@@ -160,7 +164,7 @@ impl Raster {
         let mut out = Vec::with_capacity(self.w * self.h);
         for y in 0..self.h {
             let mut acc = 0.0f32;
-            let row = y * self.w;
+            let row = y * self.stride;
             for x in 0..self.w {
                 acc += self.a[row + x];
                 let mut a = absf(acc);
