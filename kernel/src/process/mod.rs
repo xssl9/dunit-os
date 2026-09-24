@@ -49,6 +49,37 @@ fn shared_vm_release(id: u64, count: usize) {
         }
     }
 }
+
+/// Аллоцирует набор обнулённых физических фреймов под разделяемый объект и
+/// регистрирует его в глобальном реестре с `refs = 1`. Возвращает id объекта.
+/// В отличие от [`Process::create_shared_vm`] НЕ добавляет id в `shared_owned` —
+/// эту единственную ссылку держит вызывающий (например, capability-хэндл).
+fn alloc_shared_vm_object(length: usize) -> Result<u64, ProcessError> {
+    let length = length.checked_add(USER_PAGE_SIZE - 1)
+        .map(|value| value & !(USER_PAGE_SIZE - 1))
+        .ok_or(ProcessError::InvalidMemoryRange)?;
+    if length == 0 || length > 16 * 1024 * 1024 {
+        return Err(ProcessError::InvalidMemoryRange);
+    }
+    let pmm = get_pmm().ok_or(ProcessError::OutOfMemory)?;
+    let mut frames = Vec::new();
+    for _ in 0..length / USER_PAGE_SIZE {
+        let Some(frame) = pmm.alloc_frame() else {
+            for frame in frames { pmm.free_frame(frame); }
+            return Err(ProcessError::OutOfMemory);
+        };
+        unsafe {
+            core::ptr::write_bytes(
+                crate::memory::vmm::phys_to_virt(frame.as_usize()) as *mut u8,
+                0, USER_PAGE_SIZE,
+            );
+        }
+        frames.push(frame);
+    }
+    let id = NEXT_SHARED_VM_ID.fetch_add(1, Ordering::SeqCst);
+    SHARED_VM_OBJECTS.lock().insert(id, SharedVmObject { frames, refs: 1 });
+    Ok(id)
+}
 /// Таблица процессов. Раньше `static mut Option<Vec<..>>`; теперь `UnsafeCell`-
 /// newtype без `static mut`. Единственная точка доступа — `process_table_mut`.
 struct ProcessTableCell(UnsafeCell<Option<Vec<ProcessRecord>>>);
@@ -609,27 +640,7 @@ impl Process {
 
     pub fn create_shared_vm(&mut self, length: usize) -> Result<u64, ProcessError> {
         if self.is_kernel || length == 0 { return Err(ProcessError::InvalidMemoryRange); }
-        let length = length.checked_add(USER_PAGE_SIZE - 1)
-            .map(|value| value & !(USER_PAGE_SIZE - 1))
-            .ok_or(ProcessError::InvalidMemoryRange)?;
-        if length > 16 * 1024 * 1024 { return Err(ProcessError::InvalidMemoryRange); }
-        let pmm = get_pmm().ok_or(ProcessError::OutOfMemory)?;
-        let mut frames = Vec::new();
-        for _ in 0..length / USER_PAGE_SIZE {
-            let Some(frame) = pmm.alloc_frame() else {
-                for frame in frames { pmm.free_frame(frame); }
-                return Err(ProcessError::OutOfMemory);
-            };
-            unsafe {
-                core::ptr::write_bytes(
-                    crate::memory::vmm::phys_to_virt(frame.as_usize()) as *mut u8,
-                    0, USER_PAGE_SIZE,
-                );
-            }
-            frames.push(frame);
-        }
-        let id = NEXT_SHARED_VM_ID.fetch_add(1, Ordering::SeqCst);
-        SHARED_VM_OBJECTS.lock().insert(id, SharedVmObject { frames, refs: 1 });
+        let id = alloc_shared_vm_object(length)?;
         self.shared_owned.push(id);
         Ok(id)
     }
@@ -843,6 +854,9 @@ impl Process {
             if matches!(object, crate::handle::HandleObject::Input) {
                 crate::handle::release_input(self.pid);
             }
+            if let crate::handle::HandleObject::SharedFrames { id } = object {
+                shared_vm_release(id, 1);
+            }
         }
     }
 
@@ -882,7 +896,34 @@ impl Process {
     }
 
     pub fn handle_dup(&mut self, handle: Handle, new_rights: u32) -> Result<Handle, HandleError> {
-        self.handle_table.duplicate(handle, new_rights)
+        let new = self.handle_table.duplicate(handle, new_rights)?;
+        // Дубликат разделяемого буфера — ещё одна ссылка на тот же объект фреймов;
+        // учитываем её, чтобы буфер не освободился раньше времени.
+        if let Ok(entry) = self.handle_table.get(new) {
+            if let HandleObject::SharedFrames { id } = entry.object {
+                if let Some(object) = SHARED_VM_OBJECTS.lock().get_mut(&id) {
+                    object.refs += 1;
+                }
+            }
+        }
+        Ok(new)
+    }
+
+    /// Создаёт разделяемый буфер (zero-copy физические фреймы) и возвращает
+    /// capability-хэндл с правами READ|WRITE|MAP|TRANSFER. Хэндл держит одну
+    /// ссылку на объект; close/teardown/dup/transfer корректно её учитывают.
+    pub fn handle_create_shared(&mut self, len: usize) -> Result<Handle, HandleError> {
+        if self.is_kernel {
+            return Err(HandleError::WrongType);
+        }
+        let id = alloc_shared_vm_object(len).map_err(|error| match error {
+            ProcessError::OutOfMemory => HandleError::MapFailed,
+            _ => HandleError::TooLarge,
+        })?;
+        Ok(self.handle_table.insert(
+            HandleObject::SharedFrames { id },
+            RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_TRANSFER,
+        ))
     }
 
     /// Закрывает хэндл; если это было мастер-право на дисплей — возвращает его.
@@ -893,6 +934,9 @@ impl Process {
         }
         if matches!(entry.object, HandleObject::Input) {
             crate::handle::release_input(self.pid);
+        }
+        if let HandleObject::SharedFrames { id } = entry.object {
+            shared_vm_release(id, 1);
         }
         Ok(())
     }
@@ -928,11 +972,24 @@ impl Process {
     pub fn handle_map(&mut self, handle: Handle, addr: usize, len: usize) -> Result<usize, HandleError> {
         // Проверяем право и достаём байты до вызова map_anonymous, чтобы не
         // держать заимствование таблицы хэндлов через &mut self.
-        {
+        let shared = {
             let entry = self.handle_table.require(handle, RIGHT_MAP)?;
-            if !matches!(entry.object, HandleObject::Memory(_)) {
-                return Err(HandleError::WrongType);
+            match &entry.object {
+                HandleObject::Memory(_) => None,
+                HandleObject::SharedFrames { id } => {
+                    Some((*id, entry.rights & RIGHT_WRITE != 0))
+                }
+                _ => return Err(HandleError::WrongType),
             }
+        };
+        if let Some((id, writable)) = shared {
+            // Zero-copy: алиасим реальные физические фреймы объекта в адресное
+            // пространство через уже проверенный путь map_shared_vm. Право WRITE
+            // в маске хэндла определяет writable-маппинг — так capability
+            // разграничивает доступ (напр. сервер RO, клиент RW).
+            return self
+                .map_shared_vm(id, addr, writable)
+                .map_err(|_| HandleError::MapFailed);
         }
         let map_len = {
             let entry = self.handle_table.get(handle)?;

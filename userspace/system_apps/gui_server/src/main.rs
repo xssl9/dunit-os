@@ -60,6 +60,41 @@ pub extern "C" fn _start() -> ! {
         libdunit::println("gui_server: input master unavailable");
     }
 
+    // 4) Shared-buffer capability smoke (M3 item 1): allocate a zero-copy shared
+    //    frame buffer, map it writable via the handle's WRITE right, round-trip a
+    //    byte pattern through the aliased physical frames, then release. This
+    //    exercises the syscall path that clients will use to hand pixel buffers
+    //    to the compositor.
+    let buf = libdunit::handle_create_shared(4096);
+    if buf > 0 {
+        let mapped = libdunit::handle_map(buf as u32, 0, 4096);
+        if mapped > 0 {
+            let ptr = mapped as usize as *mut u8;
+            let mut ok = true;
+            unsafe {
+                for i in 0..4096usize {
+                    core::ptr::write_volatile(ptr.add(i), (i & 0xff) as u8);
+                }
+                for i in 0..4096usize {
+                    if core::ptr::read_volatile(ptr.add(i)) != (i & 0xff) as u8 {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok {
+                libdunit::println("gui_server: shared buffer round-trip OK");
+            } else {
+                libdunit::println("gui_server: FAIL shared buffer mismatch");
+            }
+        } else {
+            libdunit::println("gui_server: FAIL shared buffer map");
+        }
+        libdunit::handle_close(buf as u32);
+    } else {
+        libdunit::println("gui_server: FAIL shared buffer create");
+    }
+
     libdunit::println("gui_server: OK");
     libdunit::exit(0)
 }

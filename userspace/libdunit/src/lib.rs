@@ -62,6 +62,7 @@ pub const SYSCALL_HANDLE_TAKE_SIGNALS: usize = 52;
 pub const SYSCALL_HANDLE_DISPLAY_ACQUIRE: usize = 53;
 pub const SYSCALL_HANDLE_TRANSFER: usize = 54;
 pub const SYSCALL_HANDLE_INPUT_ACQUIRE: usize = 55;
+pub const SYSCALL_HANDLE_CREATE_SHARED: usize = 56;
 
 /// Права хэндлов (capabilities). Совпадают с битами в ядре (kernel/src/handle.rs).
 pub const RIGHT_READ: u32 = 1 << 0;
@@ -1083,6 +1084,14 @@ pub fn handle_display_acquire() -> isize {
 /// вводом уже владеет другой процесс).
 pub fn handle_input_acquire() -> isize {
     syscall0(SYSCALL_HANDLE_INPUT_ACQUIRE)
+}
+
+/// Создаёт разделяемый буфер (zero-copy физические фреймы) и возвращает
+/// capability-хэндл с правами READ|WRITE|MAP|TRANSFER (или отрицательный errno).
+/// Хэндл можно отобразить (`handle_map`) и передать (`handle_transfer`); право
+/// WRITE в маске определяет, будет ли отображение доступно на запись.
+pub fn handle_create_shared(len: usize) -> isize {
+    syscall1(SYSCALL_HANDLE_CREATE_SHARED, len)
 }
 
 /// Передаёт хэндл процессу `target_pid` (нужно право TRANSFER). Возвращает новый

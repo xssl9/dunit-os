@@ -65,6 +65,7 @@ pub enum Syscall {
     HandleDisplayAcquire = 53,
     HandleTransfer = 54,
     HandleInputAcquire = 55,
+    HandleCreateShared = 56,
 }
 
 impl Syscall {
@@ -127,6 +128,7 @@ impl Syscall {
             53 => Some(Syscall::HandleDisplayAcquire),
             54 => Some(Syscall::HandleTransfer),
             55 => Some(Syscall::HandleInputAcquire),
+            56 => Some(Syscall::HandleCreateShared),
             _ => None,
         }
     }
@@ -570,6 +572,7 @@ pub extern "C" fn syscall_handler(
         Syscall::HandleDisplayAcquire => sys_handle_display_acquire(),
         Syscall::HandleTransfer => sys_handle_transfer(arg0 as u32, arg1),
         Syscall::HandleInputAcquire => sys_handle_input_acquire(),
+        Syscall::HandleCreateShared => sys_handle_create_shared(arg0 as usize),
     }
 }
 
@@ -713,6 +716,16 @@ fn sys_handle_input_acquire() -> i64 {
     match crate::process::current_process_mut() {
         Some(process) => process
             .handle_input_acquire()
+            .map(|h| h as i64)
+            .unwrap_or_else(handle_error_to_errno),
+        None => EINVAL,
+    }
+}
+
+fn sys_handle_create_shared(len: usize) -> i64 {
+    match crate::process::current_process_mut() {
+        Some(process) => process
+            .handle_create_shared(len)
             .map(|h| h as i64)
             .unwrap_or_else(handle_error_to_errno),
         None => EINVAL,

@@ -69,6 +69,11 @@ pub enum HandleObject {
     Display,
     /// Мастер-источник ввода (эксклюзивно на всю систему). Право INPUT_MASTER.
     Input,
+    /// Разделяемый буфер физических фреймов (zero-copy). `id` — ключ в глобальном
+    /// реестре разделяемых объектов ядра; служит и идентичностью буфера (например,
+    /// для запрета повторного импорта одного буфера в gui-v1). Права READ/WRITE/
+    /// MAP/TRANSFER; учёт ссылок ведёт слой процесса при dup/close/teardown.
+    SharedFrames { id: u64 },
 }
 
 impl HandleObject {
@@ -172,6 +177,7 @@ impl HandleTable {
             HandleObject::Endpoint(pid) => HandleObject::Endpoint(*pid),
             HandleObject::Display => HandleObject::Display,
             HandleObject::Input => HandleObject::Input,
+            HandleObject::SharedFrames { id } => HandleObject::SharedFrames { id: *id },
         };
         Ok(self.insert(object, new_rights))
     }
