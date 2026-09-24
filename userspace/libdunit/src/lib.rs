@@ -63,6 +63,7 @@ pub const SYSCALL_HANDLE_DISPLAY_ACQUIRE: usize = 53;
 pub const SYSCALL_HANDLE_TRANSFER: usize = 54;
 pub const SYSCALL_HANDLE_INPUT_ACQUIRE: usize = 55;
 pub const SYSCALL_HANDLE_CREATE_SHARED: usize = 56;
+pub const SYSCALL_FB_PRESENT: usize = 57;
 
 /// Права хэндлов (capabilities). Совпадают с битами в ядре (kernel/src/handle.rs).
 pub const RIGHT_READ: u32 = 1 << 0;
@@ -1092,6 +1093,21 @@ pub fn handle_input_acquire() -> isize {
 /// WRITE в маске определяет, будет ли отображение доступно на запись.
 pub fn handle_create_shared(len: usize) -> isize {
     syscall1(SYSCALL_HANDLE_CREATE_SHARED, len)
+}
+
+/// Выводит блок пикселей `src` (BGRA/XRGB little-endian, `width`×`height`, 4
+/// байта на пиксель) в системный фреймбуфер с левым верхним углом в (`x`, `y`).
+/// Разрешено только владельцу дисплея (compositor); иначе EACCES. Ядро отдаёт
+/// лишь механизм блита — политика композитинга живёт в userspace.
+pub fn fb_present(src: &[u8], width: u32, height: u32, x: u32, y: u32) -> isize {
+    syscall5(
+        SYSCALL_FB_PRESENT,
+        src.as_ptr() as usize,
+        width as usize,
+        height as usize,
+        x as usize,
+        y as usize,
+    )
 }
 
 /// Передаёт хэндл процессу `target_pid` (нужно право TRANSFER). Возвращает новый

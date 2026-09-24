@@ -160,6 +160,25 @@ pub extern "C" fn _start() -> ! {
         libdunit::handle_close(xbuf as u32);
     }
 
+    // 6) Framebuffer output path (M3 item 3, first slice): as the display master,
+    //    blit a small pixel block into the system framebuffer via syscall 57. The
+    //    kernel gates fb_present on the display-master owner, so a non-compositor
+    //    process is denied (see gui_shbuf_peer). This is the mechanism the software
+    //    compositor will drive to present composited surfaces.
+    let mut block = [0u8; 16 * 16 * 4];
+    for px in block.chunks_exact_mut(4) {
+        // Solid opaque blue (little-endian XRGB/BGRA: B,G,R,A).
+        px[0] = 0xC0;
+        px[1] = 0x40;
+        px[2] = 0x20;
+        px[3] = 0xff;
+    }
+    if libdunit::fb_present(&block, 16, 16, 0, 0) == 0 {
+        libdunit::println("gui_server: framebuffer present OK");
+    } else {
+        libdunit::println("gui_server: FAIL framebuffer present");
+    }
+
     libdunit::println("gui_server: OK");
     libdunit::exit(0)
 }

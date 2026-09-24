@@ -66,6 +66,7 @@ pub enum Syscall {
     HandleTransfer = 54,
     HandleInputAcquire = 55,
     HandleCreateShared = 56,
+    FbPresent = 57,
 }
 
 impl Syscall {
@@ -129,6 +130,7 @@ impl Syscall {
             54 => Some(Syscall::HandleTransfer),
             55 => Some(Syscall::HandleInputAcquire),
             56 => Some(Syscall::HandleCreateShared),
+            57 => Some(Syscall::FbPresent),
             _ => None,
         }
     }
@@ -573,6 +575,13 @@ pub extern "C" fn syscall_handler(
         Syscall::HandleTransfer => sys_handle_transfer(arg0 as u32, arg1),
         Syscall::HandleInputAcquire => sys_handle_input_acquire(),
         Syscall::HandleCreateShared => sys_handle_create_shared(arg0 as usize),
+        Syscall::FbPresent => sys_fb_present(
+            arg0 as *const u8,
+            arg1 as u32,
+            arg2 as u32,
+            arg3 as u32,
+            arg4 as u32,
+        ),
     }
 }
 
@@ -1429,6 +1438,60 @@ fn sys_draw_rect(x: u32, y: u32, w: u32, h: u32, color: u32) -> i64 {
                 if px < fb_w && py < fb_h {
                     core::ptr::write_volatile(fb.add(py * pitch_pixels + px), color);
                 }
+            }
+        }
+    }
+    0
+}
+
+fn sys_fb_present(src: *const u8, width: u32, height: u32, dst_x: u32, dst_y: u32) -> i64 {
+    // Только владелец дисплея (compositor в userspace) может выводить в
+    // фреймбуфер. Политика композитинга живёт в userspace — ядро даёт лишь
+    // механизм блита. Владельца отслеживает глобальный DISPLAY_MASTER_OWNER.
+    let pid = match crate::process::current_process() {
+        Some(process) => process.pid.0,
+        None => return EINVAL,
+    };
+    if pid == 0 || crate::handle::display_owner() != pid {
+        return EACCES;
+    }
+    if KERNEL_FB_ADDR.load(Ordering::Relaxed) == 0 {
+        return EINVAL;
+    }
+    let (w, h) = (width as usize, height as usize);
+    let Some(bytes) = w.checked_mul(h).and_then(|px| px.checked_mul(4)) else {
+        return EINVAL;
+    };
+    if bytes == 0 || bytes > 64 * 1024 * 1024 {
+        return EINVAL;
+    }
+    if !is_valid_user_pointer(src as u64, bytes) {
+        return EFAULT;
+    }
+    let data = match copy_buffer_from_user(src, bytes) {
+        Ok(data) => data,
+        Err(error) => return error,
+    };
+    let fb = KERNEL_FB_ADDR.load(Ordering::Relaxed) as *mut u8;
+    let fb_w = KERNEL_FB_WIDTH.load(Ordering::Relaxed) as usize;
+    let fb_h = KERNEL_FB_HEIGHT.load(Ordering::Relaxed) as usize;
+    let pitch = KERNEL_FB_PITCH.load(Ordering::Relaxed) as usize;
+    let (dx, dy) = (dst_x as usize, dst_y as usize);
+    for row in 0..h {
+        let py = dy + row;
+        if py >= fb_h {
+            break;
+        }
+        for col in 0..w {
+            let px = dx + col;
+            if px >= fb_w {
+                continue;
+            }
+            let s = (row * w + col) * 4;
+            let color = u32::from_le_bytes([data[s], data[s + 1], data[s + 2], data[s + 3]]);
+            unsafe {
+                let dst = fb.add(py * pitch + px * 4) as *mut u32;
+                core::ptr::write_volatile(dst, color);
             }
         }
     }

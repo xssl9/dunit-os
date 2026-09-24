@@ -53,6 +53,16 @@ pub extern "C" fn _start() -> ! {
     }
     libdunit::println("gui_shbuf_peer: shared capability round-trip OK");
 
+    // Output isolation: this untrusted peer does not hold the display master, so
+    // fb_present must be denied (EACCES = -13). Proves only the compositor can
+    // write the framebuffer.
+    let block = [0u8; 4];
+    if libdunit::fb_present(&block, 1, 1, 0, 0) == -13 {
+        libdunit::println("gui_shbuf_peer: framebuffer present denied OK");
+    } else {
+        libdunit::println("gui_shbuf_peer: FAIL framebuffer present not denied");
+    }
+
     libdunit::ipc_send(parent, b"done");
     libdunit::exit(0)
 }
