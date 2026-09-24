@@ -38,15 +38,12 @@ fn u64_at(p: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(a)
 }
 
-/// Send `payload` to the compositor wrapped in a 4-byte client-id envelope, so
-/// it can route messages from several concurrent clients to the right protocol
-/// connection. Replies come back un-enveloped on our own queue.
-fn send_env(dst: u32, id: u32, payload: &[u8]) {
-    let mut m = [0u8; 256];
-    m[0..4].copy_from_slice(&id.to_le_bytes());
-    let len = payload.len().min(m.len() - 4);
-    m[4..4 + len].copy_from_slice(&payload[..len]);
-    libdunit::ipc_send(dst, &m[..4 + len]);
+/// Send `payload` to the compositor. The compositor routes inbound messages by
+/// the kernel-authenticated sender pid, so no client-side envelope is needed (a
+/// client-supplied id could be spoofed and is therefore never trusted). `_id`
+/// is kept only so the call sites read symmetrically with the handshake.
+fn send_env(dst: u32, _id: u32, payload: &[u8]) {
+    libdunit::ipc_send(dst, payload);
 }
 
 // APPEND_MARKER

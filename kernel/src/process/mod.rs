@@ -896,6 +896,17 @@ impl Process {
     }
 
     pub fn handle_dup(&mut self, handle: Handle, new_rights: u32) -> Result<Handle, HandleError> {
+        // Display/Input — эксклюзивные системные singleton'ы с единым глобальным
+        // учётом владельца. Дубликат создал бы второй хэндл при одном owner-токене:
+        // закрытие первой копии обнулило бы владельца (release_display/input), пока
+        // процесс ещё держит вторую и пишет в ресурс, а другой процесс смог бы
+        // повторно захватить его. Поэтому дублирование singleton'ов запрещено
+        // (перенос уже блокируется в handle_take_for_transfer).
+        if let Ok(entry) = self.handle_table.get(handle) {
+            if matches!(entry.object, HandleObject::Display | HandleObject::Input) {
+                return Err(HandleError::WrongType);
+            }
+        }
         let new = self.handle_table.duplicate(handle, new_rights)?;
         // Дубликат разделяемого буфера — ещё одна ссылка на тот же объект фреймов;
         // учитываем её, чтобы буфер не освободился раньше времени.
@@ -1013,7 +1024,23 @@ impl Process {
         Ok(mapped)
     }
 
-    /// Доставляет сигнал через конечную точку (нужно право SIGNAL).
+    /// Возвращает истинный размер (в байтах) backing-объекта разделяемого буфера
+    /// по хэндлу. Нужен доверенному получателю (напр. компоситору), чтобы
+    /// валидировать геометрию присланного буфера против фактически выделенных
+    /// фреймов, а не против размера, который называет недоверенный отправитель.
+    pub fn handle_shared_len(&self, handle: Handle) -> Result<usize, HandleError> {
+        let entry = self.handle_table.get(handle)?;
+        match &entry.object {
+            HandleObject::SharedFrames { id } => {
+                let objects = SHARED_VM_OBJECTS.lock();
+                let object = objects.get(id).ok_or(HandleError::BadHandle)?;
+                Ok(object.frames.len() * USER_PAGE_SIZE)
+            }
+            _ => Err(HandleError::WrongType),
+        }
+    }
+
+
     pub fn handle_signal(&mut self, handle: Handle, value: u64) -> Result<(), HandleError> {
         let entry = self.handle_table.require(handle, RIGHT_SIGNAL)?;
         let target = match &entry.object {
@@ -1043,25 +1070,26 @@ impl Process {
     }
 
     /// Захватывает мастер-право на дисплей (эксклюзивно). Возвращает хэндл с
-    /// правом DISPLAY_MASTER|TRANSFER либо `DisplayBusy`.
+    /// правом DISPLAY_MASTER (без TRANSFER: singleton не переносится и не
+    /// дублируется — см. handle_dup/handle_take_for_transfer).
     pub fn handle_display_acquire(&mut self) -> Result<Handle, HandleError> {
         if !crate::handle::try_acquire_display(self.pid) {
             return Err(HandleError::DisplayBusy);
         }
         Ok(self
             .handle_table
-            .insert(HandleObject::Display, RIGHT_DISPLAY_MASTER | RIGHT_TRANSFER))
+            .insert(HandleObject::Display, RIGHT_DISPLAY_MASTER))
     }
 
     /// Захватывает мастер-право на источник ввода (эксклюзивно). Возвращает хэндл
-    /// с правом INPUT_MASTER|TRANSFER либо `DisplayBusy` (ресурс занят другим).
+    /// с правом INPUT_MASTER (без TRANSFER) либо `DisplayBusy` (ресурс занят).
     pub fn handle_input_acquire(&mut self) -> Result<Handle, HandleError> {
         if !crate::handle::try_acquire_input(self.pid) {
             return Err(HandleError::DisplayBusy);
         }
         Ok(self
             .handle_table
-            .insert(HandleObject::Input, RIGHT_INPUT_MASTER | RIGHT_TRANSFER))
+            .insert(HandleObject::Input, RIGHT_INPUT_MASTER))
     }
 
     /// Забирает хэндл из таблицы для передачи; проверяет право TRANSFER.
@@ -1274,6 +1302,10 @@ fn current_entity_id() -> Option<ProcessId> {
 }
 
 fn owner_of(entity: ProcessId) -> Option<ProcessId> {
+    // Короткое чтение таблицы на горячем пути планировщика: маскируем IRQ, чтобы
+    // таймер (wake_expired_waiters) не взял &mut на тот же Vec во время нашего
+    // разделяемого заимствования.
+    let _irq = InterruptGuard::new();
     let table = process_table_mut();
     let record = table.get(process_record_index(table, entity)?)?;
     Some(record.owner.unwrap_or(entity))
@@ -1644,6 +1676,13 @@ pub fn with_process_mut<R>(
     pid: ProcessId,
     f: impl FnOnce(&mut Process) -> Result<R, ProcessError>,
 ) -> Result<R, ProcessError> {
+    // Держим &mut в таблицу процессов, поэтому маскируем прерывания на всё время
+    // заимствования: иначе таймерный IRQ (wake_expired_waiters → wake_entry)
+    // возьмёт второй &mut на тот же Vec, пока этот жив, что является UB
+    // (нарушение noalias). Scheduler-loop вызывает нас при разрешённых
+    // прерываниях, так что guard здесь обязателен. Замыкания короткие (мутация
+    // записи), в userspace они не входят, так что рост latency несущественен.
+    let _irq = InterruptGuard::new();
     let table = process_table_mut();
     let index = process_record_index(table, pid).ok_or(ProcessError::NoSuchProcess)?;
     let record = &mut table[index];
@@ -1919,6 +1958,8 @@ pub fn futex_wake(addr: u64, max: usize) -> usize {
 }
 
 pub fn is_pid_blocked(pid: ProcessId) -> bool {
+    // Короткое чтение таблицы: маскируем IRQ, чтобы таймер не мутировал Vec под нами.
+    let _irq = InterruptGuard::new();
     process_table_mut()
         .iter()
         .any(|record| record.pid == pid && record.state == ProcessState::Blocked)
@@ -2415,13 +2456,17 @@ pub fn enter_user_process(pid: ProcessId) -> Result<ProcessExit, ProcessError> {
             next_pid = crate::process::scheduler::pick_next_candidate()
                 .ok_or(ProcessError::SchedulerUnavailable)?;
         }
-        let address_space_ready = owner_of(next_pid)
-            .and_then(|owner| process_table_mut()
-                .iter()
-                .find(|record| record.pid == owner)
-                .and_then(|record| record.process.as_ref())
-                .and_then(|p| p.address_space()))
-            .is_some();
+        let address_space_ready = {
+            // Разделяемое чтение таблицы под маской IRQ; ссылки не покидают блок.
+            let _irq = InterruptGuard::new();
+            owner_of(next_pid)
+                .and_then(|owner| process_table_mut()
+                    .iter()
+                    .find(|record| record.pid == owner)
+                    .and_then(|record| record.process.as_ref())
+                    .and_then(|p| p.address_space()))
+                .is_some()
+        };
         let context = with_process_mut(next_pid, |process| {
             if process.is_kernel {
                 return Err(ProcessError::InvalidUserContext);

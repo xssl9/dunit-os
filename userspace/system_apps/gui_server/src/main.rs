@@ -591,20 +591,31 @@ fn handle_client_payload(server: &mut Server, c: &mut ClientState, payload: &[u8
     if n >= 16 && u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) == CTRL_MAGIC
     {
         let handle = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
-        let size = u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]) as usize;
-        let m = libdunit::handle_map(handle, 0, size);
-        if m > 0 {
-            c.buf_ptr = m as usize as *const u8;
-            c.buf_size = size;
-            c.mapped_handle = handle;
+        // Игнорируем размер, названный клиентом (payload[8..12]) — он недоверенный.
+        // Мапим буфер и берём ИСТИННУЮ длину backing-объекта из ядра: только она
+        // задаёт безопасную границу для последующего блита.
+        let mapped = libdunit::handle_map(handle, 0, 0);
+        if mapped > 0 {
+            let real_len = libdunit::handle_shared_len(handle);
+            if real_len > 0 {
+                c.buf_ptr = mapped as usize as *const u8;
+                c.buf_size = real_len as usize;
+                c.mapped_handle = handle;
+            }
         }
         return;
     }
+    // Заголовок wire-протокола — 32 байта; CreateSurface читает поля вплоть до
+    // offset 44, поэтому короткие пакеты отбрасываем ДО индексирования (иначе
+    // паника → падение всего компоситора: DoS от одного клиента).
     if n < 32 {
         return;
     }
     let op = Opcode::from_u16(u16::from_le_bytes([payload[8], payload[9]]));
     if op == Some(Opcode::CreateSurface) {
+        if n < 44 {
+            return;
+        }
         c.surf_w = u32::from_le_bytes([payload[36], payload[37], payload[38], payload[39]]);
         c.surf_h = u32::from_le_bytes([payload[40], payload[41], payload[42], payload[43]]);
     }
@@ -619,10 +630,11 @@ fn handle_client_payload(server: &mut Server, c: &mut ClientState, payload: &[u8
 }
 /// Composite two untrusted client ELFs to the screen at the same time. Spawns
 /// both `gui_client` processes, hands each an 8-byte `[our_pid][client_id]`
-/// handshake, and runs one event loop: inbound messages carry a 4-byte
-/// client-id envelope (see `gui_client::send_env`) so we can route each to its
-/// own `Server` connection despite IPC not reporting the sender pid. On every
-/// `composite()` we match each FRAME_DONE to its connection and blit that
+/// handshake (the id is only a tint hint for the client), and runs one event
+/// loop. Inbound messages are routed to a per-client `Server` connection by the
+/// KERNEL-AUTHENTICATED sender pid (`ipc_recv_from`), NOT by any client-supplied
+/// field — so one client cannot inject into another's protocol connection. On
+/// every `composite()` we match each FRAME_DONE to its connection and blit that
 /// client's buffer to its own slot. Returns true iff both surfaces present.
 fn serve_two_clients() -> bool {
     let mut server = Server::new();
@@ -654,24 +666,19 @@ fn serve_two_clients() -> bool {
         if clients[0].presented && clients[1].presented {
             break;
         }
-        let n = libdunit::ipc_recv_blocking(&mut rx, 3000);
+        // Route by the kernel-authenticated sender pid; a client cannot spoof
+        // another's identity, so the two protocol connections stay isolated.
+        let mut sender: u32 = 0;
+        let n = libdunit::ipc_recv_blocking_from(&mut rx, &mut sender, 3000);
         if n <= 0 {
             break;
         }
         let n = n as usize;
-        if n < 4 {
-            continue;
-        }
-        // Strip the client-id envelope and route to that connection.
-        let id = u32::from_le_bytes([rx[0], rx[1], rx[2], rx[3]]);
-        if id < 1 || id > 2 {
-            continue;
-        }
-        let idx = (id - 1) as usize;
-        let payload_len = n - 4;
-        let mut payload = [0u8; 252];
-        payload[..payload_len].copy_from_slice(&rx[4..n]);
-        handle_client_payload(&mut server, &mut clients[idx], &payload[..payload_len]);
+        let idx = match clients.iter().position(|c| c.pid == sender) {
+            Some(idx) => idx,
+            None => continue, // message from an unknown pid — ignore
+        };
+        handle_client_payload(&mut server, &mut clients[idx], &rx[..n]);
 
         // A composition tick: route each FRAME_DONE to its client and blit that
         // client's committed buffer into its own slot.
@@ -690,9 +697,12 @@ fn serve_two_clients() -> bool {
                     continue;
                 }
                 if !c.buf_ptr.is_null() && c.surf_w > 0 && c.surf_h > 0 {
-                    let want = (c.surf_w * c.surf_h * 4) as usize;
-                    if want <= c.buf_size {
-                        let data = unsafe { core::slice::from_raw_parts(c.buf_ptr, want) };
+                    // Non-wrapping bounds check against the REAL mapped length
+                    // (c.buf_size came from handle_shared_len, not the client).
+                    let want = c.surf_w as u64 * c.surf_h as u64 * 4;
+                    if want <= c.buf_size as u64 {
+                        let data =
+                            unsafe { core::slice::from_raw_parts(c.buf_ptr, want as usize) };
                         if libdunit::fb_present(data, c.surf_w, c.surf_h, c.slot_x, c.slot_y) == 0 {
                             c.presented = true;
                         }

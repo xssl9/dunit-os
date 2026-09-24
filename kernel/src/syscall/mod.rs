@@ -67,6 +67,8 @@ pub enum Syscall {
     HandleInputAcquire = 55,
     HandleCreateShared = 56,
     FbPresent = 57,
+    HandleSharedLen = 58,
+    ReceiveMessageFrom = 59,
 }
 
 impl Syscall {
@@ -131,6 +133,8 @@ impl Syscall {
             55 => Some(Syscall::HandleInputAcquire),
             56 => Some(Syscall::HandleCreateShared),
             57 => Some(Syscall::FbPresent),
+            58 => Some(Syscall::HandleSharedLen),
+            59 => Some(Syscall::ReceiveMessageFrom),
             _ => None,
         }
     }
@@ -582,6 +586,10 @@ pub extern "C" fn syscall_handler(
             arg3 as u32,
             arg4 as u32,
         ),
+        Syscall::HandleSharedLen => sys_handle_shared_len(arg0 as u32),
+        Syscall::ReceiveMessageFrom => {
+            sys_receive_message_from(arg0 as *mut u8, arg1 as usize, arg2 as *mut u32)
+        }
     }
 }
 
@@ -659,6 +667,16 @@ fn sys_handle_map(handle: u32, addr: usize, len: usize) -> i64 {
         Some(process) => process
             .handle_map(handle, addr, len)
             .map(|mapped| mapped as i64)
+            .unwrap_or_else(handle_error_to_errno),
+        None => EINVAL,
+    }
+}
+
+fn sys_handle_shared_len(handle: u32) -> i64 {
+    match crate::process::current_process() {
+        Some(process) => process
+            .handle_shared_len(handle)
+            .map(|len| len as i64)
             .unwrap_or_else(handle_error_to_errno),
         None => EINVAL,
     }
@@ -1308,6 +1326,37 @@ fn sys_receive_message(msg: *mut u8, len: usize) -> i64 {
         return error;
     }
     syscall_log(format_args!("[IPC] recv pid={} len={}\n", pid.0, received));
+    received as i64
+}
+
+/// Как `sys_receive_message`, но дополнительно записывает аутентифицированный
+/// ядром pid отправителя в `sender_out`. Позволяет доверенному получателю
+/// (компоситору) маршрутизировать сообщения по реальному источнику, а не по
+/// полю, которое называет сам недоверенный отправитель.
+fn sys_receive_message_from(msg: *mut u8, len: usize, sender_out: *mut u32) -> i64 {
+    if len == 0 || len > crate::ipc::MAX_MESSAGE_SIZE {
+        return EMSGSIZE;
+    }
+    let pid = match crate::process::current_process() {
+        Some(process) => process.pid,
+        None => return EINVAL,
+    };
+    let mut buffer = [0u8; crate::ipc::MAX_MESSAGE_SIZE];
+    let (sender, received) = match crate::ipc::recv_bytes_with_sender(pid, &mut buffer[..len]) {
+        Ok(pair) => pair,
+        Err(error) => return ipc_error_to_errno(error),
+    };
+    if let Err(error) = copy_buffer_to_user(msg, &buffer[..received]) {
+        return error;
+    }
+    let sender_bytes = (sender.0 as u32).to_le_bytes();
+    if let Err(error) = copy_buffer_to_user(sender_out as *mut u8, &sender_bytes) {
+        return error;
+    }
+    syscall_log(format_args!(
+        "[IPC] recv pid={} from={} len={}\n",
+        pid.0, sender.0, received
+    ));
     received as i64
 }
 

@@ -64,6 +64,8 @@ pub const SYSCALL_HANDLE_TRANSFER: usize = 54;
 pub const SYSCALL_HANDLE_INPUT_ACQUIRE: usize = 55;
 pub const SYSCALL_HANDLE_CREATE_SHARED: usize = 56;
 pub const SYSCALL_FB_PRESENT: usize = 57;
+pub const SYSCALL_HANDLE_SHARED_LEN: usize = 58;
+pub const SYSCALL_RECEIVE_MESSAGE_FROM: usize = 59;
 
 /// Права хэндлов (capabilities). Совпадают с битами в ядре (kernel/src/handle.rs).
 pub const RIGHT_READ: u32 = 1 << 0;
@@ -1173,6 +1175,25 @@ pub fn ipc_recv(buf: &mut [u8]) -> isize {
     )
 }
 
+/// Как `ipc_recv`, но записывает аутентифицированный ядром pid отправителя в
+/// `sender`. Маршрутизация по этому значению безопасна против подделки: его
+/// проставляет ядро, а не отправитель.
+pub fn ipc_recv_from(buf: &mut [u8], sender: &mut u32) -> isize {
+    syscall3(
+        SYSCALL_RECEIVE_MESSAGE_FROM,
+        buf.as_mut_ptr() as usize,
+        buf.len(),
+        sender as *mut u32 as usize,
+    )
+}
+
+/// Возвращает истинный размер (в байтах) backing-объекта разделяемого буфера по
+/// хэндлу, либо отрицательный errno. Позволяет получателю проверять геометрию
+/// присланного буфера против реально выделенных фреймов.
+pub fn handle_shared_len(handle: u32) -> isize {
+    syscall1(SYSCALL_HANDLE_SHARED_LEN, handle as usize)
+}
+
 pub fn wait_ipc_event(timeout_ms: u64) -> isize {
     syscall1(SYSCALL_WAIT_EVENT, timeout_ms as usize)
 }
@@ -1184,6 +1205,18 @@ pub fn ipc_recv_blocking(buf: &mut [u8], timeout_ms: u64) -> isize {
         let waited = wait_ipc_event(timeout_ms);
         if waited < 0 { return waited; }
         if timeout_ms != 0 { return ipc_recv(buf); }
+    }
+}
+
+/// Блокирующий `ipc_recv_from`: как `ipc_recv_blocking`, но также отдаёт
+/// аутентифицированный pid отправителя.
+pub fn ipc_recv_blocking_from(buf: &mut [u8], sender: &mut u32, timeout_ms: u64) -> isize {
+    loop {
+        let received = ipc_recv_from(buf, sender);
+        if received != EAGAIN { return received; }
+        let waited = wait_ipc_event(timeout_ms);
+        if waited < 0 { return waited; }
+        if timeout_ms != 0 { return ipc_recv_from(buf, sender); }
     }
 }
 
