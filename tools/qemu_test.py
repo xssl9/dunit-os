@@ -352,16 +352,23 @@ def type_command(qmp: Qmp, text: str) -> None:
 
 
 def build_qemu_command(image: Path, is_disk: bool, accel: str, mem: str,
-                       qmp_sock: Path, serial_log: Path, extra: list[str]) -> list[str]:
+                       qmp_sock: Path, serial_log: Path, extra: list[str],
+                       display: str = "none") -> list[str]:
     cmd = [
         "qemu-system-x86_64",
         "-no-reboot",
         "-m", mem,
-        "-display", "none",
+        "-display", display,
         "-serial", f"file:{serial_log}",
         "-qmp", f"unix:{qmp_sock},server,nowait",
         "-vga", "std", "-global", "VGA.vgamem_mb=32",
     ]
+    if display != "none":
+        # Interactive session: give the guest a smooth absolute pointer so the
+        # user can click around without pointer-capture warping. Keyboard is the
+        # default i8042 the kernel already drives.
+        cmd += ["-device", "usb-tablet"]
+
     if is_disk:
         cmd += ["-drive", f"file={image},format=raw,if=ide", "-boot", "c"]
     else:
@@ -417,8 +424,9 @@ def run(args: argparse.Namespace) -> RunResult:
         except FileNotFoundError:
             pass
 
+    display = args.display if getattr(args, "interactive", False) else "none"
     qemu_cmd = build_qemu_command(image, is_disk, args.accel, args.mem, qmp_sock,
-                                  serial_log, args.qemu_arg or [])
+                                  serial_log, args.qemu_arg or [], display)
     print("[qemu_test] launch:", " ".join(qemu_cmd), file=sys.stderr)
 
     result = RunResult(ok=False, reason="", booted=False, iso=str(image))
@@ -449,6 +457,26 @@ def run(args: argparse.Namespace) -> RunResult:
     try:
         qmp.connect(timeout=min(20.0, args.timeout))
         serial.open(timeout=min(20.0, args.timeout))
+
+        if args.interactive:
+            # Human-in-the-loop mode: a real QEMU window is open on the user's
+            # display. Do not inject keystrokes, do not force-quit on a timeout —
+            # just keep the serial log flowing and wait until the user closes the
+            # window (or Ctrl-C here). The serial log is still persisted for
+            # post-session analysis.
+            print("[qemu_test] interactive window open — poke the system by hand; "
+                  "close the QEMU window (or Ctrl-C) to end.", file=sys.stderr)
+            try:
+                while proc.poll() is None:
+                    serial.pump()
+                    time.sleep(0.2)
+            except KeyboardInterrupt:
+                pass
+            force_quit("interactive session ended")
+            result.ok = True
+            result.booted = True
+            result.reason = "interactive session ended"
+            return result
 
         # Wait for the terminal to be ready to accept keystrokes.
         boot_budget = min(args.boot_timeout, remaining())
@@ -613,6 +641,11 @@ def main() -> int:
                         help="extra raw argument passed to qemu (repeatable)")
     parser.add_argument("--json", action="store_true",
                         help="print the result as JSON instead of human text")
+    parser.add_argument("--interactive", action="store_true",
+                        help="open a real QEMU window for hands-on GUI testing: no keystroke "
+                             "injection, no force-quit timeout; runs until you close the window")
+    parser.add_argument("--display", default="gtk", choices=["gtk", "sdl"],
+                        help="QEMU display backend for --interactive (default gtk)")
     parser.add_argument("--markers-file", metavar="FILE.json",
                         help="markers manifest (required/forbidden serial markers + run defaults); "
                              "run FAILS if any required marker is missing or any forbidden one appears")

@@ -1,0 +1,21 @@
+# Dunit text stack: a from-scratch TrueType parser + anti-aliased glyph
+# rasterizer for the Dunit UI Runtime (M4). Pure `no_std + alloc` so the exact
+# same code runs in the host test suite and, later, inside the userspace GUI
+# stack on `x86_64-unknown-none`. Zero external dependencies on purpose, to
+# match the offline build environment and the gui-v1 crate's ethos.
+[package]
+name = "dunit_text"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "dunit_text"
+path = "src/lib.rs"
+
+# No dependencies: parser, outline decoder and rasterizer are all hand-written.
+# Host tests use only the std test harness and load the bundled DejaVu fonts
+# from ../../assets/fonts (see tests/).
+
+[profile.release]
+panic = "abort"
+lto = true
