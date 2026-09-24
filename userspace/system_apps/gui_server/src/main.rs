@@ -16,7 +16,12 @@
 
 use core::panic::PanicInfo;
 
+extern crate alloc;
+use alloc::vec::Vec;
+
 use gui_protocol_v1::server::Server;
+use gui_protocol_v1::wire::Request;
+use gui_protocol_v1::Opcode;
 
 #[panic_handler]
 fn panic(_: &PanicInfo) -> ! {
@@ -33,13 +38,16 @@ pub extern "C" fn _start() -> ! {
     //    libdunit, no_std+alloc core). Instantiate it and admit one client so a
     //    genuine object is allocated — this exercises the crate end to end.
     let mut server = Server::new();
-    match server.connect() {
-        Some(_conn) => libdunit::println("gui_server: protocol server up (client admitted)"),
+    let conn = match server.connect() {
+        Some(conn) => {
+            libdunit::println("gui_server: protocol server up (client admitted)");
+            conn
+        }
         None => {
             libdunit::println("gui_server: FAIL protocol server rejected first client");
             libdunit::exit(1);
         }
-    }
+    };
 
     // 2) Acquire the exclusive display-master capability (kernel syscall 53).
     //    A single GUI server owns the display; a second acquire would fail.
@@ -179,6 +187,174 @@ pub extern "C" fn _start() -> ! {
         libdunit::println("gui_server: FAIL framebuffer present");
     }
 
+    // 7) Software compositor cycle (M3 item 3): drive the gui_protocol_v1
+    //    reference server with REAL wire packets through one client's full
+    //    map-and-present lifecycle, back the surface with a REAL kernel shared
+    //    buffer, and composite its pixels to the framebuffer.
+    //
+    //    `Server` is a pure protocol state machine — it never touches pixels and
+    //    exposes no surface geometry — so the compositor keeps its own
+    //    buffer-id -> shared-frame mapping and its own placement policy, feeds
+    //    the client's requests through `deliver`, and on the committed frame
+    //    blits the mapped pixels to the framebuffer via `fb_present`. This is the
+    //    exact mechanism the untrusted cross-process clients (item 4) will drive;
+    //    here the request stream is synthesized in-process to keep it serially
+    //    verifiable without a second protocol-speaking process.
+    if run_compositor_cycle(&mut server, conn) {
+        libdunit::println("gui_server: compositor cycle OK");
+    } else {
+        libdunit::println("gui_server: FAIL compositor cycle");
+    }
+
     libdunit::println("gui_server: OK");
     libdunit::exit(0)
+}
+
+/// Opcode of an outbound protocol packet (offset 8, little-endian u16).
+fn opcode_of(p: &[u8]) -> Option<Opcode> {
+    Opcode::from_u16(u16::from_le_bytes([p[8], p[9]]))
+}
+
+/// Read a little-endian u32 at `off`.
+fn u32_at(p: &[u8], off: usize) -> u32 {
+    u32::from_le_bytes([p[off], p[off + 1], p[off + 2], p[off + 3]])
+}
+
+/// Read a little-endian u64 at `off`.
+fn u64_at(p: &[u8], off: usize) -> u64 {
+    let mut a = [0u8; 8];
+    a.copy_from_slice(&p[off..off + 8]);
+    u64::from_le_bytes(a)
+}
+
+/// Find the first packet with `op` in a batch of outbound packets.
+fn find<'a>(batch: &'a [Vec<u8>], op: Opcode) -> Option<&'a Vec<u8>> {
+    batch.iter().find(|p| opcode_of(p) == Some(op))
+}
+
+/// Drive one client's full map-and-present lifecycle through the reference
+/// server with real wire packets, backing the surface with a real kernel
+/// shared buffer, then composite the committed pixels to the framebuffer.
+fn run_compositor_cycle(server: &mut Server, conn: gui_protocol_v1::server::ConnId) -> bool {
+    const SURFACE: u64 = 1; // client-chosen surface object id
+    const BUFFER: u64 = 2; // client-chosen buffer object id
+    const W: u32 = 64;
+    const H: u32 = 64;
+    const FMT_XRGB8888: u32 = 1;
+    let bytes = (W * H * 4) as usize;
+
+    // Back the buffer with a real zero-copy kernel shared buffer and paint a
+    // recognizable gradient into the mapped frames (XRGB8888, little-endian).
+    let buf = libdunit::handle_create_shared(bytes);
+    if buf <= 0 {
+        return false;
+    }
+    let buf = buf as u32;
+    let mapped = libdunit::handle_map(buf, 0, bytes);
+    if mapped <= 0 {
+        libdunit::handle_close(buf);
+        return false;
+    }
+    let pixels = mapped as usize as *mut u8;
+    unsafe {
+        for y in 0..H as usize {
+            for x in 0..W as usize {
+                let off = (y * W as usize + x) * 4;
+                core::ptr::write_volatile(pixels.add(off), (x * 4) as u8); // B
+                core::ptr::write_volatile(pixels.add(off + 1), (y * 4) as u8); // G
+                core::ptr::write_volatile(pixels.add(off + 2), 0x80); // R
+                core::ptr::write_volatile(pixels.add(off + 3), 0xff); // X
+            }
+        }
+    }
+
+    let ok = drive_protocol(server, conn, bytes, W, H, FMT_XRGB8888, SURFACE, BUFFER, pixels);
+    libdunit::handle_close(buf);
+    ok
+}
+
+/// Feed one client's request stream through the reference server as real wire
+/// packets and, on the committed frame, blit the shared buffer to the display.
+/// Returns true iff every stage produced the expected reply and the framebuffer
+/// present succeeded.
+#[allow(clippy::too_many_arguments)]
+fn drive_protocol(
+    server: &mut Server,
+    conn: gui_protocol_v1::server::ConnId,
+    bytes: usize,
+    w: u32,
+    h: u32,
+    fmt: u32,
+    surface: u64,
+    buffer: u64,
+    pixels: *const u8,
+) -> bool {
+    use gui_protocol_v1::wire::FEATURE_ARGB8888;
+
+    // 1) HELLO -> WELCOME (completes connection negotiation).
+    let hello = Request::Hello {
+        min_minor: 0,
+        max_minor: 0,
+        offered_features: FEATURE_ARGB8888,
+        required_features: 0,
+    }
+    .encode(0, 1);
+    if find(&server.deliver(conn, &hello, None), Opcode::Welcome).is_none() {
+        return false;
+    }
+
+    // 2) CREATE_SURFACE -> RESULT + CONFIGURE; the configure token is the
+    //    CONFIGURE packet's header serial (offset 24).
+    let create =
+        Request::CreateSurface { role: 1, width: w, height: h, format: fmt }.encode(surface, 2);
+    let out = server.deliver(conn, &create, None);
+    let token = match find(&out, Opcode::Configure) {
+        Some(cfg) => u64_at(cfg, 24),
+        None => return false,
+    };
+
+    // 3) ACK_CONFIGURE -> RESULT.
+    let ack = Request::AckConfigure { configure: token }.encode(surface, 3);
+    if find(&server.deliver(conn, &ack, None), Opcode::Result).is_none() {
+        return false;
+    }
+
+    // 4) IMPORT_BUFFER — cap carries the backing size in bytes -> RESULT.
+    let import = Request::ImportBuffer {
+        width: w,
+        height: h,
+        stride: w * 4,
+        format: fmt,
+        offset: 0,
+    }
+    .encode(buffer, 4);
+    if find(&server.deliver(conn, &import, Some(bytes as u64)), Opcode::Result).is_none() {
+        return false;
+    }
+
+    // 5) ATTACH_BUFFER (no damage) -> RESULT.
+    let attach = Request::AttachBuffer { buffer, damage: Vec::new() }.encode(surface, 5);
+    if find(&server.deliver(conn, &attach, None), Opcode::Result).is_none() {
+        return false;
+    }
+
+    // 6) COMMIT with a frame callback -> RESULT; the surface is now mapped.
+    let commit = Request::Commit { configure: token, frame_callback: 1 }.encode(surface, 6);
+    if find(&server.deliver(conn, &commit, None), Opcode::Result).is_none() {
+        return false;
+    }
+
+    // 7) Composition tick fires the mapped surface's frame callback:
+    //    FRAME_DONE with status 0 (PRESENTED, offset 48) addressed to conn.
+    let presented = server.composite().iter().any(|(c, p)| {
+        *c == conn && opcode_of(p) == Some(Opcode::FrameDone) && u32_at(p, 48) == 0
+    });
+    if !presented {
+        return false;
+    }
+
+    // 8) Blit the committed surface's pixels to the framebuffer at the
+    //    compositor's chosen placement. Gated by the kernel on display master.
+    let data = unsafe { core::slice::from_raw_parts(pixels, bytes) };
+    libdunit::fb_present(data, w, h, 100, 100) == 0
 }
