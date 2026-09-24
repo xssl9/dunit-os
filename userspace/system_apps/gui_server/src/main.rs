@@ -95,6 +95,71 @@ pub extern "C" fn _start() -> ! {
         libdunit::println("gui_server: FAIL shared buffer create");
     }
 
+    // 5) Cross-process capability transfer (M3 item 1; groundwork for item 4's
+    //    untrusted clients): create a shared buffer, write a marker, spawn an
+    //    untrusted child, transfer a handle to it, and prove both sides see the
+    //    same physical frames (bidirectional zero-copy across a process bound).
+    let xbuf = libdunit::handle_create_shared(4096);
+    if xbuf > 0 {
+        let mapped = libdunit::handle_map(xbuf as u32, 0, 4096);
+        if mapped > 0 {
+            let ptr = mapped as usize as *mut u8;
+            unsafe {
+                core::ptr::write_volatile(ptr, 0xA5);
+                core::ptr::write_volatile(ptr.add(1), 0x5A);
+            }
+            let peer = libdunit::spawn("gui_shbuf_peer");
+            if peer > 0 {
+                // Transfer a duplicate so we keep our own handle + mapping.
+                let dup = libdunit::handle_dup(
+                    xbuf as u32,
+                    libdunit::RIGHT_READ
+                        | libdunit::RIGHT_WRITE
+                        | libdunit::RIGHT_MAP
+                        | libdunit::RIGHT_TRANSFER,
+                );
+                let child_handle = if dup > 0 {
+                    libdunit::handle_transfer(dup as u32, peer as u32)
+                } else {
+                    -1
+                };
+                if child_handle > 0 {
+                    let mut msg = [0u8; 8];
+                    msg[..4].copy_from_slice(&libdunit::get_pid().to_le_bytes());
+                    msg[4..].copy_from_slice(&(child_handle as u32).to_le_bytes());
+                    libdunit::ipc_send(peer as u32, &msg);
+                    let mut ack = [0u8; 4];
+                    if libdunit::ipc_recv_blocking(&mut ack, 0) == 4 && &ack == b"done" {
+                        let seen = unsafe {
+                            core::ptr::read_volatile(ptr.add(2)) == 0xC3
+                                && core::ptr::read_volatile(ptr.add(3)) == 0x3C
+                        };
+                        if seen {
+                            libdunit::println("gui_server: cross-process shared buffer OK");
+                        } else {
+                            libdunit::println("gui_server: FAIL child writes not visible");
+                        }
+                    } else {
+                        libdunit::println("gui_server: FAIL child ack");
+                    }
+                } else {
+                    libdunit::println("gui_server: FAIL capability transfer");
+                }
+                // Reap the child so it does not linger as a zombie.
+                let mut status = libdunit::WaitStatus::empty();
+                for _ in 0..50 {
+                    if libdunit::wait(peer as u32, &mut status) == peer as isize {
+                        break;
+                    }
+                    libdunit::sleep_ms(10);
+                }
+            } else {
+                libdunit::println("gui_server: FAIL peer spawn");
+            }
+        }
+        libdunit::handle_close(xbuf as u32);
+    }
+
     libdunit::println("gui_server: OK");
     libdunit::exit(0)
 }

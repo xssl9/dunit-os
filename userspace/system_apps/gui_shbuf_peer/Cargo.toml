@@ -1,0 +1,17 @@
+# Untrusted peer for the M3 shared-buffer capability transfer test.
+#
+# gui_server creates a zero-copy shared buffer, transfers a handle to this
+# child, and both sides prove they see the same physical frames. This is the
+# groundwork for M3 item 4 (two untrusted clients sharing buffers with the
+# compositor).
+[package]
+name = "gui_shbuf_peer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libdunit = { path = "../../libdunit" }
+
+[[bin]]
+name = "gui_shbuf_peer"
+path = "src/main.rs"
