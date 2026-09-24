@@ -206,16 +206,18 @@ pub extern "C" fn _start() -> ! {
         libdunit::println("gui_server: FAIL compositor cycle");
     }
 
-    // 8) Cross-process compositing (M3 item 4): serve a real, untrusted client
-    //    ELF over IPC. It renders into its own shared buffer, transfers the
-    //    buffer capability to us, and drives its surface through the gui-v1 wire
-    //    protocol carried in IPC messages; we map the transferred buffer
-    //    read-only, run its requests through our Server, and composite the
-    //    surface to the framebuffer. The client holds no display/input master.
-    if serve_client("gui_client", 300, 100) {
-        libdunit::println("gui_server: served untrusted client OK");
+    // 8) Cross-process compositing (M3 item 4): serve TWO real, untrusted
+    //    client ELFs concurrently over IPC. Each renders into its own shared
+    //    buffer, transfers the buffer capability to us, and drives its surface
+    //    through the gui-v1 wire protocol (client→compositor messages carry a
+    //    4-byte client-id envelope so we route them to the right connection).
+    //    We map each transferred buffer read-only, run its requests through a
+    //    per-client Server connection, and composite both surfaces to the
+    //    framebuffer at separate slots. Neither client holds display/input.
+    if serve_two_clients() {
+        libdunit::println("gui_server: served two untrusted clients OK");
     } else {
-        libdunit::println("gui_server: FAIL serving client");
+        libdunit::println("gui_server: FAIL serving clients");
     }
 
     libdunit::println("gui_server: OK");
@@ -549,97 +551,169 @@ fn drive_damage(
 /// which begins with the DGUI wire magic). Shared with `gui_client`.
 const CTRL_MAGIC: u32 = 0x3150_4143; // "CAP1"
 
-/// Serve one untrusted client ELF `name` over IPC, compositing its surface at
-/// screen slot (`slot_x`, `slot_y`). Spawns the client, relays gui-v1 wire
-/// packets both ways through a fresh `Server` connection, maps the client's
-/// transferred buffer capability read-only, and on COMMIT blits the surface to
-/// the framebuffer. Returns true iff the surface was presented.
-fn serve_client(name: &str, slot_x: u32, slot_y: u32) -> bool {
-    let mut server = Server::new();
-    let conn = match server.connect() {
-        Some(c) => c,
-        None => return false,
-    };
-    let pid = libdunit::spawn(name);
-    if pid <= 0 {
-        return false;
+/// Per-client compositing state held by the multi-client server loop.
+#[derive(Clone, Copy)]
+struct ClientState {
+    pid: u32,
+    conn: gui_protocol_v1::server::ConnId,
+    slot_x: u32,
+    slot_y: u32,
+    buf_ptr: *const u8,
+    buf_size: usize,
+    mapped_handle: u32,
+    surf_w: u32,
+    surf_h: u32,
+    presented: bool,
+}
+
+impl ClientState {
+    const fn empty() -> ClientState {
+        ClientState {
+            pid: 0,
+            conn: 0,
+            slot_x: 0,
+            slot_y: 0,
+            buf_ptr: core::ptr::null(),
+            buf_size: 0,
+            mapped_handle: 0,
+            surf_w: 0,
+            surf_h: 0,
+            presented: false,
+        }
     }
-    let pid = pid as u32;
-    // Hand the client our pid so it can address IPC + capability transfers to us.
-    libdunit::ipc_send(pid, &libdunit::get_pid().to_le_bytes());
+}
 
-    let mut buf_ptr: *const u8 = core::ptr::null();
-    let mut buf_size: usize = 0;
-    let mut mapped_handle: u32 = 0;
-    let mut surf_w: u32 = 0;
-    let mut surf_h: u32 = 0;
-    let mut presented = false;
+/// Process one inbound (envelope-stripped) message for client `c`: either map
+/// its announced buffer capability, or track geometry + feed the protocol
+/// packet through the Server and relay the replies back to the client.
+fn handle_client_payload(server: &mut Server, c: &mut ClientState, payload: &[u8]) {
+    let n = payload.len();
+    if n >= 16 && u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) == CTRL_MAGIC
+    {
+        let handle = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+        let size = u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]) as usize;
+        let m = libdunit::handle_map(handle, 0, size);
+        if m > 0 {
+            c.buf_ptr = m as usize as *const u8;
+            c.buf_size = size;
+            c.mapped_handle = handle;
+        }
+        return;
+    }
+    if n < 32 {
+        return;
+    }
+    let op = Opcode::from_u16(u16::from_le_bytes([payload[8], payload[9]]));
+    if op == Some(Opcode::CreateSurface) {
+        c.surf_w = u32::from_le_bytes([payload[36], payload[37], payload[38], payload[39]]);
+        c.surf_h = u32::from_le_bytes([payload[40], payload[41], payload[42], payload[43]]);
+    }
+    let cap = if op == Some(Opcode::ImportBuffer) {
+        Some(c.buf_size as u64)
+    } else {
+        None
+    };
+    for reply in &server.deliver(c.conn, payload, cap) {
+        libdunit::ipc_send(c.pid, reply);
+    }
+}
+/// Composite two untrusted client ELFs to the screen at the same time. Spawns
+/// both `gui_client` processes, hands each an 8-byte `[our_pid][client_id]`
+/// handshake, and runs one event loop: inbound messages carry a 4-byte
+/// client-id envelope (see `gui_client::send_env`) so we can route each to its
+/// own `Server` connection despite IPC not reporting the sender pid. On every
+/// `composite()` we match each FRAME_DONE to its connection and blit that
+/// client's buffer to its own slot. Returns true iff both surfaces present.
+fn serve_two_clients() -> bool {
+    let mut server = Server::new();
+    let mut clients = [ClientState::empty(); 2];
+    let slots = [(300u32, 100u32), (400u32, 220u32)];
+    for i in 0..2 {
+        let conn = match server.connect() {
+            Some(c) => c,
+            None => return false,
+        };
+        let pid = libdunit::spawn("gui_client");
+        if pid <= 0 {
+            return false;
+        }
+        clients[i].pid = pid as u32;
+        clients[i].conn = conn;
+        clients[i].slot_x = slots[i].0;
+        clients[i].slot_y = slots[i].1;
+        // Handshake: our pid (IPC + cap-transfer target) + this client's id.
+        let mut hs = [0u8; 8];
+        hs[0..4].copy_from_slice(&libdunit::get_pid().to_le_bytes());
+        hs[4..8].copy_from_slice(&((i as u32) + 1).to_le_bytes());
+        libdunit::ipc_send(clients[i].pid, &hs);
+    }
 
+    // MARKER2
     let mut rx = [0u8; 256];
-    for _ in 0..64 {
-        let n = libdunit::ipc_recv_blocking(&mut rx, 2000);
+    for _ in 0..128 {
+        if clients[0].presented && clients[1].presented {
+            break;
+        }
+        let n = libdunit::ipc_recv_blocking(&mut rx, 3000);
         if n <= 0 {
             break;
         }
         let n = n as usize;
-
-        // Capability announce: map the transferred buffer read-only.
-        if n >= 16 && u32::from_le_bytes([rx[0], rx[1], rx[2], rx[3]]) == CTRL_MAGIC {
-            let handle = u32::from_le_bytes([rx[4], rx[5], rx[6], rx[7]]);
-            let size = u32::from_le_bytes([rx[8], rx[9], rx[10], rx[11]]) as usize;
-            let m = libdunit::handle_map(handle, 0, size);
-            if m > 0 {
-                buf_ptr = m as usize as *const u8;
-                buf_size = size;
-                mapped_handle = handle;
-            }
+        if n < 4 {
             continue;
         }
-        if n < 32 {
+        // Strip the client-id envelope and route to that connection.
+        let id = u32::from_le_bytes([rx[0], rx[1], rx[2], rx[3]]);
+        if id < 1 || id > 2 {
             continue;
         }
+        let idx = (id - 1) as usize;
+        let payload_len = n - 4;
+        let mut payload = [0u8; 252];
+        payload[..payload_len].copy_from_slice(&rx[4..n]);
+        handle_client_payload(&mut server, &mut clients[idx], &payload[..payload_len]);
 
-        // Protocol packet: track geometry/attachment, feed the Server, relay
-        // its replies back to the client.
-        let op = Opcode::from_u16(u16::from_le_bytes([rx[8], rx[9]]));
-        if op == Some(Opcode::CreateSurface) {
-            surf_w = u32::from_le_bytes([rx[36], rx[37], rx[38], rx[39]]);
-            surf_h = u32::from_le_bytes([rx[40], rx[41], rx[42], rx[43]]);
-        }
-        let cap = if op == Some(Opcode::ImportBuffer) {
-            Some(buf_size as u64)
-        } else {
-            None
-        };
-        for reply in &server.deliver(conn, &rx[..n], cap) {
-            libdunit::ipc_send(pid, reply);
-        }
-
-        if op == Some(Opcode::Commit) {
-            for (_c, fp) in &server.composite() {
-                libdunit::ipc_send(pid, fp);
-            }
-            if !buf_ptr.is_null() && surf_w > 0 && surf_h > 0 {
-                let want = (surf_w * surf_h * 4) as usize;
-                if want <= buf_size {
-                    let data = unsafe { core::slice::from_raw_parts(buf_ptr, want) };
-                    presented = libdunit::fb_present(data, surf_w, surf_h, slot_x, slot_y) == 0;
+        // A composition tick: route each FRAME_DONE to its client and blit that
+        // client's committed buffer into its own slot.
+        for (fc, fp) in &server.composite() {
+            for c in clients.iter_mut() {
+                if c.conn != *fc {
+                    continue;
+                }
+                libdunit::ipc_send(c.pid, fp);
+                let status = if fp.len() >= 52 {
+                    u32::from_le_bytes([fp[48], fp[49], fp[50], fp[51]])
+                } else {
+                    0
+                };
+                if status != 0 || c.presented {
+                    continue;
+                }
+                if !c.buf_ptr.is_null() && c.surf_w > 0 && c.surf_h > 0 {
+                    let want = (c.surf_w * c.surf_h * 4) as usize;
+                    if want <= c.buf_size {
+                        let data = unsafe { core::slice::from_raw_parts(c.buf_ptr, want) };
+                        if libdunit::fb_present(data, c.surf_w, c.surf_h, c.slot_x, c.slot_y) == 0 {
+                            c.presented = true;
+                        }
+                    }
                 }
             }
-            break; // one presented frame is enough for this slice
         }
     }
 
-    if mapped_handle != 0 {
-        libdunit::handle_close(mapped_handle);
-    }
-    // Reap the client so it does not linger as a zombie.
-    let mut status = libdunit::WaitStatus::empty();
-    for _ in 0..50 {
-        if libdunit::wait(pid, &mut status) == pid as isize {
-            break;
+    let both = clients[0].presented && clients[1].presented;
+    for c in clients.iter() {
+        if c.mapped_handle != 0 {
+            libdunit::handle_close(c.mapped_handle);
         }
-        libdunit::sleep_ms(10);
+        let mut status = libdunit::WaitStatus::empty();
+        for _ in 0..50 {
+            if libdunit::wait(c.pid, &mut status) == c.pid as isize {
+                break;
+            }
+            libdunit::sleep_ms(10);
+        }
     }
-    presented
+    both
 }

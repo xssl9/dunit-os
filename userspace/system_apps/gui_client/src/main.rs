@@ -37,19 +37,33 @@ fn u64_at(p: &[u8], off: usize) -> u64 {
     a.copy_from_slice(&p[off..off + 8]);
     u64::from_le_bytes(a)
 }
+
+/// Send `payload` to the compositor wrapped in a 4-byte client-id envelope, so
+/// it can route messages from several concurrent clients to the right protocol
+/// connection. Replies come back un-enveloped on our own queue.
+fn send_env(dst: u32, id: u32, payload: &[u8]) {
+    let mut m = [0u8; 256];
+    m[0..4].copy_from_slice(&id.to_le_bytes());
+    let len = payload.len().min(m.len() - 4);
+    m[4..4 + len].copy_from_slice(&payload[..len]);
+    libdunit::ipc_send(dst, &m[..4 + len]);
+}
+
 // APPEND_MARKER
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    // 1) Learn the compositor's pid (sent by it right after spawning us).
+    // 1) Learn the compositor's pid and our client id (sent right after spawn).
     let mut m = [0u8; 8];
-    if libdunit::ipc_recv_blocking(&mut m, 0) < 4 {
-        libdunit::println("gui_client: FAIL recv compositor pid");
+    if libdunit::ipc_recv_blocking(&mut m, 0) < 8 {
+        libdunit::println("gui_client: FAIL recv handshake");
         libdunit::exit(1);
     }
     let compositor = u32::from_le_bytes([m[0], m[1], m[2], m[3]]);
+    let id = u32::from_le_bytes([m[4], m[5], m[6], m[7]]);
 
-    // 2) Render into our own kernel shared buffer (solid green surface).
+    // 2) Render into our own kernel shared buffer (a solid surface tinted by id
+    //    so the two concurrent clients are visually distinct on screen).
     let bytes = (W * H * 4) as usize;
     let buf = libdunit::handle_create_shared(bytes);
     if buf <= 0 {
@@ -63,13 +77,14 @@ pub extern "C" fn _start() -> ! {
         libdunit::exit(3);
     }
     let px = mapped as usize as *mut u8;
+    let (r, g, b) = if id == 1 { (0x30, 0xC0, 0x20) } else { (0xE0, 0x60, 0x20) };
     unsafe {
         for i in 0..(W * H) as usize {
             let o = i * 4;
-            core::ptr::write_volatile(px.add(o), 0x20); // B
-            core::ptr::write_volatile(px.add(o + 1), 0xC0); // G
-            core::ptr::write_volatile(px.add(o + 2), 0x30); // R
-            core::ptr::write_volatile(px.add(o + 3), 0xff); // X
+            core::ptr::write_volatile(px.add(o), b);
+            core::ptr::write_volatile(px.add(o + 1), g);
+            core::ptr::write_volatile(px.add(o + 2), r);
+            core::ptr::write_volatile(px.add(o + 3), 0xff);
         }
     }
 
@@ -83,7 +98,7 @@ pub extern "C" fn _start() -> ! {
         required_features: 0,
     }
     .encode(0, 1);
-    libdunit::ipc_send(compositor, &hello);
+    send_env(compositor, id, &hello);
     if libdunit::ipc_recv_blocking(&mut rx, 0) <= 0 {
         libdunit::println("gui_client: FAIL welcome");
         libdunit::exit(4);
@@ -92,14 +107,14 @@ pub extern "C" fn _start() -> ! {
     // 4) CREATE_SURFACE -> RESULT + CONFIGURE (capture the configure token).
     let create =
         Request::CreateSurface { role: 1, width: W, height: H, format: FMT_XRGB8888 }.encode(SURFACE, 2);
-    libdunit::ipc_send(compositor, &create);
+    send_env(compositor, id, &create);
     libdunit::ipc_recv_blocking(&mut rx, 0); // RESULT
     let n = libdunit::ipc_recv_blocking(&mut rx, 0); // CONFIGURE
     let token = if n >= 32 { u64_at(&rx, 24) } else { 0 };
 
     // 5) ACK_CONFIGURE -> RESULT.
     let ack = Request::AckConfigure { configure: token }.encode(SURFACE, 3);
-    libdunit::ipc_send(compositor, &ack);
+    send_env(compositor, id, &ack);
     libdunit::ipc_recv_blocking(&mut rx, 0);
 
     // 6) Transfer the buffer capability (read-only) to the compositor and
@@ -122,19 +137,19 @@ pub extern "C" fn _start() -> ! {
     ann[4..8].copy_from_slice(&(ch as u32).to_le_bytes());
     ann[8..12].copy_from_slice(&(bytes as u32).to_le_bytes());
     ann[12..16].copy_from_slice(&(BUFFER as u32).to_le_bytes());
-    libdunit::ipc_send(compositor, &ann);
+    send_env(compositor, id, &ann);
 
     // 7) IMPORT / ATTACH / COMMIT (each -> RESULT).
     let import =
         Request::ImportBuffer { width: W, height: H, stride: W * 4, format: FMT_XRGB8888, offset: 0 }
             .encode(BUFFER, 4);
-    libdunit::ipc_send(compositor, &import);
+    send_env(compositor, id, &import);
     libdunit::ipc_recv_blocking(&mut rx, 0);
     let attach = Request::AttachBuffer { buffer: BUFFER, damage: alloc::vec::Vec::new() }.encode(SURFACE, 5);
-    libdunit::ipc_send(compositor, &attach);
+    send_env(compositor, id, &attach);
     libdunit::ipc_recv_blocking(&mut rx, 0);
     let commit = Request::Commit { configure: token, frame_callback: 1 }.encode(SURFACE, 6);
-    libdunit::ipc_send(compositor, &commit);
+    send_env(compositor, id, &commit);
     libdunit::ipc_recv_blocking(&mut rx, 0);
 
     // 8) FRAME_DONE (opcode 0x8021) from the compositor's composition tick.

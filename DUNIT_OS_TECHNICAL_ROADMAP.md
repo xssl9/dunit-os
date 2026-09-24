@@ -377,7 +377,7 @@ Dunit DWM — отдельный policy shell поверх GUI Server:
 - [x] Добавить display/input master handles и shared-buffer syscalls.
 - [x] Собрать `gui-server` как обычный ELF из Makefile/image manifest.
 - [x] Реализовать software compositor, damage, frame callbacks, focus/input routing.
-- [ ] Запустить два untrusted client processes одновременно.
+- [x] Запустить два untrusted client processes одновременно. `gui_server` спавнит два неприв. `gui_client` ELF, выдаёт каждому 8-байтовый handshake `[our_pid][client_id]`; клиенты рендерят в свой kernel shared buffer, передают его capability (read-only) компоситору и гонят gui-v1 lifecycle по IPC с 4-байтовым client-id конвертом (IPC не сообщает sender pid). Один event-loop роутит сообщения по client-id к своим `Server`-соединениям, релеит ответы, и на каждом `composite()` матчит FRAME_DONE к ConnId, блитя буфер клиента в свой слот. Оба презентят (`gui_client: surface presented OK` ×2 → `gui_server: served two untrusted clients OK`), exit 0, VFS handles clean.
 - [ ] Оставить старый kernel GUI под `legacy_gui` feature до parity, затем удалить.
 
 **Цель/причина:** удалить desktop policy из kernel. **Подсистемы:** kernel display/input/IPC, userspace gui-server, build. **Зависимости:** M1, M2. **Результат:** kernel предоставляет только mechanisms. **Готовность:** `kernel/src/ui_loop.rs` не участвует в normal GUI boot; server crash не рушит kernel. **Тесты:** overlapping surfaces, resize storms, app crash, buffer reuse, input isolation, 10-minute idle/load. **Риски:** copies/performance; сначала correctness и bounded buffers.
