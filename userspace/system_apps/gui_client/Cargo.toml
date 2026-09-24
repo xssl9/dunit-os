@@ -1,0 +1,19 @@
+# Untrusted GUI client for the M3 compositor (item 4).
+#
+# A normal, unprivileged ELF: it holds no display/input master and no elevated
+# rights. It renders into its own kernel shared buffer, transfers that buffer
+# capability to the compositor, and drives its surface through the gui-v1
+# protocol over IPC. Proves a client process with no special privilege can be
+# composited to the screen purely via capabilities + the wire protocol.
+[package]
+name = "gui_client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libdunit = { path = "../../libdunit" }
+gui_protocol_v1 = { path = "../../../protocols/gui-v1" }
+
+[[bin]]
+name = "gui_client"
+path = "src/main.rs"
