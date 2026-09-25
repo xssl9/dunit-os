@@ -69,6 +69,7 @@ pub enum Syscall {
     FbPresent = 57,
     HandleSharedLen = 58,
     ReceiveMessageFrom = 59,
+    GetMouseState = 60,
 }
 
 impl Syscall {
@@ -135,6 +136,7 @@ impl Syscall {
             57 => Some(Syscall::FbPresent),
             58 => Some(Syscall::HandleSharedLen),
             59 => Some(Syscall::ReceiveMessageFrom),
+            60 => Some(Syscall::GetMouseState),
             _ => None,
         }
     }
@@ -630,6 +632,7 @@ pub extern "C" fn syscall_handler(
         Syscall::ReceiveMessageFrom => {
             sys_receive_message_from(arg0 as *mut u8, arg1 as usize, arg2 as *mut u32)
         }
+        Syscall::GetMouseState => sys_get_mouse_state(arg0 as *mut u8),
     }
 }
 
@@ -1613,6 +1616,29 @@ fn sys_get_mouse_pos(x: *mut u32, y: *mut u32) -> i64 {
         return error;
     }
 
+    0
+}
+
+/// Snapshot the full pointer state for a userspace compositor: absolute
+/// position, the button bitmask (bit0 left, bit1 right, bit2 middle) and the
+/// scroll-wheel delta accumulated since the previous call. Writes a 16-byte
+/// little-endian record [x:u32, y:u32, buttons:u32, wheel:i32] and drains the
+/// wheel accumulator so each tick sees only new scrolling. A userspace DWM diffs
+/// successive snapshots to synthesise gui-v1 Pointer{Motion,Button,Axis} events.
+fn sys_get_mouse_state(out: *mut u8) -> i64 {
+    let (mx, my) = crate::input::mouse_position();
+    let buttons = crate::input::mouse_buttons() as u32;
+    let wheel = crate::input::take_mouse_scroll_delta();
+
+    let mut record = [0u8; 16];
+    record[0..4].copy_from_slice(&(mx as u32).to_le_bytes());
+    record[4..8].copy_from_slice(&(my as u32).to_le_bytes());
+    record[8..12].copy_from_slice(&buttons.to_le_bytes());
+    record[12..16].copy_from_slice(&wheel.to_le_bytes());
+
+    if let Err(error) = copy_buffer_to_user(out, &record) {
+        return error;
+    }
     0
 }
 

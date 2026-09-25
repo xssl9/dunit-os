@@ -66,6 +66,7 @@ pub const SYSCALL_HANDLE_CREATE_SHARED: usize = 56;
 pub const SYSCALL_FB_PRESENT: usize = 57;
 pub const SYSCALL_HANDLE_SHARED_LEN: usize = 58;
 pub const SYSCALL_RECEIVE_MESSAGE_FROM: usize = 59;
+pub const SYSCALL_GET_MOUSE_STATE: usize = 60;
 
 /// Права хэндлов (capabilities). Совпадают с битами в ядре (kernel/src/handle.rs).
 pub const RIGHT_READ: u32 = 1 << 0;
@@ -951,6 +952,41 @@ pub fn get_mouse_pos() -> (u32, u32) {
         0,
     );
     (x, y)
+}
+
+/// Full pointer snapshot for a userspace compositor. `buttons` is a bitmask
+/// (bit0 left, bit1 right, bit2 middle); `wheel` is the scroll delta since the
+/// previous `get_mouse_state()` call (the kernel drains its accumulator each
+/// read). Diff successive snapshots to derive motion/button/axis transitions.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct MouseState {
+    pub x: u32,
+    pub y: u32,
+    pub buttons: u32,
+    pub wheel: i32,
+}
+
+impl MouseState {
+    pub fn left(&self) -> bool {
+        self.buttons & 0b001 != 0
+    }
+    pub fn right(&self) -> bool {
+        self.buttons & 0b010 != 0
+    }
+    pub fn middle(&self) -> bool {
+        self.buttons & 0b100 != 0
+    }
+}
+
+pub fn get_mouse_state() -> MouseState {
+    let mut rec = [0u8; 16];
+    syscall1(SYSCALL_GET_MOUSE_STATE, rec.as_mut_ptr() as usize);
+    MouseState {
+        x: u32::from_le_bytes([rec[0], rec[1], rec[2], rec[3]]),
+        y: u32::from_le_bytes([rec[4], rec[5], rec[6], rec[7]]),
+        buttons: u32::from_le_bytes([rec[8], rec[9], rec[10], rec[11]]),
+        wheel: i32::from_le_bytes([rec[12], rec[13], rec[14], rec[15]]),
+    }
 }
 
 pub fn sleep_ms(ms: u64) {
