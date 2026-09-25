@@ -586,6 +586,11 @@ struct ClientState {
     surf_w: u32,
     surf_h: u32,
     presented: bool,
+    // Desktop bring-up state (used by run_desktop_session for runtime-spawned
+    // clients): `ready` once the buffer is mapped and a frame has been committed
+    // so it is safe to blit; `win_created` once it owns a Win in the model.
+    ready: bool,
+    win_created: bool,
 }
 
 impl ClientState {
@@ -601,6 +606,8 @@ impl ClientState {
             surf_w: 0,
             surf_h: 0,
             presented: false,
+            ready: false,
+            win_created: false,
         }
     }
 }
@@ -650,6 +657,29 @@ fn handle_client_payload(server: &mut Server, c: &mut ClientState, payload: &[u8
         libdunit::ipc_send(c.pid, reply);
     }
 }
+/// Bring one `gui_client` online: reserve a protocol connection, spawn the ELF,
+/// and hand it the `[our_pid][client_id]` handshake it blocks on at startup. The
+/// returned `ClientState` is *pending* — its buffer is mapped and it becomes
+/// `ready` only once its protocol handshake is pumped (see `pump_clients`). The
+/// `id` is a tint hint only; routing uses the kernel-authenticated sender pid.
+fn spawn_client(server: &mut Server, id: u32, slot_x: u32, slot_y: u32) -> Option<ClientState> {
+    let conn = server.connect()?;
+    let pid = libdunit::spawn("gui_client");
+    if pid <= 0 {
+        return None;
+    }
+    let mut c = ClientState::empty();
+    c.pid = pid as u32;
+    c.conn = conn;
+    c.slot_x = slot_x;
+    c.slot_y = slot_y;
+    let mut hs = [0u8; 8];
+    hs[0..4].copy_from_slice(&libdunit::get_pid().to_le_bytes());
+    hs[4..8].copy_from_slice(&id.to_le_bytes());
+    libdunit::ipc_send(c.pid, &hs);
+    Some(c)
+}
+
 /// Composite two untrusted client ELFs to the screen at the same time. Spawns
 /// both `gui_client` processes, hands each an 8-byte `[our_pid][client_id]`
 /// handshake (the id is only a tint hint for the client), and runs one event
@@ -660,26 +690,13 @@ fn handle_client_payload(server: &mut Server, c: &mut ClientState, payload: &[u8
 /// client's buffer to its own slot. Returns true iff both surfaces present.
 fn serve_two_clients() -> bool {
     let mut server = Server::new();
-    let mut clients = [ClientState::empty(); 2];
+    let mut clients: Vec<ClientState> = Vec::new();
     let slots = [(300u32, 100u32), (400u32, 220u32)];
     for i in 0..2 {
-        let conn = match server.connect() {
-            Some(c) => c,
+        match spawn_client(&mut server, (i as u32) + 1, slots[i].0, slots[i].1) {
+            Some(c) => clients.push(c),
             None => return false,
-        };
-        let pid = libdunit::spawn("gui_client");
-        if pid <= 0 {
-            return false;
         }
-        clients[i].pid = pid as u32;
-        clients[i].conn = conn;
-        clients[i].slot_x = slots[i].0;
-        clients[i].slot_y = slots[i].1;
-        // Handshake: our pid (IPC + cap-transfer target) + this client's id.
-        let mut hs = [0u8; 8];
-        hs[0..4].copy_from_slice(&libdunit::get_pid().to_le_bytes());
-        hs[4..8].copy_from_slice(&((i as u32) + 1).to_le_bytes());
-        libdunit::ipc_send(clients[i].pid, &hs);
     }
 
     // MARKER2
@@ -746,7 +763,7 @@ fn serve_two_clients() -> bool {
         // Emit the success marker BEFORE the session loop so automated smokes
         // observe it immediately (headless runs are force-quit after capture).
         libdunit::println("gui_server: served two untrusted clients OK");
-        run_desktop_session(&mut clients);
+        run_desktop_session(&mut server, &mut clients);
     }
 
     for c in clients.iter() {
@@ -898,6 +915,10 @@ const LAUNCHER_W: i32 = 40;
 const TASKBTN_W: i32 = 120;
 const TASKBTN_GAP: i32 = 4;
 
+/// Upper bound on concurrently composited client windows. Caps launcher spawns
+/// so a stuck loop cannot fork the machine to death.
+const MAX_WINDOWS: usize = 8;
+
 /// Rect of the i-th taskbar button (0-based), laid out left-to-right after the
 /// launcher. Independent of window state so hit-testing and drawing agree.
 fn taskbtn_rect(i: i32) -> (i32, i32, i32, i32) {
@@ -1014,7 +1035,45 @@ impl Win {
 }
 /// Persistent interactive compositor. Owns a full-screen back buffer, decorates
 /// each client surface, and lets the real mouse focus/raise/drag/close windows.
-fn run_desktop_session(clients: &mut [ClientState]) {
+/// Drain any queued client protocol messages (non-blocking) and advance each
+/// client toward `ready`. Called every desktop tick so runtime-spawned clients
+/// complete their handshake while the compositor keeps rendering. Bounded per
+/// tick so a chatty client cannot starve the frame. Routing is by the
+/// kernel-authenticated sender pid, so clients stay isolated.
+fn pump_clients(server: &mut Server, clients: &mut Vec<ClientState>) {
+    let mut rx = [0u8; 256];
+    let mut sender: u32 = 0;
+    for _ in 0..64 {
+        let n = libdunit::ipc_recv_from(&mut rx, &mut sender);
+        if n <= 0 {
+            break; // EAGAIN (queue empty) or error — nothing more this tick
+        }
+        let n = n as usize;
+        let idx = match clients.iter().position(|c| c.pid == sender) {
+            Some(i) => i,
+            None => continue, // message from an unknown pid — ignore
+        };
+        handle_client_payload(server, &mut clients[idx], &rx[..n]);
+        for (fc, fp) in &server.composite() {
+            let status = if fp.len() >= 52 {
+                u32::from_le_bytes([fp[48], fp[49], fp[50], fp[51]])
+            } else {
+                0
+            };
+            for c in clients.iter_mut() {
+                if c.conn != *fc {
+                    continue;
+                }
+                libdunit::ipc_send(c.pid, fp);
+                if status == 0 && !c.buf_ptr.is_null() && c.surf_w > 0 && c.surf_h > 0 {
+                    c.ready = true;
+                }
+            }
+        }
+    }
+}
+
+fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     let mut fb = libdunit::FbInfo {
         addr: 0,
         width: 0,
@@ -1036,14 +1095,14 @@ fn run_desktop_session(clients: &mut [ClientState]) {
     let mut wins: Vec<Win> = Vec::new();
     let mut z: Vec<usize> = Vec::new();
     let mut offset = 0i32;
-    for c in clients.iter() {
-        if !c.presented || c.buf_ptr.is_null() {
+    for i in 0..clients.len() {
+        if !clients[i].presented || clients[i].buf_ptr.is_null() {
             continue;
         }
-        let sw = c.surf_w as i32;
-        let sh = c.surf_h as i32;
-        let mut cx = c.slot_x as i32 + offset;
-        let mut cy = c.slot_y as i32 + TITLE_H + BORDER + offset;
+        let sw = clients[i].surf_w as i32;
+        let sh = clients[i].surf_h as i32;
+        let mut cx = clients[i].slot_x as i32 + offset;
+        let mut cy = clients[i].slot_y as i32 + TITLE_H + BORDER + offset;
         // Keep the whole window (title bar included) below the reserved panel.
         if cy - TITLE_H < PANEL_H + BORDER {
             cy = PANEL_H + TITLE_H + BORDER;
@@ -1056,15 +1115,17 @@ fn run_desktop_session(clients: &mut [ClientState]) {
         }
         z.push(wins.len());
         wins.push(Win {
-            pid: c.pid,
+            pid: clients[i].pid,
             cx,
             cy,
             sw,
             sh,
-            buf_ptr: c.buf_ptr,
-            buf_size: c.buf_size,
+            buf_ptr: clients[i].buf_ptr,
+            buf_size: clients[i].buf_size,
             alive: true,
         });
+        clients[i].ready = true;
+        clients[i].win_created = true;
         offset += 32;
     }
     if wins.is_empty() {
@@ -1079,7 +1140,43 @@ fn run_desktop_session(clients: &mut [ClientState]) {
     // Bounded so a headless run (mouse never moves) still terminates and lets
     // the harness force-quit; ~60000 * 16ms ≈ 16 min of interactive use.
     let mut ticks = 0u32;
+    // Runtime app-launch: the launcher spawns fresh gui_client windows up to
+    // MAX_WINDOWS; `next_id` is the tint hint handed to each new client.
+    let mut next_id = clients.len() as u32 + 1;
     loop {
+        // Advance any runtime-spawned clients through their protocol handshake,
+        // then hand each newly-ready client a cascaded, focused window.
+        pump_clients(server, clients);
+        for i in 0..clients.len() {
+            if !clients[i].ready || clients[i].win_created || clients[i].buf_ptr.is_null() {
+                continue;
+            }
+            let sw = clients[i].surf_w as i32;
+            let sh = clients[i].surf_h as i32;
+            let step = (wins.len() as i32 % 6) * 40;
+            let mut cx = 90 + step + BORDER;
+            let mut cy = PANEL_H + TITLE_H + BORDER + step;
+            if cx + sw + BORDER > bw as i32 {
+                cx = (bw as i32 - sw - BORDER).max(BORDER);
+            }
+            if cy + sh + BORDER > bh as i32 {
+                cy = (bh as i32 - sh - BORDER).max(PANEL_H + TITLE_H + BORDER);
+            }
+            let wi = wins.len();
+            wins.push(Win {
+                pid: clients[i].pid,
+                cx,
+                cy,
+                sw,
+                sh,
+                buf_ptr: clients[i].buf_ptr,
+                buf_size: clients[i].buf_size,
+                alive: true,
+            });
+            clients[i].win_created = true;
+            z.push(wi);
+        }
+
         let m = libdunit::get_mouse_state();
         let mx = m.x as i32;
         let my = m.y as i32;
@@ -1089,22 +1186,30 @@ fn run_desktop_session(clients: &mut [ClientState]) {
 
         // --- Button press edge: panel first, then focus / raise / drag / close ---
         if press && my < PANEL_H {
-            // Panel click: a taskbar button raises + focuses its window. The
-            // launcher glyph and empty panel are inert for now (app launching
-            // arrives in a later slice). Either way the click never reaches a
-            // client — the shell owns the panel band.
-            let mut slot = 0i32;
-            for wi in 0..wins.len() {
-                if !wins[wi].alive {
-                    continue;
+            // Panel click. The launcher glyph (leftmost cell) spawns a new app
+            // window; the taskbar buttons raise + focus their window. Either way
+            // the click never reaches a client — the shell owns the panel band.
+            if mx < LAUNCHER_W {
+                if clients.len() < MAX_WINDOWS {
+                    if let Some(c) = spawn_client(server, next_id, 0, 0) {
+                        clients.push(c);
+                        next_id += 1;
+                    }
                 }
-                let (bx, by, bw2, bh2) = taskbtn_rect(slot);
-                if mx >= bx && mx < bx + bw2 && my >= by && my < by + bh2 {
-                    z.retain(|&i| i != wi);
-                    z.push(wi);
-                    break;
+            } else {
+                let mut slot = 0i32;
+                for wi in 0..wins.len() {
+                    if !wins[wi].alive {
+                        continue;
+                    }
+                    let (bx, by, bw2, bh2) = taskbtn_rect(slot);
+                    if mx >= bx && mx < bx + bw2 && my >= by && my < by + bh2 {
+                        z.retain(|&i| i != wi);
+                        z.push(wi);
+                        break;
+                    }
+                    slot += 1;
                 }
-                slot += 1;
             }
         } else if press {
             let mut hit: Option<usize> = None;
