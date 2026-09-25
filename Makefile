@@ -2,7 +2,11 @@
 
 CC = gcc
 AS = nasm
-CARGO = cargo
+# Prefer the rustup shim so the build works even when a distro-packaged stable
+# cargo shadows it on PATH. The shim honors rust-toolchain.toml (nightly +
+# rust-src), which the -Z build-std flags below require; fall back to plain
+# `cargo` if the shim is absent (e.g. CI with nightly as the PATH default).
+CARGO ?= $(shell test -x $(HOME)/.cargo/bin/cargo && echo $(HOME)/.cargo/bin/cargo || echo cargo)
 QEMU = qemu-system-x86_64
 QEMU_DISPLAY ?= sdl
 QEMU_USB_INPUT ?= -device qemu-xhci -device usb-mouse
