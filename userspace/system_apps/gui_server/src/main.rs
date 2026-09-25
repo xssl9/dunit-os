@@ -876,6 +876,101 @@ fn draw_cursor(buf: &mut [u32], bw: usize, bh: usize, px: i32, py: i32) {
         }
     }
 }
+// ===========================================================================
+// DWM shell — top panel / taskbar (M4 slice 5)
+// ===========================================================================
+//
+// A compositor-owned panel across the top of the screen: a launcher glyph on
+// the left, one taskbar button per live window (click to raise + focus) in the
+// middle, and an uptime clock on the right. The panel is drawn on top of every
+// window each tick and its band is reserved — windows are kept below it and
+// pointer input over the panel is consumed by the shell, never forwarded to a
+// client.
+
+const PANEL_H: i32 = 28;
+const COLOR_PANEL: u32 = 0xFF181825;
+const COLOR_PANEL_TEXT: u32 = 0xFFCDD6F4;
+const COLOR_LAUNCHER: u32 = 0xFFA6E3A1;
+const COLOR_TASKBTN: u32 = 0xFF313244;
+const COLOR_TASKBTN_FOCUSED: u32 = 0xFF45475A;
+
+const LAUNCHER_W: i32 = 40;
+const TASKBTN_W: i32 = 120;
+const TASKBTN_GAP: i32 = 4;
+
+/// Rect of the i-th taskbar button (0-based), laid out left-to-right after the
+/// launcher. Independent of window state so hit-testing and drawing agree.
+fn taskbtn_rect(i: i32) -> (i32, i32, i32, i32) {
+    let x = LAUNCHER_W + TASKBTN_GAP + i * (TASKBTN_W + TASKBTN_GAP);
+    let y = 3;
+    (x, y, TASKBTN_W, PANEL_H - 6)
+}
+
+// A 3x5 bitmap font, just digits and ':' — enough for window numbers and a
+// MM:SS clock. Each row is a 3-bit mask (bit 2 = leftmost pixel).
+const GLYPH_W: i32 = 3;
+
+fn glyph_3x5(c: u8) -> Option<[u8; 5]> {
+    Some(match c {
+        b'0' => [7, 5, 5, 5, 7],
+        b'1' => [2, 6, 2, 2, 7],
+        b'2' => [7, 1, 7, 4, 7],
+        b'3' => [7, 1, 7, 1, 7],
+        b'4' => [5, 5, 7, 1, 1],
+        b'5' => [7, 4, 7, 1, 7],
+        b'6' => [7, 4, 7, 5, 7],
+        b'7' => [7, 1, 2, 2, 2],
+        b'8' => [7, 5, 7, 5, 7],
+        b'9' => [7, 5, 7, 1, 7],
+        b':' => [0, 2, 0, 2, 0],
+        _ => return None,
+    })
+}
+
+/// Draw an ASCII string in the 3x5 font at `scale`, returning the x just past
+/// the last glyph. Unknown bytes advance a blank cell (used for spaces).
+fn draw_text_3x5(
+    buf: &mut [u32],
+    bw: usize,
+    bh: usize,
+    x: i32,
+    y: i32,
+    scale: i32,
+    color: u32,
+    s: &[u8],
+) -> i32 {
+    let advance = (GLYPH_W + 1) * scale;
+    let mut cx = x;
+    for &c in s {
+        if let Some(rows) = glyph_3x5(c) {
+            for (ry, mask) in rows.iter().enumerate() {
+                for bit in 0..GLYPH_W {
+                    if mask & (1 << (GLYPH_W - 1 - bit)) != 0 {
+                        fill_rect(
+                            buf,
+                            bw,
+                            bh,
+                            cx + bit * scale,
+                            y + ry as i32 * scale,
+                            scale,
+                            scale,
+                            color,
+                        );
+                    }
+                }
+            }
+        }
+        cx += advance;
+    }
+    cx
+}
+
+/// Write a zero-padded two-digit value into `out[off..off+2]`.
+fn two_digits(out: &mut [u8], off: usize, v: u64) {
+    out[off] = b'0' + ((v / 10) % 10) as u8;
+    out[off + 1] = b'0' + (v % 10) as u8;
+}
+
 /// Per-window compositor state, derived from a `ClientState` but with a live
 /// content origin the user can drag around.
 struct Win {
@@ -949,11 +1044,15 @@ fn run_desktop_session(clients: &mut [ClientState]) {
         let sh = c.surf_h as i32;
         let mut cx = c.slot_x as i32 + offset;
         let mut cy = c.slot_y as i32 + TITLE_H + BORDER + offset;
+        // Keep the whole window (title bar included) below the reserved panel.
+        if cy - TITLE_H < PANEL_H + BORDER {
+            cy = PANEL_H + TITLE_H + BORDER;
+        }
         if cx + sw + BORDER > bw as i32 {
             cx = (bw as i32 - sw - BORDER).max(BORDER);
         }
         if cy + sh + BORDER > bh as i32 {
-            cy = (bh as i32 - sh - BORDER).max(TITLE_H + BORDER);
+            cy = (bh as i32 - sh - BORDER).max(PANEL_H + TITLE_H + BORDER);
         }
         z.push(wins.len());
         wins.push(Win {
@@ -988,8 +1087,26 @@ fn run_desktop_session(clients: &mut [ClientState]) {
         let press = left && !prev_left;
         let release = !left && prev_left;
 
-        // --- Button press edge: focus / raise / drag / close / forward ---
-        if press {
+        // --- Button press edge: panel first, then focus / raise / drag / close ---
+        if press && my < PANEL_H {
+            // Panel click: a taskbar button raises + focuses its window. The
+            // launcher glyph and empty panel are inert for now (app launching
+            // arrives in a later slice). Either way the click never reaches a
+            // client — the shell owns the panel band.
+            let mut slot = 0i32;
+            for wi in 0..wins.len() {
+                if !wins[wi].alive {
+                    continue;
+                }
+                let (bx, by, bw2, bh2) = taskbtn_rect(slot);
+                if mx >= bx && mx < bx + bw2 && my >= by && my < by + bh2 {
+                    z.retain(|&i| i != wi);
+                    z.push(wi);
+                    break;
+                }
+                slot += 1;
+            }
+        } else if press {
             let mut hit: Option<usize> = None;
             let mut zi = z.len();
             while zi > 0 {
@@ -1026,7 +1143,7 @@ fn run_desktop_session(clients: &mut [ClientState]) {
             let mut ncx = mx - ox;
             let mut ncy = my - oy;
             ncx = ncx.max(BORDER).min(bw as i32 - wins[wi].sw - BORDER);
-            ncy = ncy.max(TITLE_H + BORDER).min(bh as i32 - wins[wi].sh - BORDER);
+            ncy = ncy.max(PANEL_H + TITLE_H + BORDER).min(bh as i32 - wins[wi].sh - BORDER);
             wins[wi].cx = ncx;
             wins[wi].cy = ncy;
         }
@@ -1136,6 +1253,60 @@ fn run_desktop_session(clients: &mut [ClientState]) {
                     w.sh as usize,
                 );
             }
+        }
+
+        // --- DWM panel on top of every window ---
+        fill_rect(&mut back, bw, bh, 0, 0, bw as i32, PANEL_H, COLOR_PANEL);
+        // Launcher glyph: three stacked bars (hamburger) in the accent color.
+        for r in 0..3 {
+            fill_rect(&mut back, bw, bh, 10, 8 + r * 5, 20, 2, COLOR_LAUNCHER);
+        }
+        // One taskbar button per live window, in creation order; the focused
+        // window's button is highlighted. Label = 1-based window number.
+        {
+            let mut slot = 0i32;
+            for wi in 0..wins.len() {
+                if !wins[wi].alive {
+                    continue;
+                }
+                let (bx, by, bw2, bh2) = taskbtn_rect(slot);
+                if bx + bw2 > bw as i32 {
+                    break;
+                }
+                let bg = if focused == Some(wi) {
+                    COLOR_TASKBTN_FOCUSED
+                } else {
+                    COLOR_TASKBTN
+                };
+                fill_rect(&mut back, bw, bh, bx, by, bw2, bh2, bg);
+                let mut label = [0u8; 2];
+                two_digits(&mut label, 0, (wi as u64) + 1);
+                draw_text_3x5(&mut back, bw, bh, bx + 8, by + 5, 2, COLOR_PANEL_TEXT, &label);
+                slot += 1;
+            }
+        }
+        // Uptime clock (MM:SS) on the right.
+        {
+            let mut stats = libdunit::SystemStats::default();
+            let secs = if libdunit::get_system_stats(&mut stats) >= 0 {
+                stats.uptime_ticks / 100
+            } else {
+                0
+            };
+            let mut clk = *b"00:00";
+            two_digits(&mut clk, 0, (secs / 60) % 100);
+            two_digits(&mut clk, 3, secs % 60);
+            let clk_w = clk.len() as i32 * (GLYPH_W + 1) * 3;
+            draw_text_3x5(
+                &mut back,
+                bw,
+                bh,
+                bw as i32 - clk_w - 12,
+                6,
+                3,
+                COLOR_PANEL_TEXT,
+                &clk,
+            );
         }
 
         draw_cursor(&mut back, bw, bh, mx, my);
