@@ -290,6 +290,7 @@ pub struct WaitStatus {
 #[cfg(feature = "boot-smoke-tests")]
 #[repr(align(4096))]
 struct UserSmokeStack(UnsafeCell<[u8; 4096]>);
+#[cfg(feature = "boot-smoke-tests")]
 unsafe impl Sync for UserSmokeStack {}
 
 #[cfg(feature = "boot-smoke-tests")]
@@ -488,6 +489,7 @@ pub fn copy_buffer_from_user(ptr: *const u8, len: usize) -> Result<Vec<u8>, i64>
 /// [`MAX_USER_COPY`]. The caller supplies its own `max` upper bound (fb_present
 /// caps at the framebuffer size); the source pages are still fully validated as
 /// present + user-readable, only the small generic cap is lifted.
+#[allow(dead_code)] // retained utility: bulk user copy above MAX_USER_COPY
 pub fn copy_buffer_from_user_bounded(
     ptr: *const u8,
     len: usize,
@@ -1564,17 +1566,20 @@ fn sys_fb_present(src: *const u8, width: u32, height: u32, dst_x: u32, dst_y: u3
     if !is_valid_user_pointer(src as u64, bytes) {
         return EFAULT;
     }
-    // The generic MAX_USER_COPY (64 KiB) cap is far below a real window's pixel
-    // buffer, so use the bounded copy with the framebuffer-scale limit above.
-    let data = match copy_buffer_from_user_bounded(src, bytes, MAX_FB_PRESENT) {
-        Ok(data) => data,
-        Err(error) => return error,
-    };
+    // Validate every source page once (present, user-readable), then blit
+    // directly from user memory. A userspace compositor presents a full-screen
+    // frame every tick, so the old copy-into-a-Vec path allocated and byte-copied
+    // several MiB per frame; reading the source in place removes that per-frame
+    // allocation and halves the memory traffic.
+    if let Err(error) = validate_user_pages(src as u64, bytes, false) {
+        return error;
+    }
     let fb = KERNEL_FB_ADDR.load(Ordering::Relaxed) as *mut u8;
     let fb_w = KERNEL_FB_WIDTH.load(Ordering::Relaxed) as usize;
     let fb_h = KERNEL_FB_HEIGHT.load(Ordering::Relaxed) as usize;
     let pitch = KERNEL_FB_PITCH.load(Ordering::Relaxed) as usize;
     let (dx, dy) = (dst_x as usize, dst_y as usize);
+    let src32 = src as *const u32;
     for row in 0..h {
         let py = dy + row;
         if py >= fb_h {
@@ -1585,8 +1590,7 @@ fn sys_fb_present(src: *const u8, width: u32, height: u32, dst_x: u32, dst_y: u3
             if px >= fb_w {
                 continue;
             }
-            let s = (row * w + col) * 4;
-            let color = u32::from_le_bytes([data[s], data[s + 1], data[s + 2], data[s + 3]]);
+            let color = unsafe { core::ptr::read_volatile(src32.add(row * w + col)) };
             unsafe {
                 let dst = fb.add(py * pitch + px * 4) as *mut u32;
                 core::ptr::write_volatile(dst, color);

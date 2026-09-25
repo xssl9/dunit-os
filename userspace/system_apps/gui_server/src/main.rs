@@ -714,38 +714,17 @@ fn serve_two_clients() -> bool {
 
     let both = clients[0].presented && clients[1].presented;
 
-    // Both untrusted windows are now blitted to the framebuffer at their slots,
-    // and those blits are the last thing written to the display. Linger here —
-    // before any further terminal text repaints over them — so the composited
-    // frame is actually visible on screen (and can be screenshotted). A real
-    // compositor loops forever; this demo just holds the frame, then tears down.
+    // Both untrusted windows have presented at least one frame. Hand off to the
+    // interactive desktop session: a persistent compositor loop that owns a
+    // full-screen back buffer, decorates each client surface with a draggable
+    // title bar, routes the real mouse (syscall 60) into focus/raise/drag, and
+    // re-presents every tick. This is the M4 userspace DWM taking over from the
+    // linear M3 smoke.
     if both {
-        // Emit the success marker BEFORE holding the frame, so automated smokes
-        // observe it without waiting out the hold. Then re-present both windows
-        // repeatedly for a few seconds: the kernel terminal draws to the same
-        // framebuffer, so a one-shot blit gets clobbered; refreshing keeps the
-        // composited frame on screen long enough to actually see (and capture).
+        // Emit the success marker BEFORE the session loop so automated smokes
+        // observe it immediately (headless runs are force-quit after capture).
         libdunit::println("gui_server: served two untrusted clients OK");
-        // Hold the composited frame: re-present continuously (the kernel terminal
-        // shares this framebuffer, so a one-shot blit gets clobbered) for the whole
-        // session. We deliberately do NOT break on a keypress: the composited
-        // windows must stay on screen while the user pokes the system — an
-        // interactive session ends by closing the QEMU window, not a keystroke. The
-        // cap only bounds headless smokes so they can't wedge (they force-quit after
-        // the screenshot long before it is reached).
-        for _ in 0..6000 {
-            for c in clients.iter() {
-                if c.buf_ptr.is_null() || c.surf_w == 0 || c.surf_h == 0 {
-                    continue;
-                }
-                let want = c.surf_w as u64 * c.surf_h as u64 * 4;
-                if want <= c.buf_size as u64 {
-                    let data = unsafe { core::slice::from_raw_parts(c.buf_ptr, want as usize) };
-                    libdunit::fb_present(data, c.surf_w, c.surf_h, c.slot_x, c.slot_y);
-                }
-            }
-            libdunit::sleep_ms(100);
-        }
+        run_desktop_session(&mut clients);
     }
 
     for c in clients.iter() {
@@ -761,4 +740,330 @@ fn serve_two_clients() -> bool {
         }
     }
     both
+}
+
+// ===========================================================================
+// M4 userspace DWM — interactive desktop session
+// ===========================================================================
+//
+// A persistent compositor loop that owns a full-screen back buffer. Each client
+// surface is decorated with a draggable title bar; the real mouse (syscall 60,
+// `get_mouse_state`) drives focus/raise/drag/close. Every tick the whole desktop
+// is recomposited and presented, so it stays correct as windows move and as the
+// terminal underneath (when launched via `exec gui_server`) would otherwise show
+// through. Client *content* is still static here — reacting to input inside a
+// window (button hover/press) is the next slice.
+
+const TITLE_H: i32 = 26;
+const BORDER: i32 = 2;
+
+const COLOR_DESKTOP: u32 = 0xFF1E1E2E;
+const COLOR_TITLE_FOCUSED: u32 = 0xFF313244;
+const COLOR_TITLE_UNFOCUSED: u32 = 0xFF232331;
+const COLOR_BORDER_FOCUSED: u32 = 0xFFA6E3A1;
+const COLOR_BORDER_UNFOCUSED: u32 = 0xFF45475A;
+const COLOR_CLOSE: u32 = 0xFFF38BA8;
+
+/// Fill an axis-aligned rectangle in the back buffer, clipped to its bounds.
+fn fill_rect(buf: &mut [u32], bw: usize, bh: usize, x: i32, y: i32, w: i32, h: i32, color: u32) {
+    let x0 = x.max(0) as usize;
+    let y0 = y.max(0) as usize;
+    let x1 = ((x + w).max(0) as usize).min(bw);
+    let y1 = ((y + h).max(0) as usize).min(bh);
+    let mut yy = y0;
+    while yy < y1 {
+        let row = yy * bw;
+        let mut xx = x0;
+        while xx < x1 {
+            buf[row + xx] = color;
+            xx += 1;
+        }
+        yy += 1;
+    }
+}
+
+/// Blit a client's XRGB8888 surface into the back buffer at (x, y), clipped.
+fn blit_surface(
+    buf: &mut [u32],
+    bw: usize,
+    bh: usize,
+    x: i32,
+    y: i32,
+    src: &[u32],
+    sw: usize,
+    sh: usize,
+) {
+    let mut sy = 0usize;
+    while sy < sh {
+        let dy = y + sy as i32;
+        if dy >= 0 && (dy as usize) < bh {
+            let drow = dy as usize * bw;
+            let srow = sy * sw;
+            let mut sx = 0usize;
+            while sx < sw {
+                let dx = x + sx as i32;
+                if dx >= 0 && (dx as usize) < bw {
+                    buf[drow + dx as usize] = src[srow + sx];
+                }
+                sx += 1;
+            }
+        }
+        sy += 1;
+    }
+}
+/// A classic top-left arrow cursor. 'X' = black outline, '.' = white fill,
+/// ' ' = transparent. Hotspot is the top-left corner (0,0).
+const CURSOR: [&str; 17] = [
+    "X                ",
+    "XX               ",
+    "X.X              ",
+    "X..X             ",
+    "X...X            ",
+    "X....X           ",
+    "X.....X          ",
+    "X......X         ",
+    "X.......X        ",
+    "X........X       ",
+    "X.....XXXXX      ",
+    "X..X..X          ",
+    "X.X X..X         ",
+    "XX  X..X         ",
+    "X    X..X        ",
+    "     X..X        ",
+    "      XX         ",
+];
+
+/// Draw the arrow cursor into the back buffer with its hotspot at (px, py).
+fn draw_cursor(buf: &mut [u32], bw: usize, bh: usize, px: i32, py: i32) {
+    for (ry, row) in CURSOR.iter().enumerate() {
+        let dy = py + ry as i32;
+        if dy < 0 || dy as usize >= bh {
+            continue;
+        }
+        let drow = dy as usize * bw;
+        for (rx, ch) in row.bytes().enumerate() {
+            let color = match ch {
+                b'X' => 0xFF000000,
+                b'.' => 0xFFFFFFFF,
+                _ => continue,
+            };
+            let dx = px + rx as i32;
+            if dx >= 0 && (dx as usize) < bw {
+                buf[drow + dx as usize] = color;
+            }
+        }
+    }
+}
+/// Per-window compositor state, derived from a `ClientState` but with a live
+/// content origin the user can drag around.
+struct Win {
+    cx: i32,
+    cy: i32,
+    sw: i32,
+    sh: i32,
+    buf_ptr: *const u8,
+    buf_size: usize,
+    alive: bool,
+}
+
+impl Win {
+    /// Full outer rect (border + title bar + content) in screen space.
+    fn outer(&self) -> (i32, i32, i32, i32) {
+        let x = self.cx - BORDER;
+        let y = self.cy - TITLE_H - BORDER;
+        let w = self.sw + 2 * BORDER;
+        let h = self.sh + TITLE_H + 2 * BORDER;
+        (x, y, w, h)
+    }
+    fn contains(&self, mx: i32, my: i32) -> bool {
+        let (x, y, w, h) = self.outer();
+        mx >= x && mx < x + w && my >= y && my < y + h
+    }
+    fn in_title(&self, mx: i32, my: i32) -> bool {
+        mx >= self.cx && mx < self.cx + self.sw && my >= self.cy - TITLE_H && my < self.cy
+    }
+    /// Close box: a small square at the right end of the title bar.
+    fn in_close(&self, mx: i32, my: i32) -> bool {
+        let sz = TITLE_H - 12;
+        let bx = self.cx + self.sw - sz - 6;
+        let by = self.cy - TITLE_H + 6;
+        mx >= bx && mx < bx + sz && my >= by && my < by + sz
+    }
+}
+/// Persistent interactive compositor. Owns a full-screen back buffer, decorates
+/// each client surface, and lets the real mouse focus/raise/drag/close windows.
+fn run_desktop_session(clients: &mut [ClientState]) {
+    let mut fb = libdunit::FbInfo {
+        addr: 0,
+        width: 0,
+        height: 0,
+        pitch: 0,
+    };
+    if !libdunit::get_framebuffer(&mut fb) || fb.width == 0 || fb.height == 0 {
+        libdunit::println("gui_server: no framebuffer for desktop session");
+        return;
+    }
+    let bw = fb.width as usize;
+    let bh = fb.height as usize;
+
+    let mut back: Vec<u32> = Vec::new();
+    back.resize(bw * bh, COLOR_DESKTOP);
+
+    // Build the window model from presented clients, tiling them if their slot
+    // origins collide, and keeping the title bar on-screen.
+    let mut wins: Vec<Win> = Vec::new();
+    let mut z: Vec<usize> = Vec::new();
+    let mut offset = 0i32;
+    for c in clients.iter() {
+        if !c.presented || c.buf_ptr.is_null() {
+            continue;
+        }
+        let sw = c.surf_w as i32;
+        let sh = c.surf_h as i32;
+        let mut cx = c.slot_x as i32 + offset;
+        let mut cy = c.slot_y as i32 + TITLE_H + BORDER + offset;
+        if cx + sw + BORDER > bw as i32 {
+            cx = (bw as i32 - sw - BORDER).max(BORDER);
+        }
+        if cy + sh + BORDER > bh as i32 {
+            cy = (bh as i32 - sh - BORDER).max(TITLE_H + BORDER);
+        }
+        z.push(wins.len());
+        wins.push(Win {
+            cx,
+            cy,
+            sw,
+            sh,
+            buf_ptr: c.buf_ptr,
+            buf_size: c.buf_size,
+            alive: true,
+        });
+        offset += 32;
+    }
+    if wins.is_empty() {
+        return;
+    }
+    let mut prev_left = false;
+    let mut drag: Option<(usize, i32, i32)> = None; // (win index, off_x, off_y)
+    // Bounded so a headless run (mouse never moves) still terminates and lets
+    // the harness force-quit; ~60000 * 16ms ≈ 16 min of interactive use.
+    let mut ticks = 0u32;
+    loop {
+        let m = libdunit::get_mouse_state();
+        let mx = m.x as i32;
+        let my = m.y as i32;
+        let left = m.left();
+
+        // --- Button press edge: focus / raise / drag / close ---
+        if left && !prev_left {
+            let mut hit: Option<usize> = None;
+            let mut zi = z.len();
+            while zi > 0 {
+                zi -= 1;
+                let wi = z[zi];
+                if wins[wi].alive && wins[wi].contains(mx, my) {
+                    hit = Some(wi);
+                    break;
+                }
+            }
+            if let Some(wi) = hit {
+                // Raise: move wi to the top of the z-order.
+                z.retain(|&i| i != wi);
+                z.push(wi);
+                if wins[wi].in_close(mx, my) {
+                    wins[wi].alive = false;
+                    drag = None;
+                } else if wins[wi].in_title(mx, my) {
+                    drag = Some((wi, mx - wins[wi].cx, my - wins[wi].cy));
+                }
+            }
+        }
+        if !left {
+            drag = None;
+        }
+
+        // --- Drag move ---
+        if let Some((wi, ox, oy)) = drag {
+            let mut ncx = mx - ox;
+            let mut ncy = my - oy;
+            ncx = ncx.max(BORDER).min(bw as i32 - wins[wi].sw - BORDER);
+            ncy = ncy.max(TITLE_H + BORDER).min(bh as i32 - wins[wi].sh - BORDER);
+            wins[wi].cx = ncx;
+            wins[wi].cy = ncy;
+        }
+        prev_left = left;
+
+        // Stop if every window was closed.
+        if !wins.iter().any(|w| w.alive) {
+            break;
+        }
+
+        let focused = z.iter().rev().copied().find(|&i| wins[i].alive);
+
+        // Clear desktop.
+        for px in back.iter_mut() {
+            *px = COLOR_DESKTOP;
+        }
+
+        // Draw windows bottom-to-top.
+        for &wi in z.iter() {
+            let w = &wins[wi];
+            if !w.alive {
+                continue;
+            }
+            let is_focused = focused == Some(wi);
+            let border = if is_focused {
+                COLOR_BORDER_FOCUSED
+            } else {
+                COLOR_BORDER_UNFOCUSED
+            };
+            let title = if is_focused {
+                COLOR_TITLE_FOCUSED
+            } else {
+                COLOR_TITLE_UNFOCUSED
+            };
+            let (ox, oy, ow, oh) = w.outer();
+            fill_rect(&mut back, bw, bh, ox, oy, ow, oh, border);
+            fill_rect(&mut back, bw, bh, w.cx, w.cy - TITLE_H, w.sw, TITLE_H, title);
+            // Close box.
+            let sz = TITLE_H - 12;
+            fill_rect(
+                &mut back,
+                bw,
+                bh,
+                w.cx + w.sw - sz - 6,
+                w.cy - TITLE_H + 6,
+                sz,
+                sz,
+                COLOR_CLOSE,
+            );
+            // Client surface.
+            let want = (w.sw as usize) * (w.sh as usize);
+            if want > 0 && want * 4 <= w.buf_size {
+                let src = unsafe { core::slice::from_raw_parts(w.buf_ptr as *const u32, want) };
+                blit_surface(
+                    &mut back,
+                    bw,
+                    bh,
+                    w.cx,
+                    w.cy,
+                    src,
+                    w.sw as usize,
+                    w.sh as usize,
+                );
+            }
+        }
+
+        draw_cursor(&mut back, bw, bh, mx, my);
+
+        let bytes =
+            unsafe { core::slice::from_raw_parts(back.as_ptr() as *const u8, back.len() * 4) };
+        libdunit::fb_present(bytes, fb.width, fb.height, 0, 0);
+
+        libdunit::sleep_ms(16);
+        ticks += 1;
+        if ticks >= 60000 {
+            break;
+        }
+    }
 }
