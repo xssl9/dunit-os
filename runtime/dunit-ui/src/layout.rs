@@ -36,15 +36,28 @@ impl Layout {
     }
 }
 
+/// A content measurer: given a node, return the intrinsic `(width, height)` of
+/// its own content (used for non-container [`Kind::Element`] leaves — e.g. a
+/// widget sizing to its text). Containers derive their size from children and
+/// ignore this. The default [`layout`] uses a zero measurer.
+pub type Measurer<'a> = &'a dyn Fn(NodeId) -> (f32, f32);
+
 /// Lay out `tree` into a `avail_w * avail_h` viewport. The root fills the
-/// viewport; every descendant is placed relative to it.
+/// viewport; every descendant is placed relative to it. Element leaves get zero
+/// content size — use [`layout_measured`] to size them to real content.
 pub fn layout(tree: &Tree, avail_w: f32, avail_h: f32) -> Layout {
+    layout_measured(tree, avail_w, avail_h, &|_| (0.0, 0.0))
+}
+
+/// Like [`layout`], but `measure` supplies the intrinsic content size of each
+/// non-container element leaf (widget text, icon glyph, ...).
+pub fn layout_measured(tree: &Tree, avail_w: f32, avail_h: f32, measure_fn: Measurer) -> Layout {
     let n = tree.len();
     let mut desired = vec![(0.0f32, 0.0f32); n];
     if n == 0 {
         return Layout { boxes: Vec::new() };
     }
-    measure(tree, tree.root(), avail_w, avail_h, &mut desired);
+    measure(tree, tree.root(), avail_w, avail_h, &mut desired, measure_fn);
 
     let mut boxes = vec![Rect::default(); n];
     let root_rect = Rect { x: 0.0, y: 0.0, w: avail_w, h: avail_h };
@@ -54,27 +67,34 @@ pub fn layout(tree: &Tree, avail_w: f32, avail_h: f32) -> Layout {
 
 // ---- measure ------------------------------------------------------------
 
-fn measure(tree: &Tree, id: NodeId, avail_w: f32, avail_h: f32, desired: &mut Vec<(f32, f32)>) -> (f32, f32) {
+fn measure(
+    tree: &Tree,
+    id: NodeId,
+    avail_w: f32,
+    avail_h: f32,
+    desired: &mut Vec<(f32, f32)>,
+    mfn: Measurer,
+) -> (f32, f32) {
     let node = tree.node(id);
     let a = &node.attrs;
     let inner_w = fmax(avail_w - a.padding.horizontal(), 0.0);
     let inner_h = fmax(avail_h - a.padding.vertical(), 0.0);
 
     let (content_w, content_h) = match &node.kind {
-        Kind::Row => measure_line(tree, node.children.as_slice(), a, inner_w, inner_h, true, desired),
-        Kind::Column => measure_line(tree, node.children.as_slice(), a, inner_w, inner_h, false, desired),
+        Kind::Row => measure_line(tree, node.children.as_slice(), a, inner_w, inner_h, true, desired, mfn),
+        Kind::Column => measure_line(tree, node.children.as_slice(), a, inner_w, inner_h, false, desired, mfn),
         Kind::Stack | Kind::Scroll => {
             let mut w = 0.0f32;
             let mut h = 0.0f32;
             for &c in &node.children {
-                let (cw, ch) = measure(tree, c, inner_w, inner_h, desired);
+                let (cw, ch) = measure(tree, c, inner_w, inner_h, desired, mfn);
                 w = fmax(w, cw);
                 h = fmax(h, ch);
             }
             (w, h)
         }
-        Kind::Grid => measure_grid(tree, node.children.as_slice(), a, inner_w, inner_h, desired),
-        Kind::Element(_) => (0.0, 0.0),
+        Kind::Grid => measure_grid(tree, node.children.as_slice(), a, inner_w, inner_h, desired, mfn),
+        Kind::Element(_) => mfn(id),
     };
 
     // Fold padding back in, then let explicit sizing override the content size.
@@ -95,11 +115,12 @@ fn measure_line(
     inner_h: f32,
     horizontal: bool,
     desired: &mut Vec<(f32, f32)>,
+    mfn: Measurer,
 ) -> (f32, f32) {
     let mut main = 0.0f32;
     let mut cross = 0.0f32;
     for &c in children {
-        let (cw, ch) = measure(tree, c, inner_w, inner_h, desired);
+        let (cw, ch) = measure(tree, c, inner_w, inner_h, desired, mfn);
         let (cmain, ccross) = if horizontal { (cw, ch) } else { (ch, cw) };
         main += cmain;
         cross = fmax(cross, ccross);
@@ -121,6 +142,7 @@ fn measure_grid(
     inner_w: f32,
     inner_h: f32,
     desired: &mut Vec<(f32, f32)>,
+    mfn: Measurer,
 ) -> (f32, f32) {
     let cols = a.columns.max(1) as usize;
     let cell_avail_w = (inner_w - a.spacing * (cols as f32 - 1.0)) / cols as f32;
@@ -128,7 +150,7 @@ fn measure_grid(
     let rows = children.len().div_ceil(cols);
     let mut row_h = vec![0.0f32; rows];
     for (i, &c) in children.iter().enumerate() {
-        let (cw, ch) = measure(tree, c, fmax(cell_avail_w, 0.0), inner_h, desired);
+        let (cw, ch) = measure(tree, c, fmax(cell_avail_w, 0.0), inner_h, desired, mfn);
         col_w = fmax(col_w, cw);
         let r = i / cols;
         row_h[r] = fmax(row_h[r], ch);

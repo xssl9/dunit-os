@@ -32,7 +32,7 @@ pub mod parse;
 pub mod tree;
 
 pub use attrs::{Align, Attrs, Edges, Sizing};
-pub use layout::{layout, Layout, Rect};
+pub use layout::{layout, layout_measured, Layout, Measurer, Rect};
 pub use parse::parse;
 pub use tree::{Kind, Node, NodeId, Tree};
 

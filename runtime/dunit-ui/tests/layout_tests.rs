@@ -1,6 +1,6 @@
 //! Layout-engine tests for the DUI layer.
 
-use dunit_ui::{layout, parse};
+use dunit_ui::{layout, layout_measured, parse};
 
 fn r(doc: &str, w: f32, h: f32) -> (dunit_ui::Tree, dunit_ui::Layout) {
     let tree = parse(doc).expect("parse");
@@ -157,5 +157,17 @@ fn stack_child_respects_own_max() {
     let a = lay.rect(tree.by_name("a").unwrap());
     assert_eq!(a.w, 40.0);
     assert_eq!(a.h, 30.0);
+}
+
+#[test]
+fn measurer_sizes_element_leaves() {
+    let tree = parse(r#"Row { Text #t }"#).expect("parse");
+    // A measurer reporting a fixed content size for every element leaf.
+    let lay = layout_measured(&tree, 500.0, 100.0, &|_| (120.0, 18.0));
+    let t = lay.rect(tree.by_name("t").unwrap());
+    assert_eq!(t.w, 120.0); // sized to measured content width
+    // Without a measurer the same leaf has zero intrinsic width.
+    let plain = layout(&tree, 500.0, 100.0);
+    assert_eq!(plain.rect(tree.by_name("t").unwrap()).w, 0.0);
 }
 

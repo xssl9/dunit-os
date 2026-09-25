@@ -1,0 +1,23 @@
+# Dunit Widgets — the widget layer of the UI Runtime (M4 slice 4). It ties the
+# DUI tree, DSS cascade and text rasterizer together: it maps element tags to
+# concrete widgets, resolves their DSS state (hover/focus/press/...), sizes them
+# to their content, and provides the event/focus model (hit-testing, capture/
+# bubble paths, focus navigation, keyboard actions). Pure `no_std + alloc`; the
+# only dependencies are the sibling runtime crates.
+[package]
+name = "dunit_widgets"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "dunit_widgets"
+path = "src/lib.rs"
+
+[dependencies]
+dunit_ui = { path = "../dunit-ui" }
+dunit_style = { path = "../dunit-style" }
+dunit_text = { path = "../dunit-text" }
+
+[profile.release]
+panic = "abort"
+lto = true
