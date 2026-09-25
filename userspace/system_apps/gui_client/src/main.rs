@@ -29,6 +29,25 @@ use dunit_widgets::{intrinsic_size, FontMeasure, Widget};
 /// packet (protocol packets begin with the DGUI wire magic instead). Shared
 /// with the compositor.
 const CTRL_MAGIC: u32 = 0x3150_4143; // "CAP1"
+
+// Compositor -> client input control messages (mirrors gui_server). Coords are
+// client-local. The client is only ever sent events while it holds focus.
+const INPUT_MAGIC: u32 = 0x3150_4E49; // "INP1"
+const IN_MOVE: u8 = 1;
+const IN_DOWN: u8 = 2;
+const IN_UP: u8 = 3;
+const IN_LEAVE: u8 = 4;
+const IN_QUIT: u8 = 9;
+
+/// Interaction state driving the client's re-paint: whether the pointer is over
+/// the OK button, whether it is being pressed, and how many times it was clicked.
+#[derive(Clone, Copy, Default)]
+struct UiState {
+    hover: bool,
+    press: bool,
+    clicks: u32,
+}
+
 const SURFACE: u64 = 1;
 const BUFFER: u64 = 2;
 const W: u32 = 240;
@@ -61,40 +80,50 @@ fn send_env(dst: u32, _id: u32, payload: &[u8]) {
 
 // APPEND_MARKER
 
-/// Paint a small DUI window (title + button) into the mapped ARGB8888 buffer at
-/// `px`, using the full UI Runtime: DUI tree -> DSS cascade -> content-measured
-/// layout -> dunit-render painter, with real TTF text. `id` tints the accent so
-/// the two concurrent client windows read as distinct on screen.
-fn render_window(px: *mut u8, id: u32) {
-    let font = match Font::parse(FONT_BYTES.to_vec()) {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-
-    let dui = if id == 1 {
-        r#"Column#win { Text#title "Dunit" Text#sub "green tea" Button#ok "OK" }"#
-    } else {
-        r#"Column#win { Text#title "Window 2" Text#sub "runtime demo" Button#ok "Close" }"#
-    };
-    let tree = match parse_dui(dui) {
-        Ok(t) => t,
-        Err(_) => return,
-    };
-
-    // Green Tea dark (mono) reference theme; client 2 shifts its accent hue.
+/// Paint the DUI window into the mapped ARGB8888 buffer using the full UI
+/// Runtime (DUI tree -> DSS cascade -> content-measured layout -> dunit-render),
+/// reflecting the current `UiState` (button hover/press + a live click counter).
+/// Returns the OK button's rect in client-local pixels so the input loop can
+/// hit-test the pointer against it.
+fn render_window(px: *mut u8, font: &Font, id: u32, st: UiState) -> (i32, i32, i32, i32) {
     let accent = if id == 1 { "#a6e3a1" } else { "#94e2d5" };
+    let title = if id == 1 { "Dunit" } else { "Window 2" };
+    // Live subtext: click count so a press is visibly acknowledged even without
+    // text-caret focus. `format!` is available via alloc.
+    let sub = alloc::format!("clicks: {}", st.clicks);
+    let mut dui = alloc::string::String::new();
+    dui.push_str("Column#win { Text#title \"");
+    dui.push_str(title);
+    dui.push_str("\" Text#sub \"");
+    dui.push_str(&sub);
+    dui.push_str("\" Button#ok \"OK\" }");
+    let tree = match parse_dui(&dui) {
+        Ok(t) => t,
+        Err(_) => return (0, 0, 0, 0),
+    };
+
+    // Button background reflects interaction: pressed -> accent, hover -> lighter.
+    let btn_bg = if st.press {
+        accent
+    } else if st.hover {
+        "#3a3a3a"
+    } else {
+        "#2e2e2e"
+    };
     let mut dss = alloc::string::String::new();
     dss.push_str("Column#win { background: #1b1b1b; padding: 12; }\n");
     dss.push_str("Text { color: #cdd6f4; font-size: 18; padding: 2; }\n");
     dss.push_str("Text#sub { color: ");
     dss.push_str(accent);
     dss.push_str("; font-size: 13; }\n");
-    dss.push_str("Button { background: #2e2e2e; color: ");
+    dss.push_str("Button { background: ");
+    dss.push_str(btn_bg);
+    dss.push_str("; color: #1b1b1b; border-width: 1; border-color: ");
     dss.push_str(accent);
-    dss.push_str("; border-width: 1; border-color: #45475a; font-size: 15; padding: 6; }\n");
+    dss.push_str("; font-size: 15; padding: 6; }\n");
     let sheet = match parse_dss(&dss) {
         Ok(s) => s,
-        Err(_) => return,
+        Err(_) => return (0, 0, 0, 0),
     };
     let mut cas = Cascade::new();
     cas.push(sheet);
@@ -111,7 +140,7 @@ fn render_window(px: *mut u8, id: u32) {
     };
 
     // Measure element leaves against their real content (widget intrinsic size).
-    let fm = FontMeasure { font: &font };
+    let fm = FontMeasure { font };
     let measure_fn = |nid: NodeId| {
         let node = tree.node(nid);
         if let Kind::Element(tag) = &node.kind {
@@ -125,7 +154,16 @@ fn render_window(px: *mut u8, id: u32) {
 
     let pixels = unsafe { core::slice::from_raw_parts_mut(px as *mut u32, (W * H) as usize) };
     let mut surface = Surface::new(pixels, W as usize, H as usize);
-    paint(&tree, &lay, &style_of, &font, &mut surface);
+    paint(&tree, &lay, &style_of, font, &mut surface);
+
+    // Report the OK button's rect (client-local) for pointer hit-testing.
+    match tree.by_name("ok") {
+        Some(nid) => {
+            let r = lay.rect(nid);
+            (r.x as i32, r.y as i32, r.w as i32, r.h as i32)
+        }
+        None => (0, 0, 0, 0),
+    }
 }
 
 
@@ -156,7 +194,15 @@ pub extern "C" fn _start() -> ! {
         libdunit::exit(3);
     }
     let px = mapped as usize as *mut u8;
-    render_window(px, id);
+    let font = match Font::parse(FONT_BYTES.to_vec()) {
+        Ok(f) => f,
+        Err(_) => {
+            libdunit::println("gui_client: FAIL font parse");
+            libdunit::exit(7);
+        }
+    };
+    let mut st = UiState::default();
+    let mut btn = render_window(px, &font, id, st);
 
     let mut rx = [0u8; 256];
 
@@ -229,9 +275,53 @@ pub extern "C" fn _start() -> ! {
         libdunit::println("gui_client: surface presented OK");
     } else {
         libdunit::println("gui_client: FAIL no frame done");
+        libdunit::handle_close(buf);
+        libdunit::exit(6);
+    }
+
+    // 9) Interactive event loop. The compositor owns the display and forwards
+    //    pointer input for the focused window as INPUT_MAGIC control messages;
+    //    we react by re-painting into our shared buffer (the compositor blits it
+    //    every tick, so repaints appear without us presenting). Exit on QUIT.
+    loop {
+        let n = libdunit::ipc_recv_blocking(&mut rx, 0);
+        if n < 8 {
+            continue;
+        }
+        if u32::from_le_bytes([rx[0], rx[1], rx[2], rx[3]]) != INPUT_MAGIC {
+            continue;
+        }
+        let kind = rx[4];
+        if kind == IN_QUIT {
+            break;
+        }
+        let lx = i32::from_le_bytes([rx[8], rx[9], rx[10], rx[11]]);
+        let ly = i32::from_le_bytes([rx[12], rx[13], rx[14], rx[15]]);
+        let inside =
+            lx >= btn.0 && lx < btn.0 + btn.2 && ly >= btn.1 && ly < btn.1 + btn.3;
+        let before = st;
+        match kind {
+            IN_MOVE => st.hover = inside,
+            IN_DOWN => {
+                st.press = inside;
+                if inside {
+                    st.clicks = st.clicks.wrapping_add(1);
+                }
+            }
+            IN_UP => st.press = false,
+            IN_LEAVE => {
+                st.hover = false;
+                st.press = false;
+            }
+            _ => {}
+        }
+        // Repaint only when the visible state actually changed.
+        if st.hover != before.hover || st.press != before.press || st.clicks != before.clicks {
+            btn = render_window(px, &font, id, st);
+        }
     }
 
     libdunit::handle_close(buf);
-    libdunit::exit(if ok { 0 } else { 6 })
+    libdunit::exit(0)
 }
 

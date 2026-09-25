@@ -551,6 +551,28 @@ fn drive_damage(
 /// which begins with the DGUI wire magic). Shared with `gui_client`.
 const CTRL_MAGIC: u32 = 0x3150_4143; // "CAP1"
 
+// Compositor -> client input control messages (20 bytes). Distinct magic from
+// CTRL_MAGIC and the DGUI wire magic so the client can tell them apart. Coords
+// are client-local (relative to the surface origin). Kept deliberately simple:
+// the focused window is the sole recipient, so no per-message routing id.
+const INPUT_MAGIC: u32 = 0x3150_4E49; // "INP1"
+const IN_MOVE: u8 = 1;
+const IN_DOWN: u8 = 2;
+const IN_UP: u8 = 3;
+const IN_LEAVE: u8 = 4;
+const IN_QUIT: u8 = 9;
+
+/// Send one input control message to a client.
+fn send_input(pid: u32, kind: u8, lx: i32, ly: i32, button: u32) {
+    let mut msg = [0u8; 20];
+    msg[0..4].copy_from_slice(&INPUT_MAGIC.to_le_bytes());
+    msg[4] = kind;
+    msg[8..12].copy_from_slice(&lx.to_le_bytes());
+    msg[12..16].copy_from_slice(&ly.to_le_bytes());
+    msg[16..20].copy_from_slice(&button.to_le_bytes());
+    libdunit::ipc_send(pid, &msg);
+}
+
 /// Per-client compositing state held by the multi-client server loop.
 #[derive(Clone, Copy)]
 struct ClientState {
@@ -857,6 +879,7 @@ fn draw_cursor(buf: &mut [u32], bw: usize, bh: usize, px: i32, py: i32) {
 /// Per-window compositor state, derived from a `ClientState` but with a live
 /// content origin the user can drag around.
 struct Win {
+    pid: u32,
     cx: i32,
     cy: i32,
     sw: i32,
@@ -878,6 +901,10 @@ impl Win {
     fn contains(&self, mx: i32, my: i32) -> bool {
         let (x, y, w, h) = self.outer();
         mx >= x && mx < x + w && my >= y && my < y + h
+    }
+    /// The client content region (below the title bar).
+    fn in_content(&self, mx: i32, my: i32) -> bool {
+        mx >= self.cx && mx < self.cx + self.sw && my >= self.cy && my < self.cy + self.sh
     }
     fn in_title(&self, mx: i32, my: i32) -> bool {
         mx >= self.cx && mx < self.cx + self.sw && my >= self.cy - TITLE_H && my < self.cy
@@ -930,6 +957,7 @@ fn run_desktop_session(clients: &mut [ClientState]) {
         }
         z.push(wins.len());
         wins.push(Win {
+            pid: c.pid,
             cx,
             cy,
             sw,
@@ -945,6 +973,10 @@ fn run_desktop_session(clients: &mut [ClientState]) {
     }
     let mut prev_left = false;
     let mut drag: Option<(usize, i32, i32)> = None; // (win index, off_x, off_y)
+    let mut pressed_win: Option<usize> = None; // window that captured the press
+    let mut input_focus: Option<usize> = None; // window under the pointer
+    let mut last_lx = i32::MIN;
+    let mut last_ly = i32::MIN;
     // Bounded so a headless run (mouse never moves) still terminates and lets
     // the harness force-quit; ~60000 * 16ms ≈ 16 min of interactive use.
     let mut ticks = 0u32;
@@ -953,9 +985,11 @@ fn run_desktop_session(clients: &mut [ClientState]) {
         let mx = m.x as i32;
         let my = m.y as i32;
         let left = m.left();
+        let press = left && !prev_left;
+        let release = !left && prev_left;
 
-        // --- Button press edge: focus / raise / drag / close ---
-        if left && !prev_left {
+        // --- Button press edge: focus / raise / drag / close / forward ---
+        if press {
             let mut hit: Option<usize> = None;
             let mut zi = z.len();
             while zi > 0 {
@@ -972,9 +1006,14 @@ fn run_desktop_session(clients: &mut [ClientState]) {
                 z.push(wi);
                 if wins[wi].in_close(mx, my) {
                     wins[wi].alive = false;
+                    send_input(wins[wi].pid, IN_QUIT, 0, 0, 0);
                     drag = None;
                 } else if wins[wi].in_title(mx, my) {
                     drag = Some((wi, mx - wins[wi].cx, my - wins[wi].cy));
+                } else if wins[wi].in_content(mx, my) {
+                    // Click landed on client content: forward it to the client.
+                    send_input(wins[wi].pid, IN_DOWN, mx - wins[wi].cx, my - wins[wi].cy, 0);
+                    pressed_win = Some(wi);
                 }
             }
         }
@@ -990,6 +1029,51 @@ fn run_desktop_session(clients: &mut [ClientState]) {
             ncy = ncy.max(TITLE_H + BORDER).min(bh as i32 - wins[wi].sh - BORDER);
             wins[wi].cx = ncx;
             wins[wi].cy = ncy;
+        }
+
+        // --- Pointer focus + motion routed to the topmost content window ---
+        let cur = if drag.is_some() {
+            None
+        } else {
+            let mut c = None;
+            let mut zi = z.len();
+            while zi > 0 {
+                zi -= 1;
+                let wi = z[zi];
+                if wins[wi].alive && wins[wi].in_content(mx, my) {
+                    c = Some(wi);
+                    break;
+                }
+            }
+            c
+        };
+        if cur != input_focus {
+            if let Some(old) = input_focus {
+                if wins[old].alive {
+                    send_input(wins[old].pid, IN_LEAVE, 0, 0, 0);
+                }
+            }
+            input_focus = cur;
+            last_lx = i32::MIN; // force the next motion to be delivered
+        }
+        if let Some(wi) = cur {
+            let lx = mx - wins[wi].cx;
+            let ly = my - wins[wi].cy;
+            if lx != last_lx || ly != last_ly {
+                send_input(wins[wi].pid, IN_MOVE, lx, ly, 0);
+                last_lx = lx;
+                last_ly = ly;
+            }
+        }
+
+        // --- Button release: deliver UP to the window that captured the press ---
+        if release {
+            if let Some(wi) = pressed_win {
+                if wins[wi].alive {
+                    send_input(wins[wi].pid, IN_UP, mx - wins[wi].cx, my - wins[wi].cy, 0);
+                }
+            }
+            pressed_win = None;
         }
         prev_left = left;
 
@@ -1065,5 +1149,11 @@ fn run_desktop_session(clients: &mut [ClientState]) {
         if ticks >= 60000 {
             break;
         }
+    }
+
+    // Session over: tell every client to exit its input loop so serve_two_clients
+    // can reap them (a QUIT to an already-exited pid is a harmless no-op).
+    for w in wins.iter() {
+        send_input(w.pid, IN_QUIT, 0, 0, 0);
     }
 }
