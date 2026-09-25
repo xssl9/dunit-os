@@ -48,12 +48,12 @@ M7: E1000 -> netd -> IPv4/UDP/TCP/DHCP/DNS -> native sockets
 
 → [[Tasks/Future/GUI-Architecture|GUI Server Architecture]]
 
-- [ ] Versioned binary GUI protocol и headless conformance tests.
-- [ ] Userspace `gui-server` с exclusive display/input master handles.
-- [ ] Shared client surfaces, software compositor, damage/focus/input routing.
-- [ ] Независимый Dunit DWM поверх GUI Server.
-- [ ] DUI markup, DSS styles/motion, TOML settings.
-- [ ] Убрать hardcoded desktop geometry/colors/apps из kernel.
+- [x] Versioned binary GUI protocol и headless conformance tests.
+- [x] Userspace `gui-server` с exclusive display/input master handles.
+- [x] Shared client surfaces, software compositor, damage/focus/input routing.
+- [~] Независимый Dunit DWM поверх GUI Server. Есть интерактивный компоситор (draggable окна, focus/raise/drag/close, роутинг ввода в фокус) + верхняя панель/таскбар + часы; осталось: спавн произвольных приложений из launcher, dock, quick settings, notifications, workspaces, switcher.
+- [~] DUI markup, DSS styles/motion, TOML settings. DUI/DSS/motion/widgets/render/text готовы (крейты `runtime/`, работают в `gui_client`); TOML settings ещё нет.
+- [~] Убрать hardcoded desktop geometry/colors/apps из kernel. Boot с `--no-default-features` (`limine_dwm.conf`) автозапускает userspace `gui_server` как десктоп; legacy kernel-GUI ещё под feature-гейтом, не удалён.
 - [ ] После feature parity удалить legacy `ui_loop`/kernel WM из normal GUI boot.
 
 ## M5 — normal installed system

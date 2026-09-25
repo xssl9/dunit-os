@@ -26,7 +26,7 @@ Dunit OS уже является ранним вертикальным прот�
 | Installer / GPT | PARTIAL | BIOS/UEFI disk image и boot path работают; root всё ещё embedded MemFS |
 | Terminal Mode | WORKING | kernel recovery shell, VFS commands, userspace exec |
 | GUI Mode | FUNCTIONAL LEGACY | desktop/terminal/apps работают; compositor/DWM/layout находятся в kernel-centric implementation |
-| GUI Server / DWM | PLANNED REWRITE | userspace architecture и protocol описаны, но не интегрированы |
+| GUI Server / DWM | INTEGRATED, PARTIAL | userspace `gui_server` компоузит untrusted-клиентов по gui-v1, автозапускается как десктоп (`limine_dwm.conf`); есть draggable окна + панель/таскбар + часы; осталось parity (launcher-спавн приложений, dock, quick settings, notifications, workspaces, switcher, TOML settings) |
 | Input | PARTIAL | PS/2 path работает; xHCI foundation без полной enumeration/HID transfers |
 | Networking | DISCOVERY ONLY | E1000 MMIO/MAC probe; нет RX/TX, Ethernet/IP/TCP/socket API |
 | libc | PLANNED | primary target — full Dunit musl fork, static-first |
@@ -56,7 +56,7 @@ Dunit OS уже является ранним вертикальным прот�
 
 1. [[Tasks/InProgress/Kernel-Runtime-Prerequisites|Preemption, threads, blocking events, shared VM and rights-bearing handles]].
 2. GUI protocol/headless tests параллельно kernel runtime.
-3. Userspace GUI Server vertical slice; затем config-driven Dunit DWM.
+3. [DONE/В РАБОТЕ] Userspace GUI Server vertical slice готов (компоузит untrusted-клиентов, автозапуск как десктоп, интерактивные окна + панель); идёт достижение DWM parity и config-driven Dunit DWM.
 4. [[Tasks/Future/Installed-System|Disk-root init, transactional install and first boot]].
 5. [[Tasks/Future/Filesystem|Recoverable DunitFS v2 and persistence matrix]].
 6. [[Tasks/Future/Libc-Musl|Static-first Dunit musl fork]].
