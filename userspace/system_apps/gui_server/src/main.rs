@@ -214,9 +214,9 @@ pub extern "C" fn _start() -> ! {
     //    We map each transferred buffer read-only, run its requests through a
     //    per-client Server connection, and composite both surfaces to the
     //    framebuffer at separate slots. Neither client holds display/input.
-    if serve_two_clients() {
-        libdunit::println("gui_server: served two untrusted clients OK");
-    } else {
+    // serve_two_clients() emits "served two untrusted clients OK" itself (right
+    // before it holds the composited frame on screen); only report failure here.
+    if !serve_two_clients() {
         libdunit::println("gui_server: FAIL serving clients");
     }
 
@@ -713,6 +713,41 @@ fn serve_two_clients() -> bool {
     }
 
     let both = clients[0].presented && clients[1].presented;
+
+    // Both untrusted windows are now blitted to the framebuffer at their slots,
+    // and those blits are the last thing written to the display. Linger here —
+    // before any further terminal text repaints over them — so the composited
+    // frame is actually visible on screen (and can be screenshotted). A real
+    // compositor loops forever; this demo just holds the frame, then tears down.
+    if both {
+        // Emit the success marker BEFORE holding the frame, so automated smokes
+        // observe it without waiting out the hold. Then re-present both windows
+        // repeatedly for a few seconds: the kernel terminal draws to the same
+        // framebuffer, so a one-shot blit gets clobbered; refreshing keeps the
+        // composited frame on screen long enough to actually see (and capture).
+        libdunit::println("gui_server: served two untrusted clients OK");
+        // Hold the composited frame: re-present continuously (the kernel terminal
+        // shares this framebuffer, so a one-shot blit gets clobbered) until a key
+        // is pressed, capped so headless runs can't wedge. This is what makes the
+        // windows actually visible in an interactive session.
+        for _ in 0..1200 {
+            for c in clients.iter() {
+                if c.buf_ptr.is_null() || c.surf_w == 0 || c.surf_h == 0 {
+                    continue;
+                }
+                let want = c.surf_w as u64 * c.surf_h as u64 * 4;
+                if want <= c.buf_size as u64 {
+                    let data = unsafe { core::slice::from_raw_parts(c.buf_ptr, want as usize) };
+                    libdunit::fb_present(data, c.surf_w, c.surf_h, c.slot_x, c.slot_y);
+                }
+            }
+            if libdunit::get_key().is_some() {
+                break;
+            }
+            libdunit::sleep_ms(100);
+        }
+    }
+
     for c in clients.iter() {
         if c.mapped_handle != 0 {
             libdunit::handle_close(c.mapped_handle);

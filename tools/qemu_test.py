@@ -366,8 +366,9 @@ def build_qemu_command(image: Path, is_disk: bool, accel: str, mem: str,
     if display != "none":
         # Interactive session: give the guest a smooth absolute pointer so the
         # user can click around without pointer-capture warping. Keyboard is the
-        # default i8042 the kernel already drives.
-        cmd += ["-device", "usb-tablet"]
+        # default i8042 the kernel already drives. q35 has no USB by default, so
+        # add an xHCI controller for the tablet to attach to.
+        cmd += ["-device", "qemu-xhci", "-device", "usb-tablet"]
 
     if is_disk:
         cmd += ["-drive", f"file={image},format=raw,if=ide", "-boot", "c"]
