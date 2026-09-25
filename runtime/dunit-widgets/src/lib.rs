@@ -33,5 +33,5 @@ pub mod state;
 
 pub use event::{event_path, focus_next, focus_order, focus_prev, hit_test, Event, Key};
 pub use kind::Widget;
-pub use measure::{intrinsic_size, TextMeasure};
+pub use measure::{intrinsic_size, FontMeasure, TextMeasure};
 pub use state::{Interaction, WidgetValue};

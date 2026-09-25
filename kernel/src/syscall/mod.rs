@@ -350,6 +350,15 @@ fn validate_user_range(ptr: u64, size: usize) -> Result<(), i64> {
 
 fn validate_user_mapping(ptr: u64, size: usize, writable: bool) -> Result<(), i64> {
     validate_user_range(ptr, size)?;
+    validate_user_pages(ptr, size, writable)
+}
+
+/// Verify every page spanned by `[ptr, ptr+size)` is present, user-accessible
+/// and (optionally) writable. Unlike [`validate_user_mapping`] this does NOT
+/// impose the small [`MAX_USER_COPY`] cap, so it suits large bulk transfers
+/// (e.g. `fb_present`) whose own upper bound is enforced by the caller. The
+/// caller MUST still range-check the pointer (see [`is_valid_user_pointer`]).
+fn validate_user_pages(ptr: u64, size: usize, writable: bool) -> Result<(), i64> {
     if size == 0 {
         return Ok(());
     }
@@ -462,6 +471,37 @@ pub fn copy_buffer_from_user(ptr: *const u8, len: usize) -> Result<Vec<u8>, i64>
     }
 
     validate_user_mapping(ptr as u64, len, false)?;
+
+    let mut out = Vec::new();
+    out.reserve(len);
+    for offset in 0..len {
+        let byte = unsafe { core::ptr::read_volatile(ptr.add(offset)) };
+        out.push(byte);
+    }
+
+    Ok(out)
+}
+
+/// Like [`copy_buffer_from_user`] but for bulk transfers larger than
+/// [`MAX_USER_COPY`]. The caller supplies its own `max` upper bound (fb_present
+/// caps at the framebuffer size); the source pages are still fully validated as
+/// present + user-readable, only the small generic cap is lifted.
+pub fn copy_buffer_from_user_bounded(
+    ptr: *const u8,
+    len: usize,
+    max: usize,
+) -> Result<Vec<u8>, i64> {
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    if len > max {
+        syscall_log!("[SYSCALL] bounded user copy too large: len={}, max={}\r\n", len, max);
+        return Err(EINVAL);
+    }
+    if !is_valid_user_pointer(ptr as u64, len) {
+        return Err(EFAULT);
+    }
+    validate_user_pages(ptr as u64, len, false)?;
 
     let mut out = Vec::new();
     out.reserve(len);
@@ -1514,13 +1554,16 @@ fn sys_fb_present(src: *const u8, width: u32, height: u32, dst_x: u32, dst_y: u3
     let Some(bytes) = w.checked_mul(h).and_then(|px| px.checked_mul(4)) else {
         return EINVAL;
     };
-    if bytes == 0 || bytes > 64 * 1024 * 1024 {
+    const MAX_FB_PRESENT: usize = 64 * 1024 * 1024;
+    if bytes == 0 || bytes > MAX_FB_PRESENT {
         return EINVAL;
     }
     if !is_valid_user_pointer(src as u64, bytes) {
         return EFAULT;
     }
-    let data = match copy_buffer_from_user(src, bytes) {
+    // The generic MAX_USER_COPY (64 KiB) cap is far below a real window's pixel
+    // buffer, so use the bounded copy with the framebuffer-scale limit above.
+    let data = match copy_buffer_from_user_bounded(src, bytes, MAX_FB_PRESENT) {
         Ok(data) => data,
         Err(error) => return error,
     };

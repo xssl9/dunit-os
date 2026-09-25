@@ -13,6 +13,11 @@ edition = "2021"
 [dependencies]
 libdunit = { path = "../../libdunit" }
 gui_protocol_v1 = { path = "../../../protocols/gui-v1" }
+dunit_ui = { path = "../../../runtime/dunit-ui" }
+dunit_style = { path = "../../../runtime/dunit-style" }
+dunit_text = { path = "../../../runtime/dunit-text" }
+dunit_widgets = { path = "../../../runtime/dunit-widgets" }
+dunit_render = { path = "../../../runtime/dunit-render" }
 
 [[bin]]
 name = "gui_client"

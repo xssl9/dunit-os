@@ -16,15 +16,28 @@ extern crate alloc;
 
 use gui_protocol_v1::wire::{Request, FEATURE_ARGB8888};
 
+use dunit_render::{paint, Surface};
+use dunit_style::cascade::{Cascade, NodeStyle};
+use dunit_style::parse as parse_dss;
+use dunit_text::Font;
+use dunit_ui::layout::layout_measured;
+use dunit_ui::parse as parse_dui;
+use dunit_ui::tree::{Kind, NodeId};
+use dunit_widgets::{intrinsic_size, FontMeasure, Widget};
+
 /// Control-message magic distinguishing a capability announce from a protocol
 /// packet (protocol packets begin with the DGUI wire magic instead). Shared
 /// with the compositor.
 const CTRL_MAGIC: u32 = 0x3150_4143; // "CAP1"
 const SURFACE: u64 = 1;
 const BUFFER: u64 = 2;
-const W: u32 = 48;
-const H: u32 = 48;
+const W: u32 = 240;
+const H: u32 = 120;
 const FMT_XRGB8888: u32 = 1;
+
+/// The window's text font, embedded in the ELF (M4 still ships assets in-image;
+/// M5 moves them to the disk root).
+static FONT_BYTES: &[u8] = include_bytes!("../../../../assets/fonts/DejaVuSans.ttf");
 
 #[panic_handler]
 fn panic(_: &PanicInfo) -> ! {
@@ -48,6 +61,74 @@ fn send_env(dst: u32, _id: u32, payload: &[u8]) {
 
 // APPEND_MARKER
 
+/// Paint a small DUI window (title + button) into the mapped ARGB8888 buffer at
+/// `px`, using the full UI Runtime: DUI tree -> DSS cascade -> content-measured
+/// layout -> dunit-render painter, with real TTF text. `id` tints the accent so
+/// the two concurrent client windows read as distinct on screen.
+fn render_window(px: *mut u8, id: u32) {
+    let font = match Font::parse(FONT_BYTES.to_vec()) {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+
+    let dui = if id == 1 {
+        r#"Column#win { Text#title "Dunit" Text#sub "green tea" Button#ok "OK" }"#
+    } else {
+        r#"Column#win { Text#title "Window 2" Text#sub "runtime demo" Button#ok "Close" }"#
+    };
+    let tree = match parse_dui(dui) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+
+    // Green Tea dark (mono) reference theme; client 2 shifts its accent hue.
+    let accent = if id == 1 { "#a6e3a1" } else { "#94e2d5" };
+    let mut dss = alloc::string::String::new();
+    dss.push_str("Column#win { background: #1b1b1b; padding: 12; }\n");
+    dss.push_str("Text { color: #cdd6f4; font-size: 18; padding: 2; }\n");
+    dss.push_str("Text#sub { color: ");
+    dss.push_str(accent);
+    dss.push_str("; font-size: 13; }\n");
+    dss.push_str("Button { background: #2e2e2e; color: ");
+    dss.push_str(accent);
+    dss.push_str("; border-width: 1; border-color: #45475a; font-size: 15; padding: 6; }\n");
+    let sheet = match parse_dss(&dss) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let mut cas = Cascade::new();
+    cas.push(sheet);
+
+    // Resolve a node's cascaded style from its element tag (+ id).
+    let style_of = |nid: NodeId| {
+        let node = tree.node(nid);
+        let tag = node.kind.tag();
+        let ns = match node.name.as_deref() {
+            Some(name) => NodeStyle { element: tag, id: Some(name), classes: &[], states: &[] },
+            None => NodeStyle::element(tag),
+        };
+        cas.resolve(&ns)
+    };
+
+    // Measure element leaves against their real content (widget intrinsic size).
+    let fm = FontMeasure { font: &font };
+    let measure_fn = |nid: NodeId| {
+        let node = tree.node(nid);
+        if let Kind::Element(tag) = &node.kind {
+            if let Some(w) = Widget::from_tag(tag) {
+                return intrinsic_size(w, node.text.as_deref(), &style_of(nid), &fm);
+            }
+        }
+        (0.0, 0.0)
+    };
+    let lay = layout_measured(&tree, W as f32, H as f32, &measure_fn);
+
+    let pixels = unsafe { core::slice::from_raw_parts_mut(px as *mut u32, (W * H) as usize) };
+    let mut surface = Surface::new(pixels, W as usize, H as usize);
+    paint(&tree, &lay, &style_of, &font, &mut surface);
+}
+
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     // 1) Learn the compositor's pid and our client id (sent right after spawn).
@@ -59,8 +140,9 @@ pub extern "C" fn _start() -> ! {
     let compositor = u32::from_le_bytes([m[0], m[1], m[2], m[3]]);
     let id = u32::from_le_bytes([m[4], m[5], m[6], m[7]]);
 
-    // 2) Render into our own kernel shared buffer (a solid surface tinted by id
-    //    so the two concurrent clients are visually distinct on screen).
+    // 2) Render our window into our own kernel shared buffer via the M4 UI
+    //    Runtime (DUI + DSS + TTF text), painted by dunit-render. The buffer is
+    //    XRGB8888 little-endian, i.e. 0xAARRGGBB per u32 — the painter's format.
     let bytes = (W * H * 4) as usize;
     let buf = libdunit::handle_create_shared(bytes);
     if buf <= 0 {
@@ -74,16 +156,7 @@ pub extern "C" fn _start() -> ! {
         libdunit::exit(3);
     }
     let px = mapped as usize as *mut u8;
-    let (r, g, b) = if id == 1 { (0x30, 0xC0, 0x20) } else { (0xE0, 0x60, 0x20) };
-    unsafe {
-        for i in 0..(W * H) as usize {
-            let o = i * 4;
-            core::ptr::write_volatile(px.add(o), b);
-            core::ptr::write_volatile(px.add(o + 1), g);
-            core::ptr::write_volatile(px.add(o + 2), r);
-            core::ptr::write_volatile(px.add(o + 3), 0xff);
-        }
-    }
+    render_window(px, id);
 
     let mut rx = [0u8; 256];
 
