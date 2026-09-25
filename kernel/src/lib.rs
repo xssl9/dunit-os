@@ -1200,7 +1200,26 @@ pub extern "C" fn kernel_main(
         #[cfg(not(feature = "legacy_gui"))]
         {
             let _ = (fb_addr, width, height, pitch);
-            serial_write("[GUI] legacy_gui disabled; desktop served by userspace gui_server\r\n");
+            // Userspace desktop: launch /app/gui_server as the compositor. It owns
+            // the display/input master, spawns its clients, and runs the desktop
+            // session forever. run_foreground_exec drives the scheduler (its
+            // enter_user_process loop) so gui_server and every child it spawns get
+            // CPU via PIT preemption — this is the M4 userspace DWM as the desktop,
+            // replacing the in-kernel legacy_gui loop.
+            serial_write("[GUI] launching userspace gui_server desktop\r\n");
+            let mut input = command::NoExecInput;
+            match command::run_foreground_exec(
+                "/",
+                "gui_server",
+                process::ProcessOutputSink::SerialOnly,
+                &mut input,
+            ) {
+                Ok((_path, _exit)) => {
+                    serial_write("[GUI] gui_server desktop exited\r\n");
+                }
+                Err(_) => serial_write("[GUI] gui_server failed to launch\r\n"),
+            }
+            // The desktop server should not return; idle if it ever does.
             loop {
                 unsafe {
                     core::arch::asm!("hlt");

@@ -1,4 +1,4 @@
-.PHONY: all clean hal kernel userspace iso disk-image run run-gui
+.PHONY: all clean hal kernel userspace iso disk-image run run-gui run-dwm iso-dwm
 
 CC = gcc
 AS = nasm
@@ -33,6 +33,11 @@ USERSPACE_CARGO_FLAGS = --release --target ../../../userspace/x86_64-unknown-non
 KERNEL_FEATURES =
 ifneq ($(filter limine_test_terminal.conf limine_test_gui.conf,$(notdir $(LIMINE_CONFIG))),)
 KERNEL_FEATURES = --features boot-smoke-tests
+endif
+# The userspace-DWM config boots straight into /app/gui_server as the desktop,
+# so build the kernel with the in-kernel legacy_gui desktop excluded.
+ifeq ($(notdir $(LIMINE_CONFIG)),limine_dwm.conf)
+KERNEL_FEATURES = --no-default-features
 endif
 
 HAL_OBJS = $(BUILD_DIR)/boot.o $(BUILD_DIR)/boot_main.o $(BUILD_DIR)/limine.o $(BUILD_DIR)/hal.o $(BUILD_DIR)/ports.o \
@@ -146,6 +151,9 @@ iso-test-terminal:
 iso-test-gui:
 	$(MAKE) iso LIMINE_CONFIG=limine_test_gui.conf
 
+iso-dwm:
+	$(MAKE) iso LIMINE_CONFIG=limine_dwm.conf
+
 disk-image: all userspace
 	python3 tools/install_disk.py $(BUILD_DIR)/dunit-disk.img --no-build --yes-i-know-this-erases-the-disk
 
@@ -161,6 +169,9 @@ run: iso
 	$(QEMU) $(QEMU_ACCEL) $(QEMU_EXTRA) -boot d -cdrom $(BUILD_DIR)/microkernel.iso -m $(QEMU_MEM) -serial stdio -display $(QEMU_DISPLAY) $(QEMU_VGA) $(QEMU_USB_INPUT) -boot menu=on
 
 run-gui: iso-test-gui
+	$(QEMU) $(QEMU_ACCEL) $(QEMU_EXTRA) -boot d -cdrom $(BUILD_DIR)/microkernel.iso -m $(QEMU_MEM) -serial stdio -display $(QEMU_DISPLAY) $(QEMU_VGA) $(QEMU_USB_INPUT) -boot menu=on
+
+run-dwm: iso-dwm
 	$(QEMU) $(QEMU_ACCEL) $(QEMU_EXTRA) -boot d -cdrom $(BUILD_DIR)/microkernel.iso -m $(QEMU_MEM) -serial stdio -display $(QEMU_DISPLAY) $(QEMU_VGA) $(QEMU_USB_INPUT) -boot menu=on
 
 run-terminal: iso
