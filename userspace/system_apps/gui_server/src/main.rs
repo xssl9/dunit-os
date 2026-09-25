@@ -727,10 +727,13 @@ fn serve_two_clients() -> bool {
         // composited frame on screen long enough to actually see (and capture).
         libdunit::println("gui_server: served two untrusted clients OK");
         // Hold the composited frame: re-present continuously (the kernel terminal
-        // shares this framebuffer, so a one-shot blit gets clobbered) until a key
-        // is pressed, capped so headless runs can't wedge. This is what makes the
-        // windows actually visible in an interactive session.
-        for _ in 0..1200 {
+        // shares this framebuffer, so a one-shot blit gets clobbered) for the whole
+        // session. We deliberately do NOT break on a keypress: the composited
+        // windows must stay on screen while the user pokes the system — an
+        // interactive session ends by closing the QEMU window, not a keystroke. The
+        // cap only bounds headless smokes so they can't wedge (they force-quit after
+        // the screenshot long before it is reached).
+        for _ in 0..6000 {
             for c in clients.iter() {
                 if c.buf_ptr.is_null() || c.surf_w == 0 || c.surf_h == 0 {
                     continue;
@@ -740,9 +743,6 @@ fn serve_two_clients() -> bool {
                     let data = unsafe { core::slice::from_raw_parts(c.buf_ptr, want as usize) };
                     libdunit::fb_present(data, c.surf_w, c.surf_h, c.slot_x, c.slot_y);
                 }
-            }
-            if libdunit::get_key().is_some() {
-                break;
             }
             libdunit::sleep_ms(100);
         }
