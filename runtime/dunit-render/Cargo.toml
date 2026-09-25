@@ -1,0 +1,23 @@
+# Dunit Render — the CPU painter of the UI Runtime (M4 slice 5). It is the
+# bridge between the runtime (which computes layout, resolves DSS styles and
+# rasterizes glyphs) and raw pixels: given a laid-out DUI tree, a per-node
+# style resolver and a font, it paints backgrounds, borders and text into an
+# ARGB8888 surface — the same `u32` buffer format the gui-v1 compositor blits.
+# Pure `no_std + alloc`; the only dependencies are the sibling runtime crates.
+[package]
+name = "dunit_render"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "dunit_render"
+path = "src/lib.rs"
+
+[dependencies]
+dunit_ui = { path = "../dunit-ui" }
+dunit_style = { path = "../dunit-style" }
+dunit_text = { path = "../dunit-text" }
+
+[profile.release]
+panic = "abort"
+lto = true
