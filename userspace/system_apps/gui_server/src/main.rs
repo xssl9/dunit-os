@@ -770,6 +770,13 @@ fn serve_two_clients() -> bool {
         // Emit the success marker BEFORE the session loop so automated smokes
         // observe it immediately (headless runs are force-quit after capture).
         libdunit::println("gui_server: served two untrusted clients OK");
+        // Bring up the Stack B terminal as a runtime-pumped startup window so the
+        // desktop has an interactive shell out of the box and the full keyboard
+        // path (compositor -> IN_KEY -> gui_terminal -> pty -> dsh) is exercised
+        // end to end. Best-effort: if it fails to spawn the desktop still runs.
+        if let Some(term) = spawn_client(&mut server, 3, 360, 340, "gui_terminal") {
+            clients.push(term);
+        }
         run_desktop_session(&mut server, &mut clients);
     }
 
@@ -927,11 +934,12 @@ const TASKBTN_GAP: i32 = 4;
 const MAX_WINDOWS: usize = 8;
 
 /// Launcher menu: label shown in the dropdown paired with the ELF to spawn.
-const LAUNCH_APPS: [(&[u8], &str); 4] = [
+const LAUNCH_APPS: [(&[u8], &str); 5] = [
     (b"WIN", "gui_client"),
     (b"CALC", "gui_calc"),
     (b"STAT", "gui_stat"),
     (b"FILE", "gui_files"),
+    (b"TERM", "gui_terminal"),
 ];
 
 const MENU_W: i32 = 130;
@@ -980,6 +988,8 @@ fn glyph_3x5(c: u8) -> Option<[u8; 5]> {
         b'T' => [7, 2, 2, 2, 2],
         b'F' => [7, 4, 6, 4, 4],
         b'E' => [7, 4, 6, 4, 7],
+        b'R' => [6, 5, 6, 5, 5],
+        b'M' => [5, 7, 7, 5, 5],
         _ => return None,
     })
 }
@@ -1167,6 +1177,11 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     if wins.is_empty() {
         return;
     }
+    // Windows present at session start (the smoke's two gui_clients). The
+    // keyboard-ready marker waits until a *runtime*-pumped window appears and
+    // takes focus — i.e. the startup gui_terminal — so headless keystroke
+    // injection lands in the terminal (topmost) rather than a static client.
+    let initial_wins = wins.len();
     let mut prev_left = false;
     let mut drag: Option<(usize, i32, i32)> = None; // (win index, off_x, off_y)
     let mut pressed_win: Option<usize> = None; // window that captured the press
@@ -1369,7 +1384,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         // byte is forwarded to the topmost live window as an IN_KEY event (the
         // byte travels in the `button` field). Keyboard focus follows the
         // z-order top, matching how the taskbar/raise model already works.
-        if focused.is_some() && !input_ready_announced {
+        if focused.is_some() && wins.len() > initial_wins && !input_ready_announced {
             libdunit::println("gui_server: desktop input ready");
             input_ready_announced = true;
         }

@@ -1,0 +1,17 @@
+# Minimal PTY-slave shell for the M4 userspace terminal (Stack B).
+#
+# Spawned by `gui_terminal` via `pty_spawn`, so its stdin/stdout are wired to
+# the pty rings instead of the console. It echoes typed bytes back (cooked-style
+# line editing) so the terminal shows input, and runs a small set of builtins on
+# each newline — the interactive shell behind the userspace terminal window.
+[package]
+name = "dsh"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libdunit = { path = "../../libdunit" }
+
+[[bin]]
+name = "dsh"
+path = "src/main.rs"

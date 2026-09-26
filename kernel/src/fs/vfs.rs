@@ -57,6 +57,8 @@ static GUI_STAT_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_stat
 static GUI_FILES_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_files");
 static PTY_ECHO_BYTES: &[u8] = include_bytes!("../../../build/userspace/pty_echo");
 static PTY_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/pty_test");
+static DSH_BYTES: &[u8] = include_bytes!("../../../build/userspace/dsh");
+static GUI_TERMINAL_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_terminal");
 
 pub struct AssetEntry {
     pub path: &'static str,
@@ -685,6 +687,8 @@ pub fn init() -> Result<()> {
         (*ROOT_MEMFS.0.get()).add_file("/app/gui_files", GUI_FILES_BYTES.to_vec());
         (*ROOT_MEMFS.0.get()).add_file("/app/pty_echo", PTY_ECHO_BYTES.to_vec());
         (*ROOT_MEMFS.0.get()).add_file("/app/pty_test", PTY_TEST_BYTES.to_vec());
+        (*ROOT_MEMFS.0.get()).add_file("/app/dsh", DSH_BYTES.to_vec());
+        (*ROOT_MEMFS.0.get()).add_file("/app/gui_terminal", GUI_TERMINAL_BYTES.to_vec());
 
         vfs.mount("/", &mut *ROOT_MEMFS.0.get())?;
         serial_log("[MEMFS] mounted as /\r\n");
