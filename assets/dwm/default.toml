@@ -22,3 +22,17 @@ taskbtn          = "#313244"
 taskbtn_focused  = "#45475A"
 menu             = "#11111B"
 menu_hover       = "#45475A"
+
+# Compositor geometry, in pixels. `max_windows` is a safety cap on how many
+# client windows may be composited at once, not a pixel count. Non-numeric
+# values are ignored and keep the built-in baseline.
+[layout]
+title_h          = 26
+border           = 2
+panel_h          = 28
+launcher_w       = 40
+taskbtn_w        = 120
+taskbtn_gap      = 4
+menu_w           = 130
+menu_item_h      = 26
+max_windows      = 8

@@ -24,7 +24,7 @@ use gui_protocol_v1::wire::Request;
 use gui_protocol_v1::Opcode;
 
 mod settings;
-use settings::Theme;
+use settings::{Layout, Theme};
 
 #[panic_handler]
 fn panic(_: &PanicInfo) -> ! {
@@ -810,11 +810,9 @@ fn serve_two_clients() -> bool {
 // through. Client *content* is still static here — reacting to input inside a
 // window (button hover/press) is the next slice.
 
-const TITLE_H: i32 = 26;
-const BORDER: i32 = 2;
-
-// Compositor colors now live in `settings::Theme` (loaded from TOML at desktop
-// start), so the palette constants that used to sit here are gone.
+// Window decoration geometry (title-bar height, border) now lives in
+// `settings::Layout`, loaded from the `[layout]` TOML table at desktop start.
+// Each `Win` carries its own `title_h`/`border` so its methods stay parameter-free.
 
 /// Fill an axis-aligned rectangle in the back buffer, clipped to its bounds.
 fn fill_rect(buf: &mut [u32], bw: usize, bh: usize, x: i32, y: i32, w: i32, h: i32, color: u32) {
@@ -917,15 +915,9 @@ fn draw_cursor(buf: &mut [u32], bw: usize, bh: usize, px: i32, py: i32) {
 // pointer input over the panel is consumed by the shell, never forwarded to a
 // client.
 
-const PANEL_H: i32 = 28;
-
-const LAUNCHER_W: i32 = 40;
-const TASKBTN_W: i32 = 120;
-const TASKBTN_GAP: i32 = 4;
-
-/// Upper bound on concurrently composited client windows. Caps launcher spawns
-/// so a stuck loop cannot fork the machine to death.
-const MAX_WINDOWS: usize = 8;
+// Panel/launcher/taskbar/menu geometry now lives in `settings::Layout` (loaded
+// from the `[layout]` TOML table); `max_windows` there also caps launcher spawns
+// so a stuck loop cannot fork the machine to death.
 
 /// Launcher menu: label shown in the dropdown paired with the ELF to spawn.
 const LAUNCH_APPS: [(&[u8], &str); 5] = [
@@ -936,20 +928,17 @@ const LAUNCH_APPS: [(&[u8], &str); 5] = [
     (b"TERM", "gui_terminal"),
 ];
 
-const MENU_W: i32 = 130;
-const MENU_ITEM_H: i32 = 26;
-
 /// Rect of the i-th launcher-menu entry (0-based), dropped below the launcher.
-fn menu_item_rect(i: i32) -> (i32, i32, i32, i32) {
-    (0, PANEL_H + i * MENU_ITEM_H, MENU_W, MENU_ITEM_H)
+fn menu_item_rect(ly: &Layout, i: i32) -> (i32, i32, i32, i32) {
+    (0, ly.panel_h + i * ly.menu_item_h, ly.menu_w, ly.menu_item_h)
 }
 
 /// Rect of the i-th taskbar button (0-based), laid out left-to-right after the
 /// launcher. Independent of window state so hit-testing and drawing agree.
-fn taskbtn_rect(i: i32) -> (i32, i32, i32, i32) {
-    let x = LAUNCHER_W + TASKBTN_GAP + i * (TASKBTN_W + TASKBTN_GAP);
+fn taskbtn_rect(ly: &Layout, i: i32) -> (i32, i32, i32, i32) {
+    let x = ly.launcher_w + ly.taskbtn_gap + i * (ly.taskbtn_w + ly.taskbtn_gap);
     let y = 3;
-    (x, y, TASKBTN_W, PANEL_H - 6)
+    (x, y, ly.taskbtn_w, ly.panel_h - 6)
 }
 
 // A 3x5 bitmap font, just digits and ':' — enough for window numbers and a
@@ -1041,15 +1030,19 @@ struct Win {
     buf_ptr: *const u8,
     buf_size: usize,
     alive: bool,
+    /// Decoration geometry copied from the resolved `[layout]` config so each
+    /// window's hit-tests and framing stay self-contained.
+    title_h: i32,
+    border: i32,
 }
 
 impl Win {
     /// Full outer rect (border + title bar + content) in screen space.
     fn outer(&self) -> (i32, i32, i32, i32) {
-        let x = self.cx - BORDER;
-        let y = self.cy - TITLE_H - BORDER;
-        let w = self.sw + 2 * BORDER;
-        let h = self.sh + TITLE_H + 2 * BORDER;
+        let x = self.cx - self.border;
+        let y = self.cy - self.title_h - self.border;
+        let w = self.sw + 2 * self.border;
+        let h = self.sh + self.title_h + 2 * self.border;
         (x, y, w, h)
     }
     fn contains(&self, mx: i32, my: i32) -> bool {
@@ -1061,13 +1054,13 @@ impl Win {
         mx >= self.cx && mx < self.cx + self.sw && my >= self.cy && my < self.cy + self.sh
     }
     fn in_title(&self, mx: i32, my: i32) -> bool {
-        mx >= self.cx && mx < self.cx + self.sw && my >= self.cy - TITLE_H && my < self.cy
+        mx >= self.cx && mx < self.cx + self.sw && my >= self.cy - self.title_h && my < self.cy
     }
     /// Close box: a small square at the right end of the title bar.
     fn in_close(&self, mx: i32, my: i32) -> bool {
-        let sz = TITLE_H - 12;
+        let sz = self.title_h - 12;
         let bx = self.cx + self.sw - sz - 6;
-        let by = self.cy - TITLE_H + 6;
+        let by = self.cy - self.title_h + 6;
         mx >= bx && mx < bx + sz && my >= by && my < by + sz
     }
 }
@@ -1129,6 +1122,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     // Green Tea baseline; a missing/garbage file keeps the baseline (last-known-good).
     let cfg = settings::load();
     let theme: Theme = cfg.theme;
+    let ly: Layout = cfg.layout;
     if cfg.from_file {
         libdunit::println("gui_server: settings loaded from /system/share/dwm/default.toml");
     } else {
@@ -1150,16 +1144,16 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         let sw = clients[i].surf_w as i32;
         let sh = clients[i].surf_h as i32;
         let mut cx = clients[i].slot_x as i32 + offset;
-        let mut cy = clients[i].slot_y as i32 + TITLE_H + BORDER + offset;
+        let mut cy = clients[i].slot_y as i32 + ly.title_h + ly.border + offset;
         // Keep the whole window (title bar included) below the reserved panel.
-        if cy - TITLE_H < PANEL_H + BORDER {
-            cy = PANEL_H + TITLE_H + BORDER;
+        if cy - ly.title_h < ly.panel_h + ly.border {
+            cy = ly.panel_h + ly.title_h + ly.border;
         }
-        if cx + sw + BORDER > bw as i32 {
-            cx = (bw as i32 - sw - BORDER).max(BORDER);
+        if cx + sw + ly.border > bw as i32 {
+            cx = (bw as i32 - sw - ly.border).max(ly.border);
         }
-        if cy + sh + BORDER > bh as i32 {
-            cy = (bh as i32 - sh - BORDER).max(PANEL_H + TITLE_H + BORDER);
+        if cy + sh + ly.border > bh as i32 {
+            cy = (bh as i32 - sh - ly.border).max(ly.panel_h + ly.title_h + ly.border);
         }
         z.push(wins.len());
         wins.push(Win {
@@ -1171,6 +1165,8 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             buf_ptr: clients[i].buf_ptr,
             buf_size: clients[i].buf_size,
             alive: true,
+            title_h: ly.title_h,
+            border: ly.border,
         });
         clients[i].ready = true;
         clients[i].win_created = true;
@@ -1194,7 +1190,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     // the harness force-quit; ~60000 * 16ms ≈ 16 min of interactive use.
     let mut ticks = 0u32;
     // Runtime app-launch: the launcher spawns fresh gui_client windows up to
-    // MAX_WINDOWS; `next_id` is the tint hint handed to each new client.
+    // `ly.max_windows`; `next_id` is the tint hint handed to each new client.
     let mut next_id = clients.len() as u32 + 1;
     // Launcher dropdown state. Toggled by the launcher glyph; any click either
     // selects a menu entry (spawn) or dismisses the menu.
@@ -1213,13 +1209,13 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             let sw = clients[i].surf_w as i32;
             let sh = clients[i].surf_h as i32;
             let step = (wins.len() as i32 % 6) * 40;
-            let mut cx = 90 + step + BORDER;
-            let mut cy = PANEL_H + TITLE_H + BORDER + step;
-            if cx + sw + BORDER > bw as i32 {
-                cx = (bw as i32 - sw - BORDER).max(BORDER);
+            let mut cx = 90 + step + ly.border;
+            let mut cy = ly.panel_h + ly.title_h + ly.border + step;
+            if cx + sw + ly.border > bw as i32 {
+                cx = (bw as i32 - sw - ly.border).max(ly.border);
             }
-            if cy + sh + BORDER > bh as i32 {
-                cy = (bh as i32 - sh - BORDER).max(PANEL_H + TITLE_H + BORDER);
+            if cy + sh + ly.border > bh as i32 {
+                cy = (bh as i32 - sh - ly.border).max(ly.panel_h + ly.title_h + ly.border);
             }
             let wi = wins.len();
             wins.push(Win {
@@ -1231,6 +1227,8 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 buf_ptr: clients[i].buf_ptr,
                 buf_size: clients[i].buf_size,
                 alive: true,
+                title_h: ly.title_h,
+                border: ly.border,
             });
             clients[i].win_created = true;
             z.push(wi);
@@ -1250,7 +1248,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             // and the click is consumed (never reaches a window).
             let mut chosen: Option<usize> = None;
             for i in 0..LAUNCH_APPS.len() {
-                let (ix, iy, iw, ih) = menu_item_rect(i as i32);
+                let (ix, iy, iw, ih) = menu_item_rect(&ly, i as i32);
                 if mx >= ix && mx < ix + iw && my >= iy && my < iy + ih {
                     chosen = Some(i);
                     break;
@@ -1258,18 +1256,18 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             }
             menu_open = false;
             if let Some(i) = chosen {
-                if clients.len() < MAX_WINDOWS {
+                if clients.len() < ly.max_windows {
                     if let Some(c) = spawn_client(server, next_id, 0, 0, LAUNCH_APPS[i].1) {
                         clients.push(c);
                         next_id += 1;
                     }
                 }
             }
-        } else if press && my < PANEL_H {
+        } else if press && my < ly.panel_h {
             // Panel click. The launcher glyph (leftmost cell) opens the app menu;
             // the taskbar buttons raise + focus their window. Either way the click
             // never reaches a client — the shell owns the panel band.
-            if mx < LAUNCHER_W {
+            if mx < ly.launcher_w {
                 menu_open = true;
             } else {
                 let mut slot = 0i32;
@@ -1277,7 +1275,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                     if !wins[wi].alive {
                         continue;
                     }
-                    let (bx, by, bw2, bh2) = taskbtn_rect(slot);
+                    let (bx, by, bw2, bh2) = taskbtn_rect(&ly, slot);
                     if mx >= bx && mx < bx + bw2 && my >= by && my < by + bh2 {
                         z.retain(|&i| i != wi);
                         z.push(wi);
@@ -1322,8 +1320,8 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         if let Some((wi, ox, oy)) = drag {
             let mut ncx = mx - ox;
             let mut ncy = my - oy;
-            ncx = ncx.max(BORDER).min(bw as i32 - wins[wi].sw - BORDER);
-            ncy = ncy.max(PANEL_H + TITLE_H + BORDER).min(bh as i32 - wins[wi].sh - BORDER);
+            ncx = ncx.max(ly.border).min(bw as i32 - wins[wi].sw - ly.border);
+            ncy = ncy.max(ly.panel_h + ly.title_h + ly.border).min(bh as i32 - wins[wi].sh - ly.border);
             wins[wi].cx = ncx;
             wins[wi].cy = ncy;
         }
@@ -1420,15 +1418,15 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             };
             let (ox, oy, ow, oh) = w.outer();
             fill_rect(&mut back, bw, bh, ox, oy, ow, oh, border);
-            fill_rect(&mut back, bw, bh, w.cx, w.cy - TITLE_H, w.sw, TITLE_H, title);
+            fill_rect(&mut back, bw, bh, w.cx, w.cy - w.title_h, w.sw, w.title_h, title);
             // Close box.
-            let sz = TITLE_H - 12;
+            let sz = w.title_h - 12;
             fill_rect(
                 &mut back,
                 bw,
                 bh,
                 w.cx + w.sw - sz - 6,
-                w.cy - TITLE_H + 6,
+                w.cy - w.title_h + 6,
                 sz,
                 sz,
                 theme.close,
@@ -1451,7 +1449,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         }
 
         // --- DWM panel on top of every window ---
-        fill_rect(&mut back, bw, bh, 0, 0, bw as i32, PANEL_H, theme.panel);
+        fill_rect(&mut back, bw, bh, 0, 0, bw as i32, ly.panel_h, theme.panel);
         // Launcher glyph: three stacked bars (hamburger) in the accent color.
         for r in 0..3 {
             fill_rect(&mut back, bw, bh, 10, 8 + r * 5, 20, 2, theme.launcher);
@@ -1464,7 +1462,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 if !wins[wi].alive {
                     continue;
                 }
-                let (bx, by, bw2, bh2) = taskbtn_rect(slot);
+                let (bx, by, bw2, bh2) = taskbtn_rect(&ly, slot);
                 if bx + bw2 > bw as i32 {
                     break;
                 }
@@ -1507,7 +1505,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         // Launcher dropdown, painted on top of the panel and every window.
         if menu_open {
             for i in 0..LAUNCH_APPS.len() {
-                let (ix, iy, iw, ih) = menu_item_rect(i as i32);
+                let (ix, iy, iw, ih) = menu_item_rect(&ly, i as i32);
                 let hover = mx >= ix && mx < ix + iw && my >= iy && my < iy + ih;
                 let bg = if hover { theme.menu_hover } else { theme.menu };
                 fill_rect(&mut back, bw, bh, ix, iy, iw, ih, bg);
