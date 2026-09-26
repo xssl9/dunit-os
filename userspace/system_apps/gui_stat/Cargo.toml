@@ -1,0 +1,24 @@
+# Untrusted system-monitor client for the M4 userspace DWM (Stack B).
+#
+# The legacy kernel-GUI `gui_stats` reborn as a gui-v1 client: a normal,
+# unprivileged ELF that renders a live system-stats window into its own kernel
+# shared buffer via the M4 UI Runtime (DUI + DSS + TTF text) and drives its
+# surface through the wire protocol over IPC — exactly like gui_client, but it
+# polls `get_system_stats` on a timer and repaints, so the counters stay live.
+[package]
+name = "gui_stat"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libdunit = { path = "../../libdunit" }
+gui_protocol_v1 = { path = "../../../protocols/gui-v1" }
+dunit_ui = { path = "../../../runtime/dunit-ui" }
+dunit_style = { path = "../../../runtime/dunit-style" }
+dunit_text = { path = "../../../runtime/dunit-text" }
+dunit_widgets = { path = "../../../runtime/dunit-widgets" }
+dunit_render = { path = "../../../runtime/dunit-render" }
+
+[[bin]]
+name = "gui_stat"
+path = "src/main.rs"

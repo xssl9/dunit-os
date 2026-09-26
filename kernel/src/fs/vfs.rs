@@ -53,6 +53,7 @@ static GUI_SERVER_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_se
 static GUI_SHBUF_PEER_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_shbuf_peer");
 static GUI_CLIENT_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_client");
 static GUI_CALC_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_calc");
+static GUI_STAT_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_stat");
 
 pub struct AssetEntry {
     pub path: &'static str,
@@ -677,6 +678,7 @@ pub fn init() -> Result<()> {
         (*ROOT_MEMFS.0.get()).add_file("/app/gui_shbuf_peer", GUI_SHBUF_PEER_BYTES.to_vec());
         (*ROOT_MEMFS.0.get()).add_file("/app/gui_client", GUI_CLIENT_BYTES.to_vec());
         (*ROOT_MEMFS.0.get()).add_file("/app/gui_calc", GUI_CALC_BYTES.to_vec());
+        (*ROOT_MEMFS.0.get()).add_file("/app/gui_stat", GUI_STAT_BYTES.to_vec());
 
         vfs.mount("/", &mut *ROOT_MEMFS.0.get())?;
         serial_log("[MEMFS] mounted as /\r\n");
