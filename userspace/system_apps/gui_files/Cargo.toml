@@ -1,0 +1,24 @@
+# Untrusted file-manager client for the M4 userspace DWM (Stack B).
+#
+# The legacy kernel-GUI `gui_file_manager` reborn as a gui-v1 client: a normal,
+# unprivileged ELF that lists the VFS via `readdir`, renders the listing through
+# the M4 UI Runtime (DUI + DSS + TTF text) into its own kernel shared buffer, and
+# drives its surface over the wire protocol — exactly like gui_client/gui_stat.
+# Clicking a directory row navigates into it; the top row navigates to the parent.
+[package]
+name = "gui_files"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libdunit = { path = "../../libdunit" }
+gui_protocol_v1 = { path = "../../../protocols/gui-v1" }
+dunit_ui = { path = "../../../runtime/dunit-ui" }
+dunit_style = { path = "../../../runtime/dunit-style" }
+dunit_text = { path = "../../../runtime/dunit-text" }
+dunit_widgets = { path = "../../../runtime/dunit-widgets" }
+dunit_render = { path = "../../../runtime/dunit-render" }
+
+[[bin]]
+name = "gui_files"
+path = "src/main.rs"

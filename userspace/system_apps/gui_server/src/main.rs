@@ -926,8 +926,12 @@ const TASKBTN_GAP: i32 = 4;
 const MAX_WINDOWS: usize = 8;
 
 /// Launcher menu: label shown in the dropdown paired with the ELF to spawn.
-const LAUNCH_APPS: [(&[u8], &str); 3] =
-    [(b"WIN", "gui_client"), (b"CALC", "gui_calc"), (b"STAT", "gui_stat")];
+const LAUNCH_APPS: [(&[u8], &str); 4] = [
+    (b"WIN", "gui_client"),
+    (b"CALC", "gui_calc"),
+    (b"STAT", "gui_stat"),
+    (b"FILE", "gui_files"),
+];
 
 const MENU_W: i32 = 130;
 const MENU_ITEM_H: i32 = 26;
@@ -973,6 +977,8 @@ fn glyph_3x5(c: u8) -> Option<[u8; 5]> {
         b'L' => [4, 4, 4, 4, 7],
         b'S' => [3, 4, 2, 1, 6],
         b'T' => [7, 2, 2, 2, 2],
+        b'F' => [7, 4, 6, 4, 4],
+        b'E' => [7, 4, 6, 4, 7],
         _ => return None,
     })
 }
