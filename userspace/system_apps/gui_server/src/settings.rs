@@ -92,6 +92,7 @@ pub struct Layout {
     pub menu_w: i32,
     pub menu_item_h: i32,
     pub dock_w: i32,
+    pub ws_w: i32,
     pub max_windows: usize,
 }
 
@@ -108,6 +109,7 @@ impl Layout {
             menu_w: 130,
             menu_item_h: 26,
             dock_w: 48,
+            ws_w: 22,
             max_windows: 8,
         }
     }
@@ -130,6 +132,7 @@ impl Layout {
             "menu_w" => self.menu_w = n as i32,
             "menu_item_h" => self.menu_item_h = n as i32,
             "dock_w" => self.dock_w = n as i32,
+            "ws_w" => self.ws_w = n as i32,
             "max_windows" => self.max_windows = (n as usize).clamp(1, 32),
             _ => {}
         }

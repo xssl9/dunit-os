@@ -598,6 +598,9 @@ struct ClientState {
     /// Index into `LAUNCH_APPS` of the app this client runs (0xFF = unknown),
     /// used to draw a "running" indicator on the matching dock icon.
     app: u8,
+    /// Workspace (0-based) this client's window lives on, captured from the
+    /// active workspace at spawn time. Startup clients default to workspace 0.
+    ws: usize,
 }
 
 impl ClientState {
@@ -616,6 +619,7 @@ impl ClientState {
             ready: false,
             win_created: false,
             app: 0xFF,
+            ws: 0,
         }
     }
 }
@@ -960,11 +964,25 @@ fn menu_item_rect(ly: &Layout, i: i32) -> (i32, i32, i32, i32) {
 }
 
 /// Rect of the i-th taskbar button (0-based), laid out left-to-right after the
-/// launcher. Independent of window state so hit-testing and drawing agree.
+/// launcher glyph and the workspace switcher. Independent of window state so
+/// hit-testing and drawing agree.
 fn taskbtn_rect(ly: &Layout, i: i32) -> (i32, i32, i32, i32) {
-    let x = ly.launcher_w + ly.taskbtn_gap + i * (ly.taskbtn_w + ly.taskbtn_gap);
+    let base = ly.launcher_w + WS_COUNT as i32 * ly.ws_w;
+    let x = base + ly.taskbtn_gap + i * (ly.taskbtn_w + ly.taskbtn_gap);
     let y = 3;
     (x, y, ly.taskbtn_w, ly.panel_h - 6)
+}
+
+/// Number of virtual workspaces (concept §11). Windows carry a 0-based workspace
+/// index; only the active workspace's windows are composited and take input.
+const WS_COUNT: usize = 5;
+
+/// Rect of the i-th workspace pip (0-based) in the panel switcher, laid out
+/// left-to-right immediately after the launcher glyph. Clicking a pip activates
+/// that workspace.
+fn ws_pip_rect(ly: &Layout, i: i32) -> (i32, i32, i32, i32) {
+    let x = ly.launcher_w + i * ly.ws_w;
+    (x, 2, ly.ws_w - 2, ly.panel_h - 4)
 }
 
 // A 3x5 bitmap font, just digits and ':' — enough for window numbers and a
@@ -1062,6 +1080,9 @@ struct Win {
     border: i32,
     /// Index into `LAUNCH_APPS` (0xFF = unknown) — drives the dock running marker.
     app: u8,
+    /// Workspace (0-based) this window belongs to; only the active workspace's
+    /// windows are drawn and receive input.
+    ws: usize,
 }
 
 impl Win {
@@ -1200,6 +1221,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             title_h: ly.title_h,
             border: ly.border,
             app: clients[i].app,
+            ws: 0,
         });
         clients[i].ready = true;
         clients[i].win_created = true;
@@ -1228,6 +1250,9 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     // Launcher dropdown state. Toggled by the launcher glyph; any click either
     // selects a menu entry (spawn) or dismisses the menu.
     let mut menu_open = false;
+    // Active workspace (0-based, concept §11). Only its windows composite and
+    // take input; the panel switcher and newly-spawned windows follow it.
+    let mut current_ws: usize = 0;
     // One-shot: announce on serial when a window first takes keyboard focus, so
     // headless tests know the compositor is ready to accept injected keystrokes.
     let mut input_ready_announced = false;
@@ -1266,6 +1291,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 title_h: ly.title_h,
                 border: ly.border,
                 app: clients[i].app,
+                ws: clients[i].ws,
             });
             clients[i].win_created = true;
             z.push(wi);
@@ -1294,22 +1320,34 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             menu_open = false;
             if let Some(i) = chosen {
                 if clients.len() < ly.max_windows {
-                    if let Some(c) = spawn_client(server, next_id, 0, 0, LAUNCH_APPS[i].1) {
+                    if let Some(mut c) = spawn_client(server, next_id, 0, 0, LAUNCH_APPS[i].1) {
+                        c.ws = current_ws;
                         clients.push(c);
                         next_id += 1;
                     }
                 }
             }
         } else if press && my < ly.panel_h {
-            // Panel click. The launcher glyph (leftmost cell) opens the app menu;
-            // the taskbar buttons raise + focus their window. Either way the click
-            // never reaches a client — the shell owns the panel band.
+            // Panel click. The launcher glyph opens the app menu; the workspace
+            // pips switch workspaces; the taskbar buttons raise + focus their
+            // window. Either way the click never reaches a client — the shell
+            // owns the panel band.
             if mx < ly.launcher_w {
                 menu_open = true;
+            } else if mx < ly.launcher_w + WS_COUNT as i32 * ly.ws_w {
+                // Workspace switcher: activate the clicked pip's workspace. A
+                // click in the gap between pips is consumed but changes nothing.
+                for i in 0..WS_COUNT {
+                    let (px, _, pw, _) = ws_pip_rect(&ly, i as i32);
+                    if mx >= px && mx < px + pw {
+                        current_ws = i;
+                        break;
+                    }
+                }
             } else {
                 let mut slot = 0i32;
                 for wi in 0..wins.len() {
-                    if !wins[wi].alive {
+                    if !wins[wi].alive || wins[wi].ws != current_ws {
                         continue;
                     }
                     let (bx, by, bw2, bh2) = taskbtn_rect(&ly, slot);
@@ -1335,7 +1373,8 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             }
             if let Some(i) = chosen {
                 if clients.len() < ly.max_windows {
-                    if let Some(c) = spawn_client(server, next_id, 0, 0, LAUNCH_APPS[i].1) {
+                    if let Some(mut c) = spawn_client(server, next_id, 0, 0, LAUNCH_APPS[i].1) {
+                        c.ws = current_ws;
                         clients.push(c);
                         next_id += 1;
                     }
@@ -1347,7 +1386,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             while zi > 0 {
                 zi -= 1;
                 let wi = z[zi];
-                if wins[wi].alive && wins[wi].contains(mx, my) {
+                if wins[wi].alive && wins[wi].ws == current_ws && wins[wi].contains(mx, my) {
                     hit = Some(wi);
                     break;
                 }
@@ -1392,7 +1431,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             while zi > 0 {
                 zi -= 1;
                 let wi = z[zi];
-                if wins[wi].alive && wins[wi].in_content(mx, my) {
+                if wins[wi].alive && wins[wi].ws == current_ws && wins[wi].in_content(mx, my) {
                     c = Some(wi);
                     break;
                 }
@@ -1434,7 +1473,11 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             break;
         }
 
-        let focused = z.iter().rev().copied().find(|&i| wins[i].alive);
+        let focused = z
+            .iter()
+            .rev()
+            .copied()
+            .find(|&i| wins[i].alive && wins[i].ws == current_ws);
 
         // --- Keyboard: drain the seat and route bytes to the focused window ---
         // The compositor is the sole reader of the kernel key ring; each typed
@@ -1459,7 +1502,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         // Draw windows bottom-to-top.
         for &wi in z.iter() {
             let w = &wins[wi];
-            if !w.alive {
+            if !w.alive || w.ws != current_ws {
                 continue;
             }
             let is_focused = focused == Some(wi);
@@ -1511,12 +1554,31 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         for r in 0..3 {
             fill_rect(&mut back, bw, bh, 10, 8 + r * 5, 20, 2, theme.launcher);
         }
+        // Workspace switcher: pips 1..=WS_COUNT after the launcher glyph. The
+        // active workspace is highlighted; any workspace holding a live window
+        // gets an accent underline so occupancy is visible at a glance.
+        for i in 0..WS_COUNT {
+            let (px, py, pw, ph) = ws_pip_rect(&ly, i as i32);
+            let bg = if i == current_ws {
+                theme.taskbtn_focused
+            } else {
+                theme.taskbtn
+            };
+            fill_rect(&mut back, bw, bh, px, py, pw, ph, bg);
+            let label = [b'1' + i as u8];
+            let tx = px + (pw - GLYPH_W * 2) / 2;
+            let ty = py + (ph - 5 * 2) / 2;
+            draw_text_3x5(&mut back, bw, bh, tx, ty, 2, theme.panel_text, &label);
+            if wins.iter().any(|w| w.alive && w.ws == i) {
+                fill_rect(&mut back, bw, bh, px + 2, py + ph - 3, pw - 4, 2, theme.launcher);
+            }
+        }
         // One taskbar button per live window, in creation order; the focused
         // window's button is highlighted. Label = 1-based window number.
         {
             let mut slot = 0i32;
             for wi in 0..wins.len() {
-                if !wins[wi].alive {
+                if !wins[wi].alive || wins[wi].ws != current_ws {
                     continue;
                 }
                 let (bx, by, bw2, bh2) = taskbtn_rect(&ly, slot);
