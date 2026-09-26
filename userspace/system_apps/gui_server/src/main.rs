@@ -662,9 +662,15 @@ fn handle_client_payload(server: &mut Server, c: &mut ClientState, payload: &[u8
 /// returned `ClientState` is *pending* — its buffer is mapped and it becomes
 /// `ready` only once its protocol handshake is pumped (see `pump_clients`). The
 /// `id` is a tint hint only; routing uses the kernel-authenticated sender pid.
-fn spawn_client(server: &mut Server, id: u32, slot_x: u32, slot_y: u32) -> Option<ClientState> {
+fn spawn_client(
+    server: &mut Server,
+    id: u32,
+    slot_x: u32,
+    slot_y: u32,
+    app: &str,
+) -> Option<ClientState> {
     let conn = server.connect()?;
-    let pid = libdunit::spawn("gui_client");
+    let pid = libdunit::spawn(app);
     if pid <= 0 {
         return None;
     }
@@ -693,7 +699,7 @@ fn serve_two_clients() -> bool {
     let mut clients: Vec<ClientState> = Vec::new();
     let slots = [(300u32, 100u32), (400u32, 220u32)];
     for i in 0..2 {
-        match spawn_client(&mut server, (i as u32) + 1, slots[i].0, slots[i].1) {
+        match spawn_client(&mut server, (i as u32) + 1, slots[i].0, slots[i].1, "gui_client") {
             Some(c) => clients.push(c),
             None => return false,
         }
@@ -919,6 +925,20 @@ const TASKBTN_GAP: i32 = 4;
 /// so a stuck loop cannot fork the machine to death.
 const MAX_WINDOWS: usize = 8;
 
+/// Launcher menu: label shown in the dropdown paired with the ELF to spawn.
+const LAUNCH_APPS: [(&[u8], &str); 2] =
+    [(b"WIN", "gui_client"), (b"CALC", "gui_calc")];
+
+const MENU_W: i32 = 130;
+const MENU_ITEM_H: i32 = 26;
+const COLOR_MENU: u32 = 0xFF11111B;
+const COLOR_MENU_HOVER: u32 = 0xFF45475A;
+
+/// Rect of the i-th launcher-menu entry (0-based), dropped below the launcher.
+fn menu_item_rect(i: i32) -> (i32, i32, i32, i32) {
+    (0, PANEL_H + i * MENU_ITEM_H, MENU_W, MENU_ITEM_H)
+}
+
 /// Rect of the i-th taskbar button (0-based), laid out left-to-right after the
 /// launcher. Independent of window state so hit-testing and drawing agree.
 fn taskbtn_rect(i: i32) -> (i32, i32, i32, i32) {
@@ -944,6 +964,13 @@ fn glyph_3x5(c: u8) -> Option<[u8; 5]> {
         b'8' => [7, 5, 7, 5, 7],
         b'9' => [7, 5, 7, 1, 7],
         b':' => [0, 2, 0, 2, 0],
+        // A few uppercase letters for launcher menu labels (WIN / CALC).
+        b'W' => [5, 5, 5, 7, 5],
+        b'I' => [7, 2, 2, 2, 7],
+        b'N' => [5, 7, 7, 7, 5],
+        b'C' => [7, 4, 4, 4, 7],
+        b'A' => [2, 5, 7, 5, 5],
+        b'L' => [4, 4, 4, 4, 7],
         _ => return None,
     })
 }
@@ -1143,6 +1170,9 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     // Runtime app-launch: the launcher spawns fresh gui_client windows up to
     // MAX_WINDOWS; `next_id` is the tint hint handed to each new client.
     let mut next_id = clients.len() as u32 + 1;
+    // Launcher dropdown state. Toggled by the launcher glyph; any click either
+    // selects a menu entry (spawn) or dismisses the menu.
+    let mut menu_open = false;
     loop {
         // Advance any runtime-spawned clients through their protocol handshake,
         // then hand each newly-ready client a cascaded, focused window.
@@ -1184,18 +1214,34 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         let press = left && !prev_left;
         let release = !left && prev_left;
 
-        // --- Button press edge: panel first, then focus / raise / drag / close ---
-        if press && my < PANEL_H {
-            // Panel click. The launcher glyph (leftmost cell) spawns a new app
-            // window; the taskbar buttons raise + focus their window. Either way
-            // the click never reaches a client — the shell owns the panel band.
-            if mx < LAUNCHER_W {
+        // --- Button press edge: menu first, then panel, then windows ---
+        if press && menu_open {
+            // The dropdown is open: a click on an entry spawns that app; any
+            // other click just dismisses the menu. Either way the menu closes
+            // and the click is consumed (never reaches a window).
+            let mut chosen: Option<usize> = None;
+            for i in 0..LAUNCH_APPS.len() {
+                let (ix, iy, iw, ih) = menu_item_rect(i as i32);
+                if mx >= ix && mx < ix + iw && my >= iy && my < iy + ih {
+                    chosen = Some(i);
+                    break;
+                }
+            }
+            menu_open = false;
+            if let Some(i) = chosen {
                 if clients.len() < MAX_WINDOWS {
-                    if let Some(c) = spawn_client(server, next_id, 0, 0) {
+                    if let Some(c) = spawn_client(server, next_id, 0, 0, LAUNCH_APPS[i].1) {
                         clients.push(c);
                         next_id += 1;
                     }
                 }
+            }
+        } else if press && my < PANEL_H {
+            // Panel click. The launcher glyph (leftmost cell) opens the app menu;
+            // the taskbar buttons raise + focus their window. Either way the click
+            // never reaches a client — the shell owns the panel band.
+            if mx < LAUNCHER_W {
+                menu_open = true;
             } else {
                 let mut slot = 0i32;
                 for wi in 0..wins.len() {
@@ -1412,6 +1458,26 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 COLOR_PANEL_TEXT,
                 &clk,
             );
+        }
+
+        // Launcher dropdown, painted on top of the panel and every window.
+        if menu_open {
+            for i in 0..LAUNCH_APPS.len() {
+                let (ix, iy, iw, ih) = menu_item_rect(i as i32);
+                let hover = mx >= ix && mx < ix + iw && my >= iy && my < iy + ih;
+                let bg = if hover { COLOR_MENU_HOVER } else { COLOR_MENU };
+                fill_rect(&mut back, bw, bh, ix, iy, iw, ih, bg);
+                draw_text_3x5(
+                    &mut back,
+                    bw,
+                    bh,
+                    ix + 10,
+                    iy + (ih - 5 * 3) / 2,
+                    3,
+                    COLOR_PANEL_TEXT,
+                    LAUNCH_APPS[i].0,
+                );
+            }
         }
 
         draw_cursor(&mut back, bw, bh, mx, my);

@@ -1,0 +1,19 @@
+# Untrusted calculator client for the M4 userspace DWM.
+#
+# A normal, unprivileged ELF (no display/input master, no elevated rights). It
+# renders a calculator into its own kernel shared buffer, transfers that buffer
+# capability to the compositor, and drives its surface through the gui-v1 wire
+# protocol over IPC — exactly like gui_client, but with real app content. This
+# is the first legacy kernel-GUI app (gui_calculator) reborn as a Stack B client.
+[package]
+name = "gui_calc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libdunit = { path = "../../libdunit" }
+gui_protocol_v1 = { path = "../../../protocols/gui-v1" }
+
+[[bin]]
+name = "gui_calc"
+path = "src/main.rs"
