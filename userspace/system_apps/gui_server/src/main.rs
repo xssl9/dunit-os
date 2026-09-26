@@ -1480,17 +1480,25 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             .find(|&i| wins[i].alive && wins[i].ws == current_ws);
 
         // --- Keyboard: drain the seat and route bytes to the focused window ---
-        // The compositor is the sole reader of the kernel key ring; each typed
-        // byte is forwarded to the topmost live window as an IN_KEY event (the
-        // byte travels in the `button` field). Keyboard focus follows the
-        // z-order top, matching how the taskbar/raise model already works.
+        // The compositor is the sole reader of the kernel key ring. It now reads
+        // full key events (`get_key_event`) rather than cooked bytes, so modifier
+        // state (Super/Ctrl/Alt/Shift) is available for future hotkeys (tiling,
+        // workspace switch); ordinary typing is unchanged — on a plain press the
+        // event still carries the cooked `ascii` byte, forwarded to the topmost
+        // live window as an IN_KEY event (the byte travels in the `button`
+        // field). Keyboard focus follows the z-order top, matching how the
+        // taskbar/raise model already works.
         if focused.is_some() && wins.len() > initial_wins && !input_ready_announced {
             libdunit::println("gui_server: desktop input ready");
             input_ready_announced = true;
         }
-        while let Some(byte) = libdunit::get_char() {
-            if let Some(wi) = focused {
-                send_input(wins[wi].pid, IN_KEY, 0, 0, byte as u32);
+        while let Some(ev) = libdunit::get_key_event() {
+            // No hotkeys wired yet: forward the cooked byte on plain presses,
+            // identical to the previous get_char() behaviour.
+            if ev.pressed && ev.ascii != 0 {
+                if let Some(wi) = focused {
+                    send_input(wins[wi].pid, IN_KEY, 0, 0, ev.ascii as u32);
+                }
             }
         }
 

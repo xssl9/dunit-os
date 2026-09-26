@@ -73,6 +73,7 @@ pub const SYSCALL_PTY_READ: usize = 63;
 pub const SYSCALL_PTY_WRITE: usize = 64;
 pub const SYSCALL_PTY_CLOSE: usize = 65;
 pub const SYSCALL_GET_CHAR: usize = 66;
+pub const SYSCALL_GET_KEY_EVENT: usize = 67;
 
 /// Права хэндлов (capabilities). Совпадают с битами в ядре (kernel/src/handle.rs).
 pub const RIGHT_READ: u32 = 1 << 0;
@@ -959,6 +960,61 @@ pub fn get_char() -> Option<u8> {
     } else {
         Some(c as u8)
     }
+}
+
+/// Биты маски модификаторов в `KeyEvent::mods` (совпадают с `modifier_mask()` в
+/// ядре: kernel/src/drivers/keyboard.rs).
+pub const KEYMOD_SHIFT: u8 = 1 << 0;
+pub const KEYMOD_CTRL: u8 = 1 << 1;
+pub const KEYMOD_ALT: u8 = 1 << 2;
+pub const KEYMOD_SUPER: u8 = 1 << 3;
+
+/// Одно событие клавиши от `get_key_event`: сырой переход (нажатие ИЛИ отпускание)
+/// вместе с активными модификаторами. В отличие от `get_char`, отдаёт все события
+/// (нужно компоситору для горячих клавиш Super+…), но при обычном наборе `ascii`
+/// уже содержит готовый байт из клавиатурной раскладки ядра.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct KeyEvent {
+    /// Cooked ASCII на нажатии обычной клавиши; 0 для отпускания и расширенных.
+    pub ascii: u8,
+    /// Битовая маска `KEYMOD_*` на момент события.
+    pub mods: u8,
+    /// Скан-код без бита отпускания (`sc & 0x7F`).
+    pub scancode: u8,
+    /// true — make (нажатие), false — break (отпускание).
+    pub pressed: bool,
+}
+
+impl KeyEvent {
+    pub fn shift(&self) -> bool {
+        self.mods & KEYMOD_SHIFT != 0
+    }
+    pub fn ctrl(&self) -> bool {
+        self.mods & KEYMOD_CTRL != 0
+    }
+    pub fn alt(&self) -> bool {
+        self.mods & KEYMOD_ALT != 0
+    }
+    pub fn super_key(&self) -> bool {
+        self.mods & KEYMOD_SUPER != 0
+    }
+}
+
+/// Следующее событие клавиши, либо `None` когда кольцо скан-кодов пусто. Распаковка
+/// упакованного i64 из `sys_get_key_event`:
+/// `[base:31..24][pressed:16][mods:15..8][ascii:7..0]`.
+pub fn get_key_event() -> Option<KeyEvent> {
+    let packed = syscall0(SYSCALL_GET_KEY_EVENT);
+    if packed < 0 {
+        return None;
+    }
+    let packed = packed as u64;
+    Some(KeyEvent {
+        ascii: (packed & 0xFF) as u8,
+        mods: ((packed >> 8) & 0xFF) as u8,
+        scancode: ((packed >> 24) & 0xFF) as u8,
+        pressed: ((packed >> 16) & 0xFF) != 0,
+    })
 }
 
 pub fn get_mouse_pos() -> (u32, u32) {

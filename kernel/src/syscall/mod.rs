@@ -76,6 +76,7 @@ pub enum Syscall {
     PtyWrite = 64,
     PtyClose = 65,
     GetChar = 66,
+    GetKeyEvent = 67,
 }
 
 impl Syscall {
@@ -149,6 +150,7 @@ impl Syscall {
             64 => Some(Syscall::PtyWrite),
             65 => Some(Syscall::PtyClose),
             66 => Some(Syscall::GetChar),
+            67 => Some(Syscall::GetKeyEvent),
             _ => None,
         }
     }
@@ -654,6 +656,7 @@ pub extern "C" fn syscall_handler(
         Syscall::PtyWrite => sys_pty_write(arg0 as u32, arg1 as *const u8, arg2 as usize),
         Syscall::PtyClose => sys_pty_close(arg0 as u32),
         Syscall::GetChar => sys_get_char(),
+        Syscall::GetKeyEvent => sys_get_key_event(),
     }
 }
 
@@ -1667,6 +1670,51 @@ fn sys_get_char() -> i64 {
         }
     }
     -1
+}
+
+/// Pull one raw key transition off the scancode ring together with the current
+/// modifier mask, packed into a single non-negative i64 (-1 when the ring is
+/// empty). Unlike `sys_get_char` this reports *every* key event (press AND
+/// release, modifiers included) so a compositor can implement hotkeys (Super+…)
+/// while still receiving the cooked ASCII byte for ordinary typing.
+///
+/// A leading 0xE0 extended prefix is consumed here and folded into an `ext`
+/// flag; the modifier flags themselves are already maintained at push time in
+/// the keyboard driver, so they are correct regardless of how the E0/payload
+/// pair happens to split across drains.
+///
+/// Packing (bits): `[base:31..24][pressed:16][mods:15..8][ascii:7..0]`.
+/// - `base`  = scancode with the release bit masked off (`sc & 0x7F`)
+/// - `pressed` = 1 on make, 0 on break (`sc & 0x80 == 0`)
+/// - `mods`  = `KEYMOD_*` bitmask (shift/ctrl/alt/super) at read time
+/// - `ascii` = cooked byte from the keymap on a plain (non-extended) press, else 0
+fn sys_get_key_event() -> i64 {
+    let Some(mut sc) = crate::drivers::keyboard::read_scancode() else {
+        return -1;
+    };
+    let mut ext = false;
+    if sc == 0xE0 {
+        // Extended key: the real code is the next byte. If it hasn't landed yet
+        // report "empty" and let the caller retry — the flags are already tracked.
+        let Some(next) = crate::drivers::keyboard::read_scancode() else {
+            return -1;
+        };
+        ext = true;
+        sc = next;
+    }
+
+    let pressed = sc & 0x80 == 0;
+    let base = sc & 0x7F;
+    let mods = crate::drivers::keyboard::modifier_mask();
+    let ascii = if pressed && !ext {
+        crate::drivers::keyboard::scancode_to_char(base)
+            .map(|c| c as u8)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    ((base as i64) << 24) | ((pressed as i64) << 16) | ((mods as i64) << 8) | (ascii as i64)
 }
 
 fn sys_get_mouse_pos(x: *mut u32, y: *mut u32) -> i64 {
