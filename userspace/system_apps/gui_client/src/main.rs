@@ -37,6 +37,7 @@ const IN_MOVE: u8 = 1;
 const IN_DOWN: u8 = 2;
 const IN_UP: u8 = 3;
 const IN_LEAVE: u8 = 4;
+const IN_KEY: u8 = 5;
 const IN_QUIT: u8 = 9;
 
 /// Interaction state driving the client's re-paint: whether the pointer is over
@@ -294,6 +295,15 @@ pub extern "C" fn _start() -> ! {
         let kind = rx[4];
         if kind == IN_QUIT {
             break;
+        }
+        if kind == IN_KEY {
+            // The compositor forwards each typed byte in the button field. Echo
+            // it to serial so the keyboard-routing path is headlessly verifiable.
+            let byte = rx[16];
+            let line = [b'k', b'e', b'y', b'=', byte];
+            libdunit::write(1, &line);
+            libdunit::write(1, b"\n");
+            continue;
         }
         let lx = i32::from_le_bytes([rx[8], rx[9], rx[10], rx[11]]);
         let ly = i32::from_le_bytes([rx[12], rx[13], rx[14], rx[15]]);

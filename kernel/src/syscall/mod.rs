@@ -75,6 +75,7 @@ pub enum Syscall {
     PtyRead = 63,
     PtyWrite = 64,
     PtyClose = 65,
+    GetChar = 66,
 }
 
 impl Syscall {
@@ -147,6 +148,7 @@ impl Syscall {
             63 => Some(Syscall::PtyRead),
             64 => Some(Syscall::PtyWrite),
             65 => Some(Syscall::PtyClose),
+            66 => Some(Syscall::GetChar),
             _ => None,
         }
     }
@@ -651,6 +653,7 @@ pub extern "C" fn syscall_handler(
         Syscall::PtyRead => sys_pty_read(arg0 as u32, arg1 as *mut u8, arg2 as usize),
         Syscall::PtyWrite => sys_pty_write(arg0 as u32, arg1 as *const u8, arg2 as usize),
         Syscall::PtyClose => sys_pty_close(arg0 as u32),
+        Syscall::GetChar => sys_get_char(),
     }
 }
 
@@ -1651,6 +1654,19 @@ fn sys_get_key() -> i64 {
     } else {
         -1
     }
+}
+
+/// Drain scancodes until one translates to a character (skipping key releases
+/// and modifiers), returning that ASCII byte; -1 when the ring is empty. The
+/// GUI compositor uses this to forward typed characters to the focused window
+/// without each client re-implementing the kernel's scancode keymap.
+fn sys_get_char() -> i64 {
+    while let Some(sc) = crate::drivers::keyboard::read_scancode() {
+        if let Some(ch) = crate::drivers::keyboard::scancode_to_char(sc) {
+            return ch as u8 as i64;
+        }
+    }
+    -1
 }
 
 fn sys_get_mouse_pos(x: *mut u32, y: *mut u32) -> i64 {

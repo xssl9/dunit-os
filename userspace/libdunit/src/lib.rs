@@ -72,6 +72,7 @@ pub const SYSCALL_PTY_SPAWN: usize = 62;
 pub const SYSCALL_PTY_READ: usize = 63;
 pub const SYSCALL_PTY_WRITE: usize = 64;
 pub const SYSCALL_PTY_CLOSE: usize = 65;
+pub const SYSCALL_GET_CHAR: usize = 66;
 
 /// Права хэндлов (capabilities). Совпадают с битами в ядре (kernel/src/handle.rs).
 pub const RIGHT_READ: u32 = 1 << 0;
@@ -945,6 +946,18 @@ pub fn get_key() -> Option<u8> {
         None
     } else {
         Some(k as u8)
+    }
+}
+
+/// Next typed character (ASCII), with the kernel's scancode keymap applied and
+/// key-release/modifier scancodes skipped. `None` once the key ring is drained.
+/// The GUI compositor forwards these to the focused window.
+pub fn get_char() -> Option<u8> {
+    let c = syscall0(SYSCALL_GET_CHAR);
+    if c < 0 {
+        None
+    } else {
+        Some(c as u8)
     }
 }
 

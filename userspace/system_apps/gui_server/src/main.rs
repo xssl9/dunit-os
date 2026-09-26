@@ -560,6 +560,7 @@ const IN_MOVE: u8 = 1;
 const IN_DOWN: u8 = 2;
 const IN_UP: u8 = 3;
 const IN_LEAVE: u8 = 4;
+const IN_KEY: u8 = 5;
 const IN_QUIT: u8 = 9;
 
 /// Send one input control message to a client.
@@ -1181,6 +1182,9 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     // Launcher dropdown state. Toggled by the launcher glyph; any click either
     // selects a menu entry (spawn) or dismisses the menu.
     let mut menu_open = false;
+    // One-shot: announce on serial when a window first takes keyboard focus, so
+    // headless tests know the compositor is ready to accept injected keystrokes.
+    let mut input_ready_announced = false;
     loop {
         // Advance any runtime-spawned clients through their protocol handshake,
         // then hand each newly-ready client a cascaded, focused window.
@@ -1359,6 +1363,21 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         }
 
         let focused = z.iter().rev().copied().find(|&i| wins[i].alive);
+
+        // --- Keyboard: drain the seat and route bytes to the focused window ---
+        // The compositor is the sole reader of the kernel key ring; each typed
+        // byte is forwarded to the topmost live window as an IN_KEY event (the
+        // byte travels in the `button` field). Keyboard focus follows the
+        // z-order top, matching how the taskbar/raise model already works.
+        if focused.is_some() && !input_ready_announced {
+            libdunit::println("gui_server: desktop input ready");
+            input_ready_announced = true;
+        }
+        while let Some(byte) = libdunit::get_char() {
+            if let Some(wi) = focused {
+                send_input(wins[wi].pid, IN_KEY, 0, 0, byte as u32);
+            }
+        }
 
         // Clear desktop.
         for px in back.iter_mut() {
