@@ -1,0 +1,17 @@
+# PTY slave peer for the M4 slice 8 PTY-endpoint smoke test.
+#
+# A minimal interactive child: reads one chunk from stdin and echoes it back on
+# stdout prefixed with "echo:". Spawned by `pty_test` via `pty_spawn`, so its
+# stdin/stdout are wired to the pty rings instead of the console — the peer that
+# proves master->slave->master byte streaming end to end.
+[package]
+name = "pty_echo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libdunit = { path = "../../libdunit" }
+
+[[bin]]
+name = "pty_echo"
+path = "src/main.rs"

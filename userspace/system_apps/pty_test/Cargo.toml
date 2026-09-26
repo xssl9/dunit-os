@@ -1,0 +1,17 @@
+# PTY master driver for the M4 slice 8 PTY-endpoint smoke test.
+#
+# The terminal-emulator side: creates a pty, spawns `pty_echo` as its slave,
+# writes a line to the slave's stdin, and reads the echoed bytes back off the
+# master side — exercising the full master<->slave stdin/stdout path. Exits 0 on
+# a verified round-trip, 1 otherwise; the kernel smoke harness checks that code.
+[package]
+name = "pty_test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libdunit = { path = "../../libdunit" }
+
+[[bin]]
+name = "pty_test"
+path = "src/main.rs"

@@ -26,6 +26,7 @@ pub mod ipc;
 pub mod kthreads;
 pub mod memory;
 pub mod process;
+pub mod pty;
 pub mod serial;
 pub mod shell;
 pub mod storage;
@@ -873,6 +874,12 @@ pub extern "C" fn kernel_main(
             screen_log("[ OK ] TLS ABI smoke passed", false);
         } else {
             screen_log("[FAIL] TLS ABI smoke failed", true);
+        }
+        screen_log("[ .. ] Running PTY endpoint smoke test", false);
+        if command::run_pty_smoke() {
+            screen_log("[ OK ] PTY endpoint smoke passed", false);
+        } else {
+            screen_log("[FAIL] PTY endpoint smoke failed", true);
         }
     }
 

@@ -70,6 +70,11 @@ pub enum Syscall {
     HandleSharedLen = 58,
     ReceiveMessageFrom = 59,
     GetMouseState = 60,
+    PtyCreate = 61,
+    PtySpawn = 62,
+    PtyRead = 63,
+    PtyWrite = 64,
+    PtyClose = 65,
 }
 
 impl Syscall {
@@ -137,6 +142,11 @@ impl Syscall {
             58 => Some(Syscall::HandleSharedLen),
             59 => Some(Syscall::ReceiveMessageFrom),
             60 => Some(Syscall::GetMouseState),
+            61 => Some(Syscall::PtyCreate),
+            62 => Some(Syscall::PtySpawn),
+            63 => Some(Syscall::PtyRead),
+            64 => Some(Syscall::PtyWrite),
+            65 => Some(Syscall::PtyClose),
             _ => None,
         }
     }
@@ -163,6 +173,7 @@ pub const EMSGSIZE: i64 = -90;
 pub const ENOBUFS: i64 = -105;
 pub const EPERM: i64 = -1;
 pub const EBUSY: i64 = -16;
+pub const EPIPE: i64 = -32;
 
 /// Параметры фреймбуфера ядра. Раньше четыре `pub static mut` скаляра,
 /// записываемые один раз из `lib.rs` и читаемые из системных вызовов display;
@@ -635,6 +646,11 @@ pub extern "C" fn syscall_handler(
             sys_receive_message_from(arg0 as *mut u8, arg1 as usize, arg2 as *mut u32)
         }
         Syscall::GetMouseState => sys_get_mouse_state(arg0 as *mut u8),
+        Syscall::PtyCreate => sys_pty_create(),
+        Syscall::PtySpawn => sys_pty_spawn(arg0 as *const u8, arg1 as usize, arg2 as u32),
+        Syscall::PtyRead => sys_pty_read(arg0 as u32, arg1 as *mut u8, arg2 as usize),
+        Syscall::PtyWrite => sys_pty_write(arg0 as u32, arg1 as *const u8, arg2 as usize),
+        Syscall::PtyClose => sys_pty_close(arg0 as u32),
     }
 }
 
@@ -869,6 +885,22 @@ fn sys_read(fd: u32, buf: *mut u8, count: usize) -> i64 {
 
     match crate::process::get_fd(fd).map(|entry| entry.target) {
         Some(crate::process::FdTarget::Stdin) => {
+            // PTY slave? Drain the master→slave ring before the legacy path.
+            if let Some(current) = crate::process::current_process().map(|p| p.pid) {
+                let mut pty_buf = Vec::new();
+                pty_buf.resize(count, 0);
+                match crate::pty::slave_read_stdin(current, &mut pty_buf) {
+                    Some(crate::pty::SlaveRead::Data(read)) => {
+                        if let Err(error) = copy_buffer_to_user(buf, &pty_buf[..read]) {
+                            return error;
+                        }
+                        return read as i64;
+                    }
+                    Some(crate::pty::SlaveRead::WouldBlock) => return EAGAIN,
+                    Some(crate::pty::SlaveRead::Eof) => return 0,
+                    None => {}
+                }
+            }
             let mut input = Vec::new();
             input.resize(count, 0);
             match crate::process::take_terminal_stdin_for_current(&mut input) {
@@ -932,12 +964,25 @@ fn sys_write(fd: u32, buf: *const u8, count: usize) -> i64 {
     match crate::process::get_fd(fd).map(|entry| entry.target) {
         Some(crate::process::FdTarget::Stdout) => {
             write_stdio("STDOUT", &data);
-            write_terminal_foreground(&data);
+            // PTY slave? Route stdout to its master instead of the console.
+            let routed = crate::process::current_process()
+                .map(|p| p.pid)
+                .map(|pid| crate::pty::slave_write_stdout(pid, &data))
+                .unwrap_or(false);
+            if !routed {
+                write_terminal_foreground(&data);
+            }
             return data.len() as i64;
         }
         Some(crate::process::FdTarget::Stderr) => {
             write_stdio("STDERR", &data);
-            write_terminal_foreground(&data);
+            let routed = crate::process::current_process()
+                .map(|p| p.pid)
+                .map(|pid| crate::pty::slave_write_stdout(pid, &data))
+                .unwrap_or(false);
+            if !routed {
+                write_terminal_foreground(&data);
+            }
             return data.len() as i64;
         }
         Some(crate::process::FdTarget::Stdin) => return EBADF,
@@ -1646,35 +1691,27 @@ fn sys_get_mouse_state(out: *mut u8) -> i64 {
     0
 }
 
-fn sys_spawn_process(path: *const u8, path_len: usize) -> i64 {
-    let path = match copy_string_from_user_len(path, path_len, MAX_USER_PATH) {
-        Ok(path) => path,
-        Err(error) => return error,
-    };
+fn spawn_process_from_user(
+    path: *const u8,
+    path_len: usize,
+) -> Result<crate::process::ProcessId, i64> {
+    let path = copy_string_from_user_len(path, path_len, MAX_USER_PATH)?;
 
     let cwd = match crate::process::current_process() {
         Some(process) => process.cwd.clone(),
-        None => return EINVAL,
+        None => return Err(EINVAL),
     };
 
-    let resolved = match resolve_exec_path(&cwd, &path) {
-        Ok(path) => path,
-        Err(error) => return error,
-    };
+    let resolved = resolve_exec_path(&cwd, &path)?;
 
-    let data = match read_vfs_file(&cwd, &resolved) {
-        Ok(data) => data,
-        Err(error) => return vfs_error_to_errno(error),
-    };
+    let data = read_vfs_file(&cwd, &resolved).map_err(vfs_error_to_errno)?;
 
     if crate::elf::ElfParser::new(&data).is_err() {
-        return EIO;
+        return Err(EIO);
     }
 
-    let pid = match crate::process::create_user_process_record(resolved.clone(), true) {
-        Ok(pid) => pid,
-        Err(error) => return process_error_to_errno(error),
-    };
+    let pid = crate::process::create_user_process_record(resolved.clone(), true)
+        .map_err(process_error_to_errno)?;
 
     let argv0 = resolved
         .rsplit('/')
@@ -1687,15 +1724,111 @@ fn sys_spawn_process(path: *const u8, path_len: usize) -> i64 {
             pid.0, resolved
         ));
         let _ = crate::process::autoreap_process(pid, "spawn-prepare-failed");
-        return EIO;
+        return Err(EIO);
     }
 
     syscall_log(format_args!(
         "[SPAWN] ready pid={} path={} execution=not-started\n",
         pid.0, resolved
     ));
-    pid.0 as i64
+    Ok(pid)
 }
+
+fn sys_spawn_process(path: *const u8, path_len: usize) -> i64 {
+    match spawn_process_from_user(path, path_len) {
+        Ok(pid) => pid.0 as i64,
+        Err(error) => error,
+    }
+}
+
+/// Create a fresh PTY endpoint owned by the calling process (the master/terminal
+/// emulator). Returns the pty id (>= 1).
+fn sys_pty_create() -> i64 {
+    let pid = match crate::process::current_process() {
+        Some(process) => process.pid,
+        None => return EINVAL,
+    };
+    crate::pty::create(pid) as i64
+}
+
+/// Spawn `path` as a child and attach it as the slave of pty `id`. Its stdin
+/// reads drain the pty's master→slave ring and its stdout/stderr writes feed the
+/// slave→master ring (see `sys_read`/`sys_write` routing). Returns the child pid.
+fn sys_pty_spawn(path: *const u8, path_len: usize, id: u32) -> i64 {
+    let master = match crate::process::current_process() {
+        Some(process) => process.pid,
+        None => return EINVAL,
+    };
+    let child = match spawn_process_from_user(path, path_len) {
+        Ok(pid) => pid,
+        Err(error) => return error,
+    };
+    if !crate::pty::attach_slave(id, master, child) {
+        let _ = crate::process::autoreap_process(child, "pty-attach-failed");
+        return EINVAL;
+    }
+    child.0 as i64
+}
+
+/// Master side: drain the slave's stdout. Returns bytes read (0 = nothing yet),
+/// or `EPIPE` once the slave has exited and its output is fully drained.
+fn sys_pty_read(id: u32, buf: *mut u8, count: usize) -> i64 {
+    if count == 0 {
+        return 0;
+    }
+    if let Err(error) = validate_user_range(buf as u64, count) {
+        return error;
+    }
+    let master = match crate::process::current_process() {
+        Some(process) => process.pid,
+        None => return EINVAL,
+    };
+    let mut kernel_buf = Vec::new();
+    kernel_buf.resize(count, 0);
+    match crate::pty::master_read(id, master, &mut kernel_buf) {
+        Some((0, true)) => EPIPE,
+        Some((n, _)) => {
+            if let Err(error) = copy_buffer_to_user(buf, &kernel_buf[..n]) {
+                return error;
+            }
+            n as i64
+        }
+        None => EINVAL,
+    }
+}
+
+/// Master side: enqueue bytes for the slave's stdin. Returns bytes accepted.
+fn sys_pty_write(id: u32, buf: *const u8, count: usize) -> i64 {
+    if count == 0 {
+        return 0;
+    }
+    let data = match copy_buffer_from_user(buf, count) {
+        Ok(data) => data,
+        Err(error) => return error,
+    };
+    let master = match crate::process::current_process() {
+        Some(process) => process.pid,
+        None => return EINVAL,
+    };
+    match crate::pty::master_write(id, master, &data) {
+        Some(n) => n as i64,
+        None => EINVAL,
+    }
+}
+
+/// Master side: destroy the pty. Its slave's next stdin read observes EOF.
+fn sys_pty_close(id: u32) -> i64 {
+    let master = match crate::process::current_process() {
+        Some(process) => process.pid,
+        None => return EINVAL,
+    };
+    if crate::pty::close(id, master) {
+        0
+    } else {
+        EINVAL
+    }
+}
+
 
 fn sys_wait_process(pid: u32, status: *mut WaitStatus) -> i64 {
     let wait_record = match crate::process::wait_for_child(crate::process::ProcessId(pid as u64)) {

@@ -67,6 +67,11 @@ pub const SYSCALL_FB_PRESENT: usize = 57;
 pub const SYSCALL_HANDLE_SHARED_LEN: usize = 58;
 pub const SYSCALL_RECEIVE_MESSAGE_FROM: usize = 59;
 pub const SYSCALL_GET_MOUSE_STATE: usize = 60;
+pub const SYSCALL_PTY_CREATE: usize = 61;
+pub const SYSCALL_PTY_SPAWN: usize = 62;
+pub const SYSCALL_PTY_READ: usize = 63;
+pub const SYSCALL_PTY_WRITE: usize = 64;
+pub const SYSCALL_PTY_CLOSE: usize = 65;
 
 /// Права хэндлов (capabilities). Совпадают с битами в ядре (kernel/src/handle.rs).
 pub const RIGHT_READ: u32 = 1 << 0;
@@ -105,6 +110,7 @@ pub const ENOSYS: isize = -38;
 pub const EMSGSIZE: isize = -90;
 pub const EOPNOTSUPP: isize = -95;
 pub const ENOBUFS: isize = -105;
+pub const EPIPE: isize = -32;
 
 const PAGE_SIZE: usize = 4096;
 const HEAP_GROW_CHUNK: usize = 64 * 1024;
@@ -1184,6 +1190,51 @@ pub fn kill(pid: u32) -> isize {
 
 pub fn spawn(path: &str) -> isize {
     syscall2(SYSCALL_SPAWN_PROCESS, path.as_ptr() as usize, path.len())
+}
+
+/// Create a PTY endpoint owned by this process (the terminal emulator/master).
+/// Returns the pty id (>= 1) or a negative errno.
+pub fn pty_create() -> isize {
+    syscall0(SYSCALL_PTY_CREATE)
+}
+
+/// Spawn `path` attached as the slave of pty `id`: the child's stdin reads drain
+/// what we `pty_write`, and its stdout/stderr feed what we `pty_read`. Returns
+/// the child pid or a negative errno.
+pub fn pty_spawn(path: &str, id: u32) -> isize {
+    syscall3(
+        SYSCALL_PTY_SPAWN,
+        path.as_ptr() as usize,
+        path.len(),
+        id as usize,
+    )
+}
+
+/// Master side: read the slave's stdout into `buf`. Returns bytes read (0 means
+/// nothing available yet — yield and retry), or `EPIPE` once the slave has
+/// exited and its output is drained.
+pub fn pty_read(id: u32, buf: &mut [u8]) -> isize {
+    syscall3(
+        SYSCALL_PTY_READ,
+        id as usize,
+        buf.as_mut_ptr() as usize,
+        buf.len(),
+    )
+}
+
+/// Master side: write `buf` to the slave's stdin. Returns bytes accepted.
+pub fn pty_write(id: u32, buf: &[u8]) -> isize {
+    syscall3(
+        SYSCALL_PTY_WRITE,
+        id as usize,
+        buf.as_ptr() as usize,
+        buf.len(),
+    )
+}
+
+/// Master side: destroy pty `id`; the slave then sees EOF on stdin.
+pub fn pty_close(id: u32) -> isize {
+    syscall1(SYSCALL_PTY_CLOSE, id as usize)
 }
 
 pub fn wait(pid: u32, status: &mut WaitStatus) -> isize {

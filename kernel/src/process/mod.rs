@@ -837,6 +837,8 @@ impl Process {
     /// The caller must have switched away from this address space first.
     fn release_vm_resources(&mut self) {
         self.address_space = None;
+        // Drop any PTY endpoints this process mastered (terminal emulator exit).
+        crate::pty::on_process_exit(self.pid);
         for (_, id) in core::mem::take(&mut self.shared_pages) {
             shared_vm_release(id, 1);
         }
