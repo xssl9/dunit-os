@@ -595,6 +595,9 @@ struct ClientState {
     // so it is safe to blit; `win_created` once it owns a Win in the model.
     ready: bool,
     win_created: bool,
+    /// Index into `LAUNCH_APPS` of the app this client runs (0xFF = unknown),
+    /// used to draw a "running" indicator on the matching dock icon.
+    app: u8,
 }
 
 impl ClientState {
@@ -612,6 +615,7 @@ impl ClientState {
             presented: false,
             ready: false,
             win_created: false,
+            app: 0xFF,
         }
     }
 }
@@ -683,6 +687,7 @@ fn spawn_client(
     c.conn = conn;
     c.slot_x = slot_x;
     c.slot_y = slot_y;
+    c.app = app_index(app);
     let mut hs = [0u8; 8];
     hs[0..4].copy_from_slice(&libdunit::get_pid().to_le_bytes());
     hs[4..8].copy_from_slice(&id.to_le_bytes());
@@ -928,6 +933,27 @@ const LAUNCH_APPS: [(&[u8], &str); 5] = [
     (b"TERM", "gui_terminal"),
 ];
 
+/// Index of `path` in `LAUNCH_APPS`, or 0xFF if it is not a launchable app.
+/// Lets a spawned client be tied back to its dock icon for the running marker.
+fn app_index(path: &str) -> u8 {
+    for (i, (_, p)) in LAUNCH_APPS.iter().enumerate() {
+        if *p == path {
+            return i as u8;
+        }
+    }
+    0xFF
+}
+
+/// Rect of the i-th dock icon (0-based). The dock is a vertical strip down the
+/// left edge, below the top panel; icons are square cells laid out top-down.
+fn dock_icon_rect(ly: &Layout, i: i32) -> (i32, i32, i32, i32) {
+    let inset = 6;
+    let iw = ly.dock_w - 2 * inset;
+    let x = inset;
+    let y = ly.panel_h + inset + i * (iw + inset);
+    (x, y, iw, iw)
+}
+
 /// Rect of the i-th launcher-menu entry (0-based), dropped below the launcher.
 fn menu_item_rect(ly: &Layout, i: i32) -> (i32, i32, i32, i32) {
     (0, ly.panel_h + i * ly.menu_item_h, ly.menu_w, ly.menu_item_h)
@@ -1034,6 +1060,8 @@ struct Win {
     /// window's hit-tests and framing stay self-contained.
     title_h: i32,
     border: i32,
+    /// Index into `LAUNCH_APPS` (0xFF = unknown) — drives the dock running marker.
+    app: u8,
 }
 
 impl Win {
@@ -1149,8 +1177,12 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         if cy - ly.title_h < ly.panel_h + ly.border {
             cy = ly.panel_h + ly.title_h + ly.border;
         }
+        // Keep the whole window to the right of the reserved left dock strip.
+        if cx < ly.dock_w + ly.border {
+            cx = ly.dock_w + ly.border;
+        }
         if cx + sw + ly.border > bw as i32 {
-            cx = (bw as i32 - sw - ly.border).max(ly.border);
+            cx = (bw as i32 - sw - ly.border).max(ly.dock_w + ly.border);
         }
         if cy + sh + ly.border > bh as i32 {
             cy = (bh as i32 - sh - ly.border).max(ly.panel_h + ly.title_h + ly.border);
@@ -1167,6 +1199,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             alive: true,
             title_h: ly.title_h,
             border: ly.border,
+            app: clients[i].app,
         });
         clients[i].ready = true;
         clients[i].win_created = true;
@@ -1211,8 +1244,11 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             let step = (wins.len() as i32 % 6) * 40;
             let mut cx = 90 + step + ly.border;
             let mut cy = ly.panel_h + ly.title_h + ly.border + step;
+            if cx < ly.dock_w + ly.border {
+                cx = ly.dock_w + ly.border;
+            }
             if cx + sw + ly.border > bw as i32 {
-                cx = (bw as i32 - sw - ly.border).max(ly.border);
+                cx = (bw as i32 - sw - ly.border).max(ly.dock_w + ly.border);
             }
             if cy + sh + ly.border > bh as i32 {
                 cy = (bh as i32 - sh - ly.border).max(ly.panel_h + ly.title_h + ly.border);
@@ -1229,6 +1265,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 alive: true,
                 title_h: ly.title_h,
                 border: ly.border,
+                app: clients[i].app,
             });
             clients[i].win_created = true;
             z.push(wi);
@@ -1284,6 +1321,26 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                     slot += 1;
                 }
             }
+        } else if press && mx < ly.dock_w {
+            // Dock strip (left edge, below the panel): a click on a pinned icon
+            // spawns that app; any other click is consumed. The dock owns its
+            // band — clicks never reach a client.
+            let mut chosen: Option<usize> = None;
+            for i in 0..LAUNCH_APPS.len() {
+                let (ix, iy, iw, ih) = dock_icon_rect(&ly, i as i32);
+                if mx >= ix && mx < ix + iw && my >= iy && my < iy + ih {
+                    chosen = Some(i);
+                    break;
+                }
+            }
+            if let Some(i) = chosen {
+                if clients.len() < ly.max_windows {
+                    if let Some(c) = spawn_client(server, next_id, 0, 0, LAUNCH_APPS[i].1) {
+                        clients.push(c);
+                        next_id += 1;
+                    }
+                }
+            }
         } else if press {
             let mut hit: Option<usize> = None;
             let mut zi = z.len();
@@ -1320,7 +1377,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         if let Some((wi, ox, oy)) = drag {
             let mut ncx = mx - ox;
             let mut ncy = my - oy;
-            ncx = ncx.max(ly.border).min(bw as i32 - wins[wi].sw - ly.border);
+            ncx = ncx.max(ly.dock_w + ly.border).min(bw as i32 - wins[wi].sw - ly.border);
             ncy = ncy.max(ly.panel_h + ly.title_h + ly.border).min(bh as i32 - wins[wi].sh - ly.border);
             wins[wi].cx = ncx;
             wins[wi].cy = ncy;
@@ -1500,6 +1557,40 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 theme.panel_text,
                 &clk,
             );
+        }
+
+        // --- DWM dock: pinned app launchers down the left edge, below the panel ---
+        fill_rect(
+            &mut back,
+            bw,
+            bh,
+            0,
+            ly.panel_h,
+            ly.dock_w,
+            bh as i32 - ly.panel_h,
+            theme.panel,
+        );
+        for i in 0..LAUNCH_APPS.len() {
+            let (ix, iy, iw, ih) = dock_icon_rect(&ly, i as i32);
+            if iy + ih > bh as i32 {
+                break;
+            }
+            let hover = mx >= ix && mx < ix + iw && my >= iy && my < iy + ih;
+            let bg = if hover {
+                theme.taskbtn_focused
+            } else {
+                theme.taskbtn
+            };
+            fill_rect(&mut back, bw, bh, ix, iy, iw, ih, bg);
+            // App initial (W/C/S/F/T), centered in the icon cell.
+            let tx = ix + (iw - GLYPH_W * 3) / 2;
+            let ty = iy + (ih - 5 * 3) / 2;
+            draw_text_3x5(&mut back, bw, bh, tx, ty, 3, theme.panel_text, &LAUNCH_APPS[i].0[..1]);
+            // Running marker: accent bar on the icon's left edge when any live
+            // window belongs to this app.
+            if wins.iter().any(|w| w.alive && w.app == i as u8) {
+                fill_rect(&mut back, bw, bh, ix - 4, iy + 2, 3, ih - 4, theme.launcher);
+            }
         }
 
         // Launcher dropdown, painted on top of the panel and every window.

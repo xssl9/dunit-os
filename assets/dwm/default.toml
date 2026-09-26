@@ -35,4 +35,5 @@ taskbtn_w        = 120
 taskbtn_gap      = 4
 menu_w           = 130
 menu_item_h      = 26
+dock_w           = 48
 max_windows      = 8
