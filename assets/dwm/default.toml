@@ -1,0 +1,24 @@
+# Dunit DWM system defaults (Stack B compositor).
+#
+# Loaded by gui_server at desktop start from /system/share/dwm/default.toml
+# (embedded in the kernel MemFS). Unknown keys are ignored for forward
+# compatibility; a missing or unparseable file falls back to the built-in
+# Green Tea defaults baked into gui_server (the last-known-good baseline).
+#
+# Colors are #RRGGBB or #AARRGGBB (alpha defaults to opaque). Geometry is in
+# pixels.
+
+[theme]
+desktop          = "#1E1E2E"
+title_focused    = "#313244"
+title_unfocused  = "#232331"
+border_focused   = "#A6E3A1"
+border_unfocused = "#45475A"
+close            = "#F38BA8"
+panel            = "#181825"
+panel_text       = "#CDD6F4"
+launcher         = "#A6E3A1"
+taskbtn          = "#313244"
+taskbtn_focused  = "#45475A"
+menu             = "#11111B"
+menu_hover       = "#45475A"

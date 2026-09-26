@@ -60,6 +60,10 @@ static PTY_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/pty_test
 static DSH_BYTES: &[u8] = include_bytes!("../../../build/userspace/dsh");
 static GUI_TERMINAL_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_terminal");
 
+/// DWM system settings (TOML), read at desktop start by gui_server. Not an ELF —
+/// a plain text asset embedded in the MemFS at /system/share/dwm/default.toml.
+static DWM_DEFAULT_TOML: &[u8] = include_bytes!("../../../assets/dwm/default.toml");
+
 pub struct AssetEntry {
     pub path: &'static str,
     pub data: &'static [u8],
@@ -689,6 +693,14 @@ pub fn init() -> Result<()> {
         (*ROOT_MEMFS.0.get()).add_file("/app/pty_test", PTY_TEST_BYTES.to_vec());
         (*ROOT_MEMFS.0.get()).add_file("/app/dsh", DSH_BYTES.to_vec());
         (*ROOT_MEMFS.0.get()).add_file("/app/gui_terminal", GUI_TERMINAL_BYTES.to_vec());
+
+        // DWM system settings tree (slice 9): read-only defaults for gui_server.
+        // MemFS mkdir is not recursive and `/system` is not a base dir, so each
+        // level must be created in order before the leaf file is added.
+        let _ = (*ROOT_MEMFS.0.get()).mkdir("/system");
+        let _ = (*ROOT_MEMFS.0.get()).mkdir("/system/share");
+        let _ = (*ROOT_MEMFS.0.get()).mkdir("/system/share/dwm");
+        (*ROOT_MEMFS.0.get()).add_file("/system/share/dwm/default.toml", DWM_DEFAULT_TOML.to_vec());
 
         vfs.mount("/", &mut *ROOT_MEMFS.0.get())?;
         serial_log("[MEMFS] mounted as /\r\n");

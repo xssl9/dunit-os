@@ -23,6 +23,9 @@ use gui_protocol_v1::server::Server;
 use gui_protocol_v1::wire::Request;
 use gui_protocol_v1::Opcode;
 
+mod settings;
+use settings::Theme;
+
 #[panic_handler]
 fn panic(_: &PanicInfo) -> ! {
     // No unwinding in userspace: report and exit non-zero.
@@ -810,12 +813,8 @@ fn serve_two_clients() -> bool {
 const TITLE_H: i32 = 26;
 const BORDER: i32 = 2;
 
-const COLOR_DESKTOP: u32 = 0xFF1E1E2E;
-const COLOR_TITLE_FOCUSED: u32 = 0xFF313244;
-const COLOR_TITLE_UNFOCUSED: u32 = 0xFF232331;
-const COLOR_BORDER_FOCUSED: u32 = 0xFFA6E3A1;
-const COLOR_BORDER_UNFOCUSED: u32 = 0xFF45475A;
-const COLOR_CLOSE: u32 = 0xFFF38BA8;
+// Compositor colors now live in `settings::Theme` (loaded from TOML at desktop
+// start), so the palette constants that used to sit here are gone.
 
 /// Fill an axis-aligned rectangle in the back buffer, clipped to its bounds.
 fn fill_rect(buf: &mut [u32], bw: usize, bh: usize, x: i32, y: i32, w: i32, h: i32, color: u32) {
@@ -919,11 +918,6 @@ fn draw_cursor(buf: &mut [u32], bw: usize, bh: usize, px: i32, py: i32) {
 // client.
 
 const PANEL_H: i32 = 28;
-const COLOR_PANEL: u32 = 0xFF181825;
-const COLOR_PANEL_TEXT: u32 = 0xFFCDD6F4;
-const COLOR_LAUNCHER: u32 = 0xFFA6E3A1;
-const COLOR_TASKBTN: u32 = 0xFF313244;
-const COLOR_TASKBTN_FOCUSED: u32 = 0xFF45475A;
 
 const LAUNCHER_W: i32 = 40;
 const TASKBTN_W: i32 = 120;
@@ -944,8 +938,6 @@ const LAUNCH_APPS: [(&[u8], &str); 5] = [
 
 const MENU_W: i32 = 130;
 const MENU_ITEM_H: i32 = 26;
-const COLOR_MENU: u32 = 0xFF11111B;
-const COLOR_MENU_HOVER: u32 = 0xFF45475A;
 
 /// Rect of the i-th launcher-menu entry (0-based), dropped below the launcher.
 fn menu_item_rect(i: i32) -> (i32, i32, i32, i32) {
@@ -1133,8 +1125,18 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     let bw = fb.width as usize;
     let bh = fb.height as usize;
 
+    // Slice 9: the palette is data. Overlay /system/share/dwm/default.toml on the
+    // Green Tea baseline; a missing/garbage file keeps the baseline (last-known-good).
+    let cfg = settings::load();
+    let theme: Theme = cfg.theme;
+    if cfg.from_file {
+        libdunit::println("gui_server: settings loaded from /system/share/dwm/default.toml");
+    } else {
+        libdunit::println("gui_server: settings default (no config file)");
+    }
+
     let mut back: Vec<u32> = Vec::new();
-    back.resize(bw * bh, COLOR_DESKTOP);
+    back.resize(bw * bh, theme.desktop);
 
     // Build the window model from presented clients, tiling them if their slot
     // origins collide, and keeping the title bar on-screen.
@@ -1396,7 +1398,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
 
         // Clear desktop.
         for px in back.iter_mut() {
-            *px = COLOR_DESKTOP;
+            *px = theme.desktop;
         }
 
         // Draw windows bottom-to-top.
@@ -1407,14 +1409,14 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             }
             let is_focused = focused == Some(wi);
             let border = if is_focused {
-                COLOR_BORDER_FOCUSED
+                theme.border_focused
             } else {
-                COLOR_BORDER_UNFOCUSED
+                theme.border_unfocused
             };
             let title = if is_focused {
-                COLOR_TITLE_FOCUSED
+                theme.title_focused
             } else {
-                COLOR_TITLE_UNFOCUSED
+                theme.title_unfocused
             };
             let (ox, oy, ow, oh) = w.outer();
             fill_rect(&mut back, bw, bh, ox, oy, ow, oh, border);
@@ -1429,7 +1431,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 w.cy - TITLE_H + 6,
                 sz,
                 sz,
-                COLOR_CLOSE,
+                theme.close,
             );
             // Client surface.
             let want = (w.sw as usize) * (w.sh as usize);
@@ -1449,10 +1451,10 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         }
 
         // --- DWM panel on top of every window ---
-        fill_rect(&mut back, bw, bh, 0, 0, bw as i32, PANEL_H, COLOR_PANEL);
+        fill_rect(&mut back, bw, bh, 0, 0, bw as i32, PANEL_H, theme.panel);
         // Launcher glyph: three stacked bars (hamburger) in the accent color.
         for r in 0..3 {
-            fill_rect(&mut back, bw, bh, 10, 8 + r * 5, 20, 2, COLOR_LAUNCHER);
+            fill_rect(&mut back, bw, bh, 10, 8 + r * 5, 20, 2, theme.launcher);
         }
         // One taskbar button per live window, in creation order; the focused
         // window's button is highlighted. Label = 1-based window number.
@@ -1467,14 +1469,14 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                     break;
                 }
                 let bg = if focused == Some(wi) {
-                    COLOR_TASKBTN_FOCUSED
+                    theme.taskbtn_focused
                 } else {
-                    COLOR_TASKBTN
+                    theme.taskbtn
                 };
                 fill_rect(&mut back, bw, bh, bx, by, bw2, bh2, bg);
                 let mut label = [0u8; 2];
                 two_digits(&mut label, 0, (wi as u64) + 1);
-                draw_text_3x5(&mut back, bw, bh, bx + 8, by + 5, 2, COLOR_PANEL_TEXT, &label);
+                draw_text_3x5(&mut back, bw, bh, bx + 8, by + 5, 2, theme.panel_text, &label);
                 slot += 1;
             }
         }
@@ -1497,7 +1499,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 bw as i32 - clk_w - 12,
                 6,
                 3,
-                COLOR_PANEL_TEXT,
+                theme.panel_text,
                 &clk,
             );
         }
@@ -1507,7 +1509,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             for i in 0..LAUNCH_APPS.len() {
                 let (ix, iy, iw, ih) = menu_item_rect(i as i32);
                 let hover = mx >= ix && mx < ix + iw && my >= iy && my < iy + ih;
-                let bg = if hover { COLOR_MENU_HOVER } else { COLOR_MENU };
+                let bg = if hover { theme.menu_hover } else { theme.menu };
                 fill_rect(&mut back, bw, bh, ix, iy, iw, ih, bg);
                 draw_text_3x5(
                     &mut back,
@@ -1516,7 +1518,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                     ix + 10,
                     iy + (ih - 5 * 3) / 2,
                     3,
-                    COLOR_PANEL_TEXT,
+                    theme.panel_text,
                     LAUNCH_APPS[i].0,
                 );
             }
