@@ -77,6 +77,9 @@ pub enum Syscall {
     PtyClose = 65,
     GetChar = 66,
     GetKeyEvent = 67,
+    Unlink = 68,
+    Rename = 69,
+    Mkdir = 70,
 }
 
 impl Syscall {
@@ -151,6 +154,9 @@ impl Syscall {
             65 => Some(Syscall::PtyClose),
             66 => Some(Syscall::GetChar),
             67 => Some(Syscall::GetKeyEvent),
+            68 => Some(Syscall::Unlink),
+            69 => Some(Syscall::Rename),
+            70 => Some(Syscall::Mkdir),
             _ => None,
         }
     }
@@ -657,6 +663,14 @@ pub extern "C" fn syscall_handler(
         Syscall::PtyClose => sys_pty_close(arg0 as u32),
         Syscall::GetChar => sys_get_char(),
         Syscall::GetKeyEvent => sys_get_key_event(),
+        Syscall::Unlink => sys_unlink(arg0 as *const u8, arg1 as usize),
+        Syscall::Rename => sys_rename(
+            arg0 as *const u8,
+            arg1 as usize,
+            arg2 as *const u8,
+            arg3 as usize,
+        ),
+        Syscall::Mkdir => sys_mkdir(arg0 as *const u8, arg1 as usize),
     }
 }
 
@@ -1042,6 +1056,128 @@ fn sys_open(path: *const u8, path_len: usize, flags: u32) -> i64 {
             }
             process_error_to_errno(error)
         }
+    }
+}
+
+/// System locations that structural FS mutations (unlink/rename/mkdir) must
+/// never touch: the read-only asset tree, the app binaries, the OS-owned
+/// virtual dirs, and the DWM system-settings tree. User-writable areas
+/// (/tmp, /usr, /cfg, /persist) are intentionally excluded so the file manager
+/// can operate there. Asset entries are additionally `MemData::Static` in
+/// MemFS, which refuses mutation on its own (defense in depth).
+const PROTECTED_ROOTS: [&str; 6] = ["/assets", "/app", "/system", "/kernel", "/proc", "/dev"];
+
+/// True if `abs` (an already-normalized absolute path) is one of the protected
+/// roots or lives underneath one.
+fn path_is_protected(abs: &str) -> bool {
+    PROTECTED_ROOTS.iter().any(|root| {
+        abs == *root
+            || (abs.len() > root.len()
+                && abs.as_bytes()[root.len()] == b'/'
+                && &abs[..root.len()] == *root)
+    })
+}
+
+fn sys_unlink(path: *const u8, path_len: usize) -> i64 {
+    let path = match copy_string_from_user_len(path, path_len, MAX_USER_PATH) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+
+    let cwd = match crate::process::current_process() {
+        Some(process) => process.cwd.clone(),
+        None => return EINVAL,
+    };
+
+    let vfs = match crate::fs::vfs::get_vfs() {
+        Some(vfs) => vfs,
+        None => return EIO,
+    };
+
+    let abs = match vfs.normalize_at(&cwd, &path) {
+        Ok(abs) => abs,
+        Err(error) => return vfs_error_to_errno(error),
+    };
+    if path_is_protected(&abs) {
+        return EACCES;
+    }
+
+    match vfs.remove_at(&cwd, &path) {
+        Ok(()) => 0,
+        Err(error) => vfs_error_to_errno(error),
+    }
+}
+
+fn sys_mkdir(path: *const u8, path_len: usize) -> i64 {
+    let path = match copy_string_from_user_len(path, path_len, MAX_USER_PATH) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+
+    let cwd = match crate::process::current_process() {
+        Some(process) => process.cwd.clone(),
+        None => return EINVAL,
+    };
+
+    let vfs = match crate::fs::vfs::get_vfs() {
+        Some(vfs) => vfs,
+        None => return EIO,
+    };
+
+    let abs = match vfs.normalize_at(&cwd, &path) {
+        Ok(abs) => abs,
+        Err(error) => return vfs_error_to_errno(error),
+    };
+    if path_is_protected(&abs) {
+        return EACCES;
+    }
+
+    match vfs.mkdir_at(&cwd, &path) {
+        Ok(()) => 0,
+        Err(error) => vfs_error_to_errno(error),
+    }
+}
+
+fn sys_rename(
+    old_path: *const u8,
+    old_len: usize,
+    new_path: *const u8,
+    new_len: usize,
+) -> i64 {
+    let old = match copy_string_from_user_len(old_path, old_len, MAX_USER_PATH) {
+        Ok(old) => old,
+        Err(error) => return error,
+    };
+    let new = match copy_string_from_user_len(new_path, new_len, MAX_USER_PATH) {
+        Ok(new) => new,
+        Err(error) => return error,
+    };
+
+    let cwd = match crate::process::current_process() {
+        Some(process) => process.cwd.clone(),
+        None => return EINVAL,
+    };
+
+    let vfs = match crate::fs::vfs::get_vfs() {
+        Some(vfs) => vfs,
+        None => return EIO,
+    };
+
+    let old_abs = match vfs.normalize_at(&cwd, &old) {
+        Ok(abs) => abs,
+        Err(error) => return vfs_error_to_errno(error),
+    };
+    let new_abs = match vfs.normalize_at(&cwd, &new) {
+        Ok(abs) => abs,
+        Err(error) => return vfs_error_to_errno(error),
+    };
+    if path_is_protected(&old_abs) || path_is_protected(&new_abs) {
+        return EACCES;
+    }
+
+    match vfs.rename_at(&cwd, &old, &new) {
+        Ok(()) => 0,
+        Err(error) => vfs_error_to_errno(error),
     }
 }
 

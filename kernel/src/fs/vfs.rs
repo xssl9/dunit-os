@@ -231,6 +231,12 @@ pub trait FileSystem: Send {
     fn remove(&mut self, path: &str) -> Result<()>;
     fn truncate(&mut self, path: &str) -> Result<()>;
     fn stat(&mut self, path: &str) -> Result<FileStat>;
+
+    /// Rename/move an entry within this filesystem. Filesystems that cannot
+    /// support it (device/proc/read-only backends) inherit this default.
+    fn rename(&mut self, _old: &str, _new: &str) -> Result<()> {
+        Err(VfsError::Unsupported)
+    }
 }
 
 pub struct OpenFile {
@@ -401,6 +407,26 @@ impl VirtualFileSystem {
     pub fn remove_at(&mut self, cwd: &str, path: &str) -> Result<()> {
         let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut *VFS_PATH_BUFFER.0.get())? };
         unsafe { (&mut *fs).remove(relative_path) }
+    }
+
+    pub fn rename_at(&mut self, cwd: &str, old: &str, new: &str) -> Result<()> {
+        // Resolve both endpoints to (filesystem, relative path). The path
+        // buffer is shared, so copy each relative path out before the next
+        // resolve overwrites it. Cross-filesystem renames are unsupported.
+        let (old_fs, old_rel) = {
+            let (fs, rel) =
+                unsafe { self.resolve_path(old, cwd, &mut *VFS_PATH_BUFFER.0.get())? };
+            (fs, String::from(rel))
+        };
+        let (new_fs, new_rel) = {
+            let (fs, rel) =
+                unsafe { self.resolve_path(new, cwd, &mut *VFS_PATH_BUFFER.0.get())? };
+            (fs, String::from(rel))
+        };
+        if old_fs as *const () != new_fs as *const () {
+            return Err(VfsError::Unsupported);
+        }
+        unsafe { (&mut *old_fs).rename(&old_rel, &new_rel) }
     }
 
     pub fn truncate_at(&mut self, cwd: &str, path: &str) -> Result<()> {
@@ -730,4 +756,81 @@ pub fn register_device_node(path: &str) {
 
 pub fn root_memfs_stats() -> crate::fs::memfs::MemFsStats {
     unsafe { (*ROOT_MEMFS.0.get()).stats() }
+}
+
+/// Boot smoke test (feature `boot-smoke-tests`) exercising the M4 structural
+/// FS syscalls at the VFS layer: mkdir, create, rename (file + directory
+/// subtree re-home), unlink, the error paths (AlreadyExists / NotFound /
+/// IsADirectory) and the read-only guard on `MemData::Static` asset entries.
+/// Returns true only if every step behaves as expected.
+#[cfg(feature = "boot-smoke-tests")]
+pub fn run_fs_mutation_smoke() -> bool {
+    fn expect(cond: bool, msg: &str) -> bool {
+        if !cond {
+            serial_log("[FS-SMOKE] FAIL: ");
+            serial_log(msg);
+            serial_log("\r\n");
+        }
+        cond
+    }
+
+    let vfs = match get_vfs() {
+        Some(vfs) => vfs,
+        None => return false,
+    };
+    let root = "/";
+    let mut ok = true;
+
+    // Happy path: mkdir under the writable /tmp tree.
+    ok &= expect(vfs.mkdir_at(root, "/tmp/fs_smoke").is_ok(), "mkdir /tmp/fs_smoke");
+    ok &= expect(
+        vfs.mkdir_at(root, "/tmp/fs_smoke") == Err(VfsError::AlreadyExists),
+        "mkdir duplicate -> AlreadyExists",
+    );
+
+    // Create a file, rename it, verify the old name is gone and new present.
+    ok &= expect(vfs.create_at(root, "/tmp/fs_smoke/a.txt").is_ok(), "create a.txt");
+    ok &= expect(
+        vfs.rename_at(root, "/tmp/fs_smoke/a.txt", "/tmp/fs_smoke/b.txt").is_ok(),
+        "rename a.txt -> b.txt",
+    );
+    ok &= expect(
+        vfs.stat_at(root, "/tmp/fs_smoke/a.txt") == Err(VfsError::NotFound),
+        "old name gone",
+    );
+    ok &= expect(vfs.stat_at(root, "/tmp/fs_smoke/b.txt").is_ok(), "new name present");
+
+    // Rename the directory; its descendant file must be re-homed with it.
+    ok &= expect(
+        vfs.rename_at(root, "/tmp/fs_smoke", "/tmp/fs_smoke2").is_ok(),
+        "rename dir -> fs_smoke2",
+    );
+    ok &= expect(
+        vfs.stat_at(root, "/tmp/fs_smoke2/b.txt").is_ok(),
+        "descendant re-homed",
+    );
+
+    // Unlink the file; a directory cannot be unlinked.
+    ok &= expect(vfs.remove_at(root, "/tmp/fs_smoke2/b.txt").is_ok(), "unlink b.txt");
+    ok &= expect(
+        vfs.stat_at(root, "/tmp/fs_smoke2/b.txt") == Err(VfsError::NotFound),
+        "b.txt gone after unlink",
+    );
+    ok &= expect(
+        vfs.remove_at(root, "/tmp/fs_smoke2") == Err(VfsError::IsADirectory),
+        "unlink dir -> IsADirectory",
+    );
+
+    // Read-only guard: a Static asset entry must reject remove and rename.
+    const ASSET: &str = "/assets/fonts/DejaVuSans.ttf";
+    ok &= expect(
+        vfs.remove_at(root, ASSET) == Err(VfsError::PermissionDenied),
+        "remove static asset -> PermissionDenied",
+    );
+    ok &= expect(
+        vfs.rename_at(root, ASSET, "/tmp/stolen.ttf") == Err(VfsError::PermissionDenied),
+        "rename static asset -> PermissionDenied",
+    );
+
+    ok
 }

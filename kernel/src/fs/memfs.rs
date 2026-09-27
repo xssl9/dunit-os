@@ -441,11 +441,73 @@ impl FileSystem for MemFs {
             return Err(VfsError::InvalidPath);
         }
         let idx = self.node_index(clean).ok_or(VfsError::NotFound)?;
+        // Only Owned nodes are mutable; asset/static entries are read-only.
+        if matches!(self.nodes[idx].data, MemData::Static(_)) {
+            return Err(VfsError::PermissionDenied);
+        }
         if self.nodes[idx].file_type != FileType::File {
             return Err(VfsError::IsADirectory);
         }
         self.nodes.remove(idx);
         self.open_handles.retain(|(_, handle)| handle.path != clean);
+        Ok(())
+    }
+
+    fn rename(&mut self, old: &str, new: &str) -> Result<()> {
+        let old_clean = Self::clean(old);
+        let new_clean = Self::clean(new);
+        if old_clean.is_empty() || new_clean.is_empty() {
+            return Err(VfsError::InvalidPath);
+        }
+        if old_clean == new_clean {
+            return Ok(());
+        }
+        // A directory cannot be moved inside its own subtree.
+        let mut old_slash = String::from(old_clean);
+        old_slash.push('/');
+        if new_clean.starts_with(&old_slash) {
+            return Err(VfsError::InvalidPath);
+        }
+
+        let idx = self.node_index(old_clean).ok_or(VfsError::NotFound)?;
+        // Only Owned nodes are mutable; asset/static entries are read-only.
+        if matches!(self.nodes[idx].data, MemData::Static(_)) {
+            return Err(VfsError::PermissionDenied);
+        }
+        if self.node_type(new_clean).is_some() {
+            return Err(VfsError::AlreadyExists);
+        }
+        if !self.parent_exists(new_clean) {
+            return Err(VfsError::NotFound);
+        }
+
+        let is_dir = self.nodes[idx].file_type == FileType::Directory;
+        self.nodes[idx].path = String::from(new_clean);
+
+        if is_dir {
+            // Re-home every descendant: "<old>/<rest>" -> "<new>/<rest>".
+            for node in self.nodes.iter_mut() {
+                if node.path.starts_with(&old_slash) {
+                    let mut moved = String::from(new_clean);
+                    moved.push_str(&node.path[old_clean.len()..]);
+                    node.path = moved;
+                }
+            }
+            for (_, handle) in self.open_handles.iter_mut() {
+                if handle.path.starts_with(&old_slash) {
+                    let mut moved = String::from(new_clean);
+                    moved.push_str(&handle.path[old_clean.len()..]);
+                    handle.path = moved;
+                }
+            }
+        }
+
+        // Fix up any handle that referred to the renamed node itself.
+        for (_, handle) in self.open_handles.iter_mut() {
+            if handle.path == old_clean {
+                handle.path = String::from(new_clean);
+            }
+        }
         Ok(())
     }
 

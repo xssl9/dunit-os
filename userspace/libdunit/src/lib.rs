@@ -74,6 +74,9 @@ pub const SYSCALL_PTY_WRITE: usize = 64;
 pub const SYSCALL_PTY_CLOSE: usize = 65;
 pub const SYSCALL_GET_CHAR: usize = 66;
 pub const SYSCALL_GET_KEY_EVENT: usize = 67;
+pub const SYSCALL_UNLINK: usize = 68;
+pub const SYSCALL_RENAME: usize = 69;
+pub const SYSCALL_MKDIR: usize = 70;
 
 /// Права хэндлов (capabilities). Совпадают с битами в ядре (kernel/src/handle.rs).
 pub const RIGHT_READ: u32 = 1 << 0;
@@ -670,6 +673,35 @@ pub fn stat(path: &str, stat: &mut FileStat) -> isize {
         path.len(),
         stat as *mut FileStat as usize,
     )
+}
+
+/// Remove a file. Returns 0 on success or a negative errno. Directories and
+/// read-only system paths (/assets, /app, /system, ...) are refused by the
+/// kernel; use `copy_file` + `unlink` for a move within writable areas or
+/// `rename` for an atomic in-place move.
+pub fn unlink(path: &str) -> isize {
+    syscall2(SYSCALL_UNLINK, path.as_ptr() as usize, path.len())
+}
+
+/// Rename/move a filesystem entry. Both endpoints must live on the same
+/// filesystem and outside the protected system trees. Renaming a directory
+/// re-homes its whole subtree. Returns 0 on success or a negative errno.
+pub fn rename(old: &str, new: &str) -> isize {
+    syscall5(
+        SYSCALL_RENAME,
+        old.as_ptr() as usize,
+        old.len(),
+        new.as_ptr() as usize,
+        new.len(),
+        0,
+    )
+}
+
+/// Create a directory (non-recursive: the parent must already exist). Returns
+/// 0 on success or a negative errno (EEXIST if it already exists, EACCES for
+/// protected system paths).
+pub fn mkdir(path: &str) -> isize {
+    syscall2(SYSCALL_MKDIR, path.as_ptr() as usize, path.len())
 }
 
 pub fn print(s: &str) {
