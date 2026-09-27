@@ -10,7 +10,7 @@ static ELF_DEMO_BYTES: &[u8] = include_bytes!("../../../build/userspace/elf_demo
 static FS_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/fs_test");
 static EXIT_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/exit_test");
 static ARGS_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/args_test");
-static CWD_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/cwd_test");
+static COLOR_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/color_test");static CWD_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/cwd_test");
 static PATH_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/path_test");
 static IMAGE_DEMO_BYTES: &[u8] = include_bytes!("../../../build/userspace/image_demo");
 static BMP_VIEWER_BYTES: &[u8] = include_bytes!("../../../build/userspace/bmp_viewer");
@@ -571,6 +571,10 @@ pub fn init() -> Result<()> {
         let mut args_test = Vec::new();
         args_test.extend_from_slice(ARGS_TEST_BYTES);
         (*ROOT_MEMFS.0.get()).add_file("/app/args_test", args_test);
+
+        let mut color_test = Vec::new();
+        color_test.extend_from_slice(COLOR_TEST_BYTES);
+        (*ROOT_MEMFS.0.get()).add_file("/app/color_test", color_test);
 
         let mut cwd_test = Vec::new();
         cwd_test.extend_from_slice(CWD_TEST_BYTES);

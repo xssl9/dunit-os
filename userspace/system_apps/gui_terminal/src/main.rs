@@ -20,14 +20,9 @@ use alloc::vec::Vec;
 
 use gui_protocol_v1::wire::{Request, FEATURE_ARGB8888};
 
-use dunit_render::{paint, Surface};
-use dunit_style::cascade::{Cascade, NodeStyle};
-use dunit_style::parse as parse_dss;
+use dunit_render::Surface;
+use dunit_style::value::Color;
 use dunit_text::Font;
-use dunit_ui::layout::layout_measured;
-use dunit_ui::parse as parse_dui;
-use dunit_ui::tree::{Kind, NodeId};
-use dunit_widgets::{intrinsic_size, FontMeasure, Widget};
 
 // Control-message magics shared with the compositor.
 const CTRL_MAGIC: u32 = 0x3150_4143; // "CAP1" — capability announce
@@ -124,44 +119,99 @@ fn u64_at(p: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(a)
 }
 
-/// Append a `Text "…"` child, stripping characters that would break DUI parsing.
-/// Empty rows become a single space so the runtime still allocates a line box.
-fn push_line(d: &mut String, text: &str) {
-    d.push_str("Text \"");
-    let mut any = false;
-    for c in text.chars() {
-        if c != '"' && c != '{' && c != '}' {
-            d.push(c);
-            any = true;
-        }
-    }
-    if !any {
-        d.push(' ');
-    }
-    d.push_str("\" ");
+/// Terminal colors (ARGB8888). Background is fixed; the default foreground
+/// matches the old flat theme. The live `fg` is mutated by SGR (ESC[…m).
+const BG: u32 = 0xFF0B0F14;
+const FG_DEFAULT: u32 = 0xFFA6E3A1;
+const FONT_PX: f32 = 13.0;
+const ROW_PX: i32 = 16;
+
+/// The 8 ANSI colors (30-37) and bright variants (90-97), tinted to the desktop
+/// palette so program output stays coherent with the theme.
+const ANSI: [u32; 8] = [
+    0xFF45475A, 0xFFF38BA8, 0xFFA6E3A1, 0xFFF9E2AF,
+    0xFF89B4FA, 0xFFCBA6F7, 0xFF94E2D5, 0xFFCDD6F4,
+];
+const ANSI_BRIGHT: [u32; 8] = [
+    0xFF585B70, 0xFFEBA0AC, 0xFFA6E3A1, 0xFFFAB387,
+    0xFF89DCEB, 0xFFF5C2E7, 0xFF94E2D5, 0xFFFFFFFF,
+];
+
+/// ARGB8888 -> render Color.
+fn col(argb: u32) -> Color {
+    Color::rgba(
+        ((argb >> 16) & 0xFF) as u8,
+        ((argb >> 8) & 0xFF) as u8,
+        (argb & 0xFF) as u8,
+        ((argb >> 24) & 0xFF) as u8,
+    )
 }
 
-/// On-screen terminal model: completed lines plus the line currently being
-/// assembled from the shell's byte stream. `feed` interprets the stdout stream
-/// (newline commits a row, form-feed clears, backspace erases, printable ASCII
-/// appends); `dirty` gates repaints.
+/// One colored run of text within a scrollback line.
+struct Span {
+    text: String,
+    fg: u32,
+}
+
+/// ESC-sequence parser state for interpreting the shell's stdout byte stream.
+enum Esc {
+    Normal,
+    Esc,
+    Csi,
+}
+
+/// On-screen terminal model: completed lines (each a run of colored `Span`s)
+/// plus the line currently being assembled. `feed` interprets the byte stream —
+/// printable ASCII appends to the active span, `\n` commits a row, `\f` clears,
+/// `\b` erases, and CSI sequences (`ESC [ … m` etc.) drive SGR colors. `dirty`
+/// gates repaints.
 struct Term {
-    lines: Vec<String>,
-    cur: String,
+    lines: Vec<Vec<Span>>,
+    cur: Vec<Span>,
+    fg: u32,
     dirty: bool,
+    esc: Esc,
+    params: [u32; 8],
+    nparams: usize,
+    param: u32,
+    has_param: bool,
 }
 
 impl Term {
     fn new() -> Self {
-        Term { lines: Vec::new(), cur: String::new(), dirty: true }
+        Term {
+            lines: Vec::new(),
+            cur: Vec::new(),
+            fg: FG_DEFAULT,
+            dirty: true,
+            esc: Esc::Normal,
+            params: [0; 8],
+            nparams: 0,
+            param: 0,
+            has_param: false,
+        }
+    }
+    /// Append one printable char to the active span, opening a new run when the
+    /// current foreground color differs from the last span's.
+    fn push_char(&mut self, c: char) {
+        let need_new = match self.cur.last() {
+            Some(s) => s.fg != self.fg,
+            None => true,
+        };
+        if need_new {
+            self.cur.push(Span { text: String::new(), fg: self.fg });
+        }
+        self.cur.last_mut().unwrap().text.push(c);
     }
 
     fn commit_line(&mut self) {
         let done = core::mem::take(&mut self.cur);
-        // Echo each completed row to serial so the shell path is headlessly
-        // verifiable (this is our own stdout/console, not the pty).
+        // Echo the row's text to serial so the shell path stays headlessly
+        // verifiable (our own stdout/console, not the pty).
         libdunit::write(1, b"[term] ");
-        libdunit::write(1, done.as_bytes());
+        for s in &done {
+            libdunit::write(1, s.text.as_bytes());
+        }
         libdunit::write(1, b"\n");
         self.lines.push(done);
         if self.lines.len() > SCROLL_CAP {
@@ -170,19 +220,91 @@ impl Term {
         }
     }
 
+    /// Erase the last char of the active line (crossing span boundaries).
+    fn backspace(&mut self) {
+        while let Some(s) = self.cur.last_mut() {
+            if s.text.pop().is_some() {
+                if s.text.is_empty() {
+                    self.cur.pop();
+                }
+                return;
+            }
+            self.cur.pop();
+        }
+    }
+
+    /// Apply the collected SGR (`ESC [ … m`) params to the live foreground.
+    fn apply_sgr(&mut self) {
+        let n = if self.nparams == 0 { 1 } else { self.nparams };
+        for i in 0..n {
+            let p = if self.nparams == 0 { 0 } else { self.params[i] };
+            match p {
+                0 | 39 => self.fg = FG_DEFAULT,
+                30..=37 => self.fg = ANSI[(p - 30) as usize],
+                90..=97 => self.fg = ANSI_BRIGHT[(p - 90) as usize],
+                _ => {} // bold/reverse/background — not modeled
+            }
+        }
+    }
+
+    fn push_param(&mut self) {
+        if self.nparams < self.params.len() {
+            self.params[self.nparams] = self.param;
+            self.nparams += 1;
+        }
+        self.param = 0;
+        self.has_param = false;
+    }
+    /// Feed one chunk of raw shell stdout through the ESC state machine.
     fn feed(&mut self, bytes: &[u8]) {
         for &b in bytes {
+            match self.esc {
+                Esc::Esc => {
+                    self.esc = if b == b'[' { Esc::Csi } else { Esc::Normal };
+                    continue;
+                }
+                Esc::Csi => {
+                    match b {
+                        b'0'..=b'9' => {
+                            self.param =
+                                self.param.saturating_mul(10).saturating_add((b - b'0') as u32);
+                            self.has_param = true;
+                        }
+                        b';' => self.push_param(),
+                        0x40..=0x7e => {
+                            if self.has_param || self.nparams > 0 {
+                                self.push_param();
+                            }
+                            if b == b'm' {
+                                self.apply_sgr();
+                            } else if b == b'J' {
+                                // ESC[2J (and bare) — clear the scrollback.
+                                self.lines.clear();
+                                self.cur.clear();
+                            }
+                            // Other finals (H/K/cursor moves, `?` private modes)
+                            // are consumed but not modeled by the scroll view.
+                            self.nparams = 0;
+                            self.param = 0;
+                            self.has_param = false;
+                            self.esc = Esc::Normal;
+                        }
+                        _ => {} // '?' prefix and intermediates: keep scanning
+                    }
+                    continue;
+                }
+                Esc::Normal => {}
+            }
             match b {
+                0x1b => self.esc = Esc::Esc,
                 b'\n' => self.commit_line(),
                 b'\r' => {}
                 0x0c => {
                     self.lines.clear();
                     self.cur.clear();
                 }
-                0x08 => {
-                    self.cur.pop();
-                }
-                0x20..=0x7e => self.cur.push(b as char),
+                0x08 => self.backspace(),
+                0x20..=0x7e => self.push_char(b as char),
                 _ => {}
             }
         }
@@ -191,64 +313,48 @@ impl Term {
         }
     }
 
-    /// Build the DUI document: the last VISIBLE_ROWS rows (completed lines with
-    /// the in-progress line as the final row), stacked in a Column.
-    fn build_dui(&self) -> String {
-        let total = self.lines.len() + 1; // +1 for the current line
-        let start = total.saturating_sub(VISIBLE_ROWS);
-        let mut d = String::from("Column#win { ");
-        for line in self.lines.iter().skip(start) {
-            push_line(&mut d, line);
-        }
-        push_line(&mut d, &self.cur);
-        d.push('}');
-        d
-    }
 }
 
-/// Paint the current scrollback into the mapped ARGB8888 buffer via the M4 UI
-/// Runtime (DUI tree -> DSS cascade -> content-measured layout -> render).
+/// Draw one line of text with its top-left at (x, y_top); returns the pen
+/// advance in px. Mirrors the runtime painter's baseline math so it looks
+/// identical to DUI-rendered text.
+fn draw_text(surf: &mut Surface, font: &Font, x: i32, y_top: i32, color: Color, text: &str) -> f32 {
+    let baseline = y_top as f32 + font.line_metrics(FONT_PX).ascent;
+    let (glyphs, adv) = font.layout_line(text, FONT_PX);
+    for g in glyphs {
+        if let Some(bmp) = font.rasterize(g.glyph, FONT_PX) {
+            let ox = (x as f32 + g.x + 0.5) as i32 + bmp.left;
+            let oy = (baseline + 0.5) as i32 - bmp.top;
+            surf.blit_glyph(&bmp, ox, oy, color);
+        }
+    }
+    adv
+}
+
+/// Paint the scrollback into the mapped ARGB8888 buffer: fill the background,
+/// then draw the last VISIBLE_ROWS rows (completed lines plus the in-progress
+/// line) as sequences of colored spans, advancing the pen per span.
 fn render(px: *mut u8, font: &Font, term: &Term) {
-    let dui = term.build_dui();
-    let tree = match parse_dui(&dui) {
-        Ok(t) => t,
-        Err(_) => return,
-    };
-    let mut dss = String::new();
-    dss.push_str("Column#win { background: #0b0f14; padding: 8; }\n");
-    dss.push_str("Text { color: #a6e3a1; font-size: 13; padding: 1; }\n");
-    let sheet = match parse_dss(&dss) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    let mut cas = Cascade::new();
-    cas.push(sheet);
+    let pixels = unsafe { core::slice::from_raw_parts_mut(px as *mut u32, (W * H) as usize) };
+    let mut surf = Surface::new(pixels, W as usize, H as usize);
+    surf.fill_rect(0.0, 0.0, W as f32, H as f32, col(BG));
 
-    let style_of = |nid: NodeId| {
-        let node = tree.node(nid);
-        let tag = node.kind.tag();
-        let ns = match node.name.as_deref() {
-            Some(name) => NodeStyle { element: tag, id: Some(name), classes: &[], states: &[] },
-            None => NodeStyle::element(tag),
-        };
-        cas.resolve(&ns)
-    };
-
-    let fm = FontMeasure { font };
-    let measure_fn = |nid: NodeId| {
-        let node = tree.node(nid);
-        if let Kind::Element(tag) = &node.kind {
-            if let Some(w) = Widget::from_tag(tag) {
-                return intrinsic_size(w, node.text.as_deref(), &style_of(nid), &fm);
+    let total = term.lines.len() + 1; // +1 for the in-progress line
+    let start = total.saturating_sub(VISIBLE_ROWS);
+    let mut y = 8; // top padding
+    let mut draw_row = |spans: &[Span]| {
+        let mut x = 8; // left padding
+        for s in spans {
+            if !s.text.is_empty() {
+                x += draw_text(&mut surf, font, x, y, col(s.fg), &s.text) as i32;
             }
         }
-        (0.0, 0.0)
+        y += ROW_PX;
     };
-    let lay = layout_measured(&tree, W as f32, H as f32, &measure_fn);
-
-    let pixels = unsafe { core::slice::from_raw_parts_mut(px as *mut u32, (W * H) as usize) };
-    let mut surface = Surface::new(pixels, W as usize, H as usize);
-    paint(&tree, &lay, &style_of, font, &mut surface);
+    for line in term.lines.iter().skip(start) {
+        draw_row(line);
+    }
+    draw_row(&term.cur);
 }
 
 // APPEND_START
