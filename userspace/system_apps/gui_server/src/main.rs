@@ -1636,18 +1636,25 @@ fn load_wallpaper(bw: usize, bh: usize) -> Option<Vec<u32>> {
 const ICON_W: usize = 32;
 const ICON_H: usize = 32;
 
-/// VFS path of the Breeze launcher icon for a `LAUNCH_APPS` binary name, or
-/// `None` when that app ships no icon (the dock then falls back to its initial).
-fn app_icon_path(app: &str) -> Option<&'static str> {
-    match app {
-        "gui_client" => Some("/assets/icons/breeze/gui_client.rgba"),
-        "gui_calc" => Some("/assets/icons/breeze/gui_calc.rgba"),
-        "gui_stat" => Some("/assets/icons/breeze/gui_stat.rgba"),
-        "gui_files" => Some("/assets/icons/breeze/gui_files.rgba"),
-        "gui_terminal" => Some("/assets/icons/breeze/gui_terminal.rgba"),
-        "gui_settings" => Some("/assets/icons/breeze/gui_settings.rgba"),
-        _ => None,
+/// Load the Breeze launcher icon for a `LAUNCH_APPS` binary *by convention* —
+/// `/assets/icons/breeze/<app>.rgba` — into packed ARGB, or `None` when no such
+/// asset ships (the dock then falls back to the app initial). No per-app table:
+/// adding an app to `LAUNCH_APPS` picks up its icon automatically if the file
+/// exists, and a genuinely icon-less app simply fails the load. The path is
+/// assembled on the stack to keep the compositor's no-heap-`String` style.
+fn load_app_icon(app: &str) -> Option<Vec<u32>> {
+    const PREFIX: &[u8] = b"/assets/icons/breeze/";
+    const SUFFIX: &[u8] = b".rgba";
+    let mut buf = [0u8; 128];
+    let n = PREFIX.len() + app.len() + SUFFIX.len();
+    if n > buf.len() {
+        return None;
     }
+    buf[..PREFIX.len()].copy_from_slice(PREFIX);
+    buf[PREFIX.len()..PREFIX.len() + app.len()].copy_from_slice(app.as_bytes());
+    buf[PREFIX.len() + app.len()..n].copy_from_slice(SUFFIX);
+    let path = core::str::from_utf8(&buf[..n]).ok()?;
+    load_icon_rgba(path)
 }
 
 /// Load a straight-alpha `R,G,B,A` icon (`ICON_W`×`ICON_H`) from the VFS into
@@ -1749,7 +1756,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     let mut app_icons: Vec<Option<Vec<u32>>> = Vec::with_capacity(LAUNCH_APPS.len());
     let mut icon_count = 0usize;
     for (_, app) in LAUNCH_APPS.iter() {
-        let icon = app_icon_path(app).and_then(load_icon_rgba);
+        let icon = load_app_icon(app);
         if icon.is_some() {
             icon_count += 1;
         }
