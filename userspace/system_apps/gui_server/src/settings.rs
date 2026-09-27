@@ -139,11 +139,101 @@ impl Layout {
     }
 }
 
+/// Compositor visual effects (concept §5: rounded corners, soft shadows, backdrop
+/// blur, gradients, animations). Every effect can be tuned or switched off from
+/// the `[effects]` TOML table, so a low-end target (or a user who wants the flat
+/// look back) can disable them without a rebuild. Field names mirror the keys.
+#[derive(Clone, Copy)]
+pub struct Effects {
+    /// Rounded-corner radius (px) for windows/panel/menus/buttons; 0 = square.
+    pub corner_radius: i32,
+    /// Drop-shadow spread (px) under windows/menus; 0 = no shadow.
+    pub shadow: i32,
+    /// Shadow opacity at the silhouette edge (0..255).
+    pub shadow_alpha: i32,
+    /// Backdrop blur under the panel/menus (acrylic look).
+    pub blur: bool,
+    /// Blur kernel radius (px, per separable box pass).
+    pub blur_radius: i32,
+    /// Blur passes (2-3 ≈ Gaussian); more = smoother but costlier.
+    pub blur_iters: i32,
+    /// Panel tint opacity over the blurred backdrop (0..255).
+    pub panel_alpha: i32,
+    /// Menu tint opacity over the blurred backdrop (0..255).
+    pub menu_alpha: i32,
+    /// Vertical gradient fills on the panel/title bars/buttons.
+    pub gradient: bool,
+    /// Open/close/switch animations.
+    pub anim: bool,
+    /// Base animation duration (ms) at the compositor's ~60 Hz tick.
+    pub anim_ms: i32,
+}
+
+impl Effects {
+    /// The built-in baseline — the modern Green Tea look turned on (concept §5).
+    pub const fn baseline() -> Self {
+        Effects {
+            corner_radius: 8,
+            shadow: 7,
+            shadow_alpha: 90,
+            blur: true,
+            blur_radius: 4,
+            blur_iters: 2,
+            panel_alpha: 205,
+            menu_alpha: 225,
+            gradient: true,
+            anim: true,
+            anim_ms: 140,
+        }
+    }
+
+    /// Apply one `key`/`value` pair from the `[effects]` table. Bool keys accept
+    /// `true`/`false`/`1`/`0`; the rest are non-negative integers. Unknown keys
+    /// and malformed values are ignored (the field keeps its baseline value).
+    fn apply(&mut self, key: &str, value: &str) {
+        match key {
+            "blur" => {
+                if let Some(b) = parse_bool(value) {
+                    self.blur = b;
+                }
+            }
+            "gradient" => {
+                if let Some(b) = parse_bool(value) {
+                    self.gradient = b;
+                }
+            }
+            "anim" | "animations" => {
+                if let Some(b) = parse_bool(value) {
+                    self.anim = b;
+                }
+            }
+            _ => {
+                let Some(n) = parse_uint(value) else {
+                    return;
+                };
+                let n = n as i32;
+                match key {
+                    "corner_radius" => self.corner_radius = n.clamp(0, 64),
+                    "shadow" => self.shadow = n.clamp(0, 32),
+                    "shadow_alpha" => self.shadow_alpha = n.clamp(0, 255),
+                    "blur_radius" => self.blur_radius = n.clamp(0, 16),
+                    "blur_iters" => self.blur_iters = n.clamp(1, 4),
+                    "panel_alpha" => self.panel_alpha = n.clamp(0, 255),
+                    "menu_alpha" => self.menu_alpha = n.clamp(0, 255),
+                    "anim_ms" => self.anim_ms = n.clamp(0, 2000),
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 /// Resolved DWM settings. Extends with `[layout]` etc. in later sub-slices.
 #[derive(Clone, Copy)]
 pub struct Settings {
     pub theme: Theme,
     pub layout: Layout,
+    pub effects: Effects,
     /// True when a config file was found and read (parse still best-effort).
     pub from_file: bool,
     /// Count of recognised keys applied over the baseline (0 for pure default).
@@ -155,6 +245,7 @@ impl Settings {
         Settings {
             theme: Theme::baseline(),
             layout: Layout::baseline(),
+            effects: Effects::baseline(),
             from_file: false,
             applied: 0,
         }
@@ -198,6 +289,9 @@ pub fn parse_into(text: &str, settings: &mut Settings) {
             settings.applied += 1;
         } else if section == "layout" {
             settings.layout.apply(key, value);
+            settings.applied += 1;
+        } else if section == "effects" {
+            settings.effects.apply(key, value);
             settings.applied += 1;
         }
     }
@@ -259,6 +353,16 @@ fn parse_uint(value: &str) -> Option<u32> {
         acc = acc.saturating_mul(10).saturating_add(d);
     }
     Some(acc)
+}
+
+/// Parse a boolean toggle for the `[effects]` table: `true`/`false` (any case)
+/// or `1`/`0`. Anything else returns `None` (field keeps its baseline value).
+fn parse_bool(value: &str) -> Option<bool> {
+    match value.trim() {
+        "true" | "True" | "TRUE" | "1" | "on" | "yes" => Some(true),
+        "false" | "False" | "FALSE" | "0" | "off" | "no" => Some(false),
+        _ => None,
+    }
 }
 
 /// Slurp a whole VFS file into a String (best-effort). `None` on open error or

@@ -841,6 +841,372 @@ fn fill_rect(buf: &mut [u32], bw: usize, bh: usize, x: i32, y: i32, w: i32, h: i
     }
 }
 
+// ===========================================================================
+// Compositor visual effects (concept §5): alpha blending, gradients, rounded
+// corners, soft shadows, backdrop blur. All integer math (no FP in userspace),
+// all gated by `settings::Effects` so the flat look is one config flag away.
+// ===========================================================================
+
+/// src-over composite of an ARGB `src` onto an opaque XRGB `dst`. Fast paths for
+/// fully transparent / fully opaque source.
+#[inline]
+fn blend(dst: u32, src: u32) -> u32 {
+    let a = (src >> 24) & 0xFF;
+    if a == 0 {
+        return dst;
+    }
+    if a == 255 {
+        return 0xFF00_0000 | (src & 0x00FF_FFFF);
+    }
+    let na = 255 - a;
+    let sr = (src >> 16) & 0xFF;
+    let sg = (src >> 8) & 0xFF;
+    let sb = src & 0xFF;
+    let dr = (dst >> 16) & 0xFF;
+    let dg = (dst >> 8) & 0xFF;
+    let db = dst & 0xFF;
+    let r = (sr * a + dr * na + 127) / 255;
+    let g = (sg * a + dg * na + 127) / 255;
+    let b = (sb * a + db * na + 127) / 255;
+    0xFF00_0000 | (r << 16) | (g << 8) | b
+}
+
+/// Blend one ARGB pixel into the back buffer (bounds-checked).
+#[inline]
+fn blend_pixel(buf: &mut [u32], bw: usize, bh: usize, x: i32, y: i32, src: u32) {
+    if x < 0 || y < 0 || x as usize >= bw || y as usize >= bh {
+        return;
+    }
+    let idx = y as usize * bw + x as usize;
+    buf[idx] = blend(buf[idx], src);
+}
+
+/// Shift every RGB channel of `c` by `delta` (positive = lighten), clamped. Used
+/// to derive gradient endpoints from a single theme color.
+#[inline]
+fn shade(c: u32, delta: i32) -> u32 {
+    let cl = |v: i32| v.clamp(0, 255) as u32;
+    let r = ((c >> 16) & 0xFF) as i32 + delta;
+    let g = ((c >> 8) & 0xFF) as i32 + delta;
+    let b = (c & 0xFF) as i32 + delta;
+    (cl(r) << 16) | (cl(g) << 8) | cl(b)
+}
+
+/// Linear RGB interpolation between `a` and `b`; `t` in 0..=255 (0 = a, 255 = b).
+#[inline]
+fn lerp_color(a: u32, b: u32, t: u32) -> u32 {
+    let t = t.min(255);
+    let inv = 255 - t;
+    let r = (((a >> 16) & 0xFF) * inv + ((b >> 16) & 0xFF) * t) / 255;
+    let g = (((a >> 8) & 0xFF) * inv + ((b >> 8) & 0xFF) * t) / 255;
+    let bl = ((a & 0xFF) * inv + (b & 0xFF) * t) / 255;
+    (r << 16) | (g << 8) | bl
+}
+
+/// Blend a translucent solid ARGB rect into the buffer.
+fn fill_rect_alpha(buf: &mut [u32], bw: usize, bh: usize, x: i32, y: i32, w: i32, h: i32, color: u32) {
+    let x0 = x.max(0);
+    let y0 = y.max(0);
+    let x1 = (x + w).min(bw as i32);
+    let y1 = (y + h).min(bh as i32);
+    let mut py = y0;
+    while py < y1 {
+        let mut px = x0;
+        while px < x1 {
+            blend_pixel(buf, bw, bh, px, py, color);
+            px += 1;
+        }
+        py += 1;
+    }
+}
+
+/// Ramp value 0..=255 for an animation `dur_frames` long, `dur_frames == 0` =
+/// instant (returns 255).
+#[inline]
+fn ramp(now: u32, start: u32, dur_frames: u32) -> u32 {
+    if dur_frames == 0 {
+        return 255;
+    }
+    let age = now.saturating_sub(start);
+    if age >= dur_frames {
+        255
+    } else {
+        age * 255 / dur_frames
+    }
+}
+
+// Rounded-corner selection bitmask for `fill_rrect*` (which corners get the arc).
+const RR_TL: u8 = 1;
+const RR_TR: u8 = 2;
+const RR_BL: u8 = 4;
+const RR_BR: u8 = 8;
+const RR_ALL: u8 = RR_TL | RR_TR | RR_BL | RR_BR;
+const RR_TOP: u8 = RR_TL | RR_TR;
+
+/// Coverage 0..255 of pixel (px,py) inside rounded-rect [x,y,w,h] radius `r`.
+/// Straight edges and non-selected corners return 255; a selected corner is
+/// 4x4-supersampled in 1/8-px units for a cheap anti-aliased arc (integer only).
+fn rr_cov(px: i32, py: i32, x: i32, y: i32, w: i32, h: i32, r: i32, corners: u8) -> u32 {
+    if r <= 0 {
+        return 255;
+    }
+    let (cx, cy, bit);
+    if px < x + r && py < y + r {
+        cx = x + r;
+        cy = y + r;
+        bit = RR_TL;
+    } else if px >= x + w - r && py < y + r {
+        cx = x + w - r;
+        cy = y + r;
+        bit = RR_TR;
+    } else if px < x + r && py >= y + h - r {
+        cx = x + r;
+        cy = y + h - r;
+        bit = RR_BL;
+    } else if px >= x + w - r && py >= y + h - r {
+        cx = x + w - r;
+        cy = y + h - r;
+        bit = RR_BR;
+    } else {
+        return 255;
+    }
+    if corners & bit == 0 {
+        return 255;
+    }
+    let r8 = (r * 8) as i64;
+    let r2 = r8 * r8;
+    let mut inside = 0u32;
+    let mut sy = 0;
+    while sy < 4 {
+        let dy = (py * 8 + (sy * 2 + 1) - cy * 8) as i64;
+        let mut sx = 0;
+        while sx < 4 {
+            let dx = (px * 8 + (sx * 2 + 1) - cx * 8) as i64;
+            if dx * dx + dy * dy <= r2 {
+                inside += 1;
+            }
+            sx += 1;
+        }
+        sy += 1;
+    }
+    inside * 255 / 16
+}
+
+/// Fill a rounded rect with a flat (alpha-aware) `color`. `corners` selects which
+/// corners get the arc (e.g. `RR_TOP` for a title bar). `r <= 0` = plain rect.
+fn fill_rrect(buf: &mut [u32], bw: usize, bh: usize, x: i32, y: i32, w: i32, h: i32, r: i32, corners: u8, color: u32) {
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    let r = r.max(0).min(w / 2).min(h / 2);
+    let base_a = (color >> 24) & 0xFF;
+    if base_a == 0 {
+        return;
+    }
+    let x0 = x.max(0);
+    let y0 = y.max(0);
+    let x1 = (x + w).min(bw as i32);
+    let y1 = (y + h).min(bh as i32);
+    let mut py = y0;
+    while py < y1 {
+        let mut px = x0;
+        while px < x1 {
+            let cov = rr_cov(px, py, x, y, w, h, r, corners);
+            if cov > 0 {
+                let a = base_a * cov / 255;
+                blend_pixel(buf, bw, bh, px, py, (a << 24) | (color & 0x00FF_FFFF));
+            }
+            px += 1;
+        }
+        py += 1;
+    }
+}
+
+/// Fill a rounded rect with a vertical gradient (`top`..`bottom` RGB) at overall
+/// opacity `alpha` (0..255), corner arcs anti-aliased. Used for glass panels,
+/// title bars and buttons.
+fn fill_rrect_grad(buf: &mut [u32], bw: usize, bh: usize, x: i32, y: i32, w: i32, h: i32, r: i32, corners: u8, top: u32, bottom: u32, alpha: i32) {
+    if w <= 0 || h <= 0 || alpha <= 0 {
+        return;
+    }
+    let alpha = alpha.min(255) as u32;
+    let r = r.max(0).min(w / 2).min(h / 2);
+    let x0 = x.max(0);
+    let y0 = y.max(0);
+    let x1 = (x + w).min(bw as i32);
+    let y1 = (y + h).min(bh as i32);
+    let span = (h - 1).max(1) as u32;
+    let mut py = y0;
+    while py < y1 {
+        let t = ((py - y).max(0) as u32 * 255) / span;
+        let row = lerp_color(top, bottom, t);
+        let mut px = x0;
+        while px < x1 {
+            let cov = rr_cov(px, py, x, y, w, h, r, corners);
+            if cov > 0 {
+                let a = alpha * cov / 255;
+                blend_pixel(buf, bw, bh, px, py, (a << 24) | (row & 0x00FF_FFFF));
+            }
+            px += 1;
+        }
+        py += 1;
+    }
+}
+
+/// Layered soft drop shadow under a rounded rect: `spread` nested black rounded
+/// rects, each at `alpha/spread`, so overlap accumulates into a soft falloff.
+/// Offset down-right a touch for a light-from-above look. The opaque window
+/// interior [x,y,w,h] is skipped — it gets overdrawn, so shadowing it is wasted
+/// work (this is the bulk of the pixels, so skipping keeps the effect cheap).
+fn draw_soft_shadow(buf: &mut [u32], bw: usize, bh: usize, x: i32, y: i32, w: i32, h: i32, r: i32, spread: i32, alpha: i32) {
+    if spread <= 0 || alpha <= 0 {
+        return;
+    }
+    let per = ((alpha / spread).max(1)) as u32;
+    let mut s = spread;
+    while s >= 1 {
+        let off = s / 2 + 2;
+        let (lx, ly2, lw, lh, lr) = (x - s, y - s + off, w + 2 * s, h + 2 * s, r + s);
+        let x0 = lx.max(0);
+        let y0 = ly2.max(0);
+        let x1 = (lx + lw).min(bw as i32);
+        let y1 = (ly2 + lh).min(bh as i32);
+        let mut py = y0;
+        while py < y1 {
+            let in_row = py >= y && py < y + h;
+            let mut px = x0;
+            while px < x1 {
+                if in_row && px >= x && px < x + w {
+                    px = x + w; // jump past the opaque window interior
+                    continue;
+                }
+                let cov = rr_cov(px, py, lx, ly2, lw, lh, lr, RR_ALL);
+                if cov > 0 {
+                    blend_pixel(buf, bw, bh, px, py, (per * cov / 255) << 24);
+                }
+                px += 1;
+            }
+            py += 1;
+        }
+        s -= 1;
+    }
+}
+
+/// One horizontal box-blur pass: `src` -> `dst` (both `w*h` packed), radius `r`,
+/// sliding-window average of RGB with edge clamp. Alpha forced opaque.
+fn box_h(src: &[u32], dst: &mut [u32], w: usize, h: usize, r: usize) {
+    for y in 0..h {
+        let row = y * w;
+        let mut sr = 0u32;
+        let mut sg = 0u32;
+        let mut sb = 0u32;
+        let first_hi = r.min(w - 1);
+        for i in 0..=first_hi {
+            let p = src[row + i];
+            sr += (p >> 16) & 0xFF;
+            sg += (p >> 8) & 0xFF;
+            sb += p & 0xFF;
+        }
+        let mut lo = 0i32;
+        let mut hi = first_hi as i32;
+        for x in 0..w {
+            let cnt = (hi - lo + 1) as u32;
+            dst[row + x] = 0xFF00_0000 | ((sr / cnt) << 16) | ((sg / cnt) << 8) | (sb / cnt);
+            let add = x as i32 + 1 + r as i32;
+            if add < w as i32 {
+                let p = src[row + add as usize];
+                sr += (p >> 16) & 0xFF;
+                sg += (p >> 8) & 0xFF;
+                sb += p & 0xFF;
+                hi = add;
+            }
+            let rem = x as i32 - r as i32;
+            if rem >= 0 {
+                let p = src[row + rem as usize];
+                sr -= (p >> 16) & 0xFF;
+                sg -= (p >> 8) & 0xFF;
+                sb -= p & 0xFF;
+                lo = rem + 1;
+            }
+        }
+    }
+}
+
+/// One vertical box-blur pass: `src` -> `dst` (both `w*h` packed), radius `r`.
+fn box_v(src: &[u32], dst: &mut [u32], w: usize, h: usize, r: usize) {
+    for x in 0..w {
+        let mut sr = 0u32;
+        let mut sg = 0u32;
+        let mut sb = 0u32;
+        let first_hi = r.min(h - 1);
+        for i in 0..=first_hi {
+            let p = src[i * w + x];
+            sr += (p >> 16) & 0xFF;
+            sg += (p >> 8) & 0xFF;
+            sb += p & 0xFF;
+        }
+        let mut lo = 0i32;
+        let mut hi = first_hi as i32;
+        for y in 0..h {
+            let cnt = (hi - lo + 1) as u32;
+            dst[y * w + x] = 0xFF00_0000 | ((sr / cnt) << 16) | ((sg / cnt) << 8) | (sb / cnt);
+            let add = y as i32 + 1 + r as i32;
+            if add < h as i32 {
+                let p = src[add as usize * w + x];
+                sr += (p >> 16) & 0xFF;
+                sg += (p >> 8) & 0xFF;
+                sb += p & 0xFF;
+                hi = add;
+            }
+            let rem = y as i32 - r as i32;
+            if rem >= 0 {
+                let p = src[rem as usize * w + x];
+                sr -= (p >> 16) & 0xFF;
+                sg -= (p >> 8) & 0xFF;
+                sb -= p & 0xFF;
+                lo = rem + 1;
+            }
+        }
+    }
+}
+
+/// Separable box blur of a sub-region of the back buffer (the acrylic backdrop
+/// under the panel/menu/dock). `tmp_a`/`tmp_b` are ping-pong scratch buffers
+/// allocated once by the caller; a region larger than the scratch is skipped.
+/// `iters` box passes ≈ a Gaussian. Integer-only, O(region) per pass.
+fn blur_region(buf: &mut [u32], bw: usize, bh: usize, rx: i32, ry: i32, rw: i32, rh: i32, radius: i32, iters: i32, tmp_a: &mut [u32], tmp_b: &mut [u32]) {
+    if radius <= 0 || iters <= 0 {
+        return;
+    }
+    let x0 = rx.max(0) as usize;
+    let y0 = ry.max(0) as usize;
+    let x1 = ((rx + rw).max(0) as usize).min(bw);
+    let y1 = ((ry + rh).max(0) as usize).min(bh);
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let w = x1 - x0;
+    let h = y1 - y0;
+    if w * h > tmp_a.len() || w * h > tmp_b.len() {
+        return;
+    }
+    for yy in 0..h {
+        let dr = yy * w;
+        let sr = (y0 + yy) * bw + x0;
+        tmp_a[dr..dr + w].copy_from_slice(&buf[sr..sr + w]);
+    }
+    let r = radius as usize;
+    for _ in 0..iters {
+        box_h(tmp_a, tmp_b, w, h, r);
+        box_v(tmp_b, tmp_a, w, h, r);
+    }
+    for yy in 0..h {
+        let sr = yy * w;
+        let dr = (y0 + yy) * bw + x0;
+        buf[dr..dr + w].copy_from_slice(&tmp_a[sr..sr + w]);
+    }
+}
+
 /// Blit a client's XRGB8888 surface into the back buffer at (x, y), clipped.
 fn blit_surface(
     buf: &mut [u32],
@@ -1083,6 +1449,8 @@ struct Win {
     /// Workspace (0-based) this window belongs to; only the active workspace's
     /// windows are drawn and receive input.
     ws: usize,
+    /// Desktop tick when this window first appeared — drives the open fade-in.
+    born: u32,
 }
 
 impl Win {
@@ -1222,6 +1590,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             border: ly.border,
             app: clients[i].app,
             ws: 0,
+            born: 0,
         });
         clients[i].ready = true;
         clients[i].win_created = true;
@@ -1256,6 +1625,31 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     // One-shot: announce on serial when a window first takes keyboard focus, so
     // headless tests know the compositor is ready to accept injected keystrokes.
     let mut input_ready_announced = false;
+    // --- Visual-effects state (concept §5) -------------------------------
+    let fx = cfg.effects;
+    // Animation length in frames (~16ms/frame); 0 when animations are off, so
+    // every ramp/reveal collapses to instant (the flat look).
+    let anim_frames = if fx.anim { (fx.anim_ms / 16).max(1) as u32 } else { 0 };
+    // Workspace-switch crossfade: the active workspace's windows fade in from
+    // this tick (bumped on every switch below).
+    let mut ws_switch_tick = 0u32;
+    // Launcher-menu drop-in: stamped when the dropdown opens.
+    let mut menu_anim_tick = 0u32;
+    let mut menu_was_open = false;
+    // Per-dock-icon hover progress (0..255), eased toward hovered/idle each frame.
+    let mut dock_hover = [0u8; LAUNCH_APPS.len()];
+    // Ping-pong scratch for the backdrop blur, sized for the largest blurred
+    // region (panel / dock strip / menu) and allocated once.
+    let panel_area = bw * ly.panel_h.max(0) as usize;
+    let dock_area = ly.dock_w.max(0) as usize * (bh as i32 - ly.panel_h).max(0) as usize;
+    let menu_area = ly.menu_w.max(0) as usize * (LAUNCH_APPS.len() * ly.menu_item_h.max(0) as usize);
+    let scratch_len = panel_area.max(dock_area).max(menu_area).max(1);
+    let mut blur_a: Vec<u32> = alloc::vec![0u32; scratch_len];
+    let mut blur_b: Vec<u32> = alloc::vec![0u32; scratch_len];
+    // Frame-time instrumentation so the blur cost is observable in the serial
+    // log even headless: report ms/frame once warm, then periodically.
+    let mut prev_uptime = 0u64;
+    let mut prev_tick = 0u32;
     loop {
         // Advance any runtime-spawned clients through their protocol handshake,
         // then hand each newly-ready client a cascaded, focused window.
@@ -1292,6 +1686,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 border: ly.border,
                 app: clients[i].app,
                 ws: clients[i].ws,
+                born: ticks,
             });
             clients[i].win_created = true;
             z.push(wi);
@@ -1340,6 +1735,9 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 for i in 0..WS_COUNT {
                     let (px, _, pw, _) = ws_pip_rect(&ly, i as i32);
                     if mx >= px && mx < px + pw {
+                        if current_ws != i {
+                            ws_switch_tick = ticks; // start the incoming crossfade
+                        }
                         current_ws = i;
                         break;
                     }
@@ -1502,62 +1900,73 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             }
         }
 
-        // Clear desktop.
-        for px in back.iter_mut() {
-            *px = theme.desktop;
+        // Desktop backdrop: a subtle vertical gradient (or a flat fill when the
+        // gradient effect is off — the pre-§5 look).
+        if fx.gradient {
+            let top = shade(theme.desktop, 12);
+            let bot = shade(theme.desktop, -8);
+            let span = (bh as u32 - 1).max(1);
+            for y in 0..bh {
+                let row = 0xFF00_0000 | lerp_color(top, bot, (y as u32 * 255) / span);
+                let base = y * bw;
+                for px in &mut back[base..base + bw] {
+                    *px = row;
+                }
+            }
+        } else {
+            for px in back.iter_mut() {
+                *px = theme.desktop;
+            }
         }
 
-        // Draw windows bottom-to-top.
+        // Windows, bottom-to-top: soft shadow, rounded gradient frame, rounded
+        // gradient title bar, then the opaque client surface. Each window fades
+        // in from `born`, and the active workspace fades in after a switch —
+        // folded into one alpha `a` so both read as a single grow-in.
+        let ws_fade = ramp(ticks, ws_switch_tick, anim_frames);
         for &wi in z.iter() {
             let w = &wins[wi];
             if !w.alive || w.ws != current_ws {
                 continue;
             }
             let is_focused = focused == Some(wi);
-            let border = if is_focused {
-                theme.border_focused
-            } else {
-                theme.border_unfocused
-            };
-            let title = if is_focused {
-                theme.title_focused
-            } else {
-                theme.title_unfocused
-            };
+            let a = ramp(ticks, w.born, anim_frames).min(ws_fade) as i32;
+            if a <= 0 {
+                continue;
+            }
             let (ox, oy, ow, oh) = w.outer();
-            fill_rect(&mut back, bw, bh, ox, oy, ow, oh, border);
-            fill_rect(&mut back, bw, bh, w.cx, w.cy - w.title_h, w.sw, w.title_h, title);
-            // Close box.
+            let bcol = if is_focused { theme.border_focused } else { theme.border_unfocused };
+            let tcol = if is_focused { theme.title_focused } else { theme.title_unfocused };
+            if fx.shadow > 0 {
+                draw_soft_shadow(&mut back, bw, bh, ox, oy, ow, oh, fx.corner_radius, fx.shadow, fx.shadow_alpha * a / 255);
+            }
+            // Rounded frame: top corners only, so the square-bottomed client
+            // surface tucks flush against the bottom edge (no corner poke-through).
+            fill_rrect_grad(&mut back, bw, bh, ox, oy, ow, oh, fx.corner_radius, RR_TOP, shade(bcol, 18), shade(bcol, -12), a);
+            fill_rrect_grad(&mut back, bw, bh, w.cx, w.cy - w.title_h, w.sw, w.title_h, fx.corner_radius, RR_TOP, shade(tcol, 16), shade(tcol, -10), a);
+            // Close box: a small rounded chip in the danger color.
             let sz = w.title_h - 12;
-            fill_rect(
-                &mut back,
-                bw,
-                bh,
-                w.cx + w.sw - sz - 6,
-                w.cy - w.title_h + 6,
-                sz,
-                sz,
-                theme.close,
-            );
-            // Client surface.
-            let want = (w.sw as usize) * (w.sh as usize);
-            if want > 0 && want * 4 <= w.buf_size {
-                let src = unsafe { core::slice::from_raw_parts(w.buf_ptr as *const u32, want) };
-                blit_surface(
-                    &mut back,
-                    bw,
-                    bh,
-                    w.cx,
-                    w.cy,
-                    src,
-                    w.sw as usize,
-                    w.sh as usize,
-                );
+            fill_rrect(&mut back, bw, bh, w.cx + w.sw - sz - 6, w.cy - w.title_h + 6, sz, sz, fx.corner_radius.min(sz / 2), RR_ALL, ((a as u32) << 24) | (theme.close & 0x00FF_FFFF));
+            // Client surface (opaque). Held back until the frame is nearly solid
+            // so the grow-in shows a clean card, not a half-blended image.
+            if a >= 224 {
+                let want = (w.sw as usize) * (w.sh as usize);
+                if want > 0 && want * 4 <= w.buf_size {
+                    let src = unsafe { core::slice::from_raw_parts(w.buf_ptr as *const u32, want) };
+                    blit_surface(&mut back, bw, bh, w.cx, w.cy, src, w.sw as usize, w.sh as usize);
+                }
             }
         }
 
-        // --- DWM panel on top of every window ---
-        fill_rect(&mut back, bw, bh, 0, 0, bw as i32, ly.panel_h, theme.panel);
+        // --- DWM panel: acrylic glass bar across the top ---
+        if fx.blur {
+            blur_region(&mut back, bw, bh, 0, 0, bw as i32, ly.panel_h, fx.blur_radius, fx.blur_iters, &mut blur_a, &mut blur_b);
+        }
+        if fx.gradient {
+            fill_rrect_grad(&mut back, bw, bh, 0, 0, bw as i32, ly.panel_h, 0, 0, shade(theme.panel, 16), theme.panel, fx.panel_alpha);
+        } else {
+            fill_rect_alpha(&mut back, bw, bh, 0, 0, bw as i32, ly.panel_h, ((fx.panel_alpha.min(255) as u32) << 24) | (theme.panel & 0x00FF_FFFF));
+        }
         // Launcher glyph: three stacked bars (hamburger) in the accent color.
         for r in 0..3 {
             fill_rect(&mut back, bw, bh, 10, 8 + r * 5, 20, 2, theme.launcher);
@@ -1567,18 +1976,18 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         // gets an accent underline so occupancy is visible at a glance.
         for i in 0..WS_COUNT {
             let (px, py, pw, ph) = ws_pip_rect(&ly, i as i32);
-            let bg = if i == current_ws {
+            let base = if i == current_ws {
                 theme.taskbtn_focused
             } else {
                 theme.taskbtn
             };
-            fill_rect(&mut back, bw, bh, px, py, pw, ph, bg);
+            fill_rrect_grad(&mut back, bw, bh, px, py, pw, ph, 5, RR_ALL, shade(base, 18), shade(base, -10), 255);
             let label = [b'1' + i as u8];
             let tx = px + (pw - GLYPH_W * 2) / 2;
             let ty = py + (ph - 5 * 2) / 2;
             draw_text_3x5(&mut back, bw, bh, tx, ty, 2, theme.panel_text, &label);
             if wins.iter().any(|w| w.alive && w.ws == i) {
-                fill_rect(&mut back, bw, bh, px + 2, py + ph - 3, pw - 4, 2, theme.launcher);
+                fill_rrect(&mut back, bw, bh, px + 2, py + ph - 3, pw - 4, 2, 1, RR_ALL, 0xFF00_0000 | (theme.launcher & 0x00FF_FFFF));
             }
         }
         // One taskbar button per live window, in creation order; the focused
@@ -1593,12 +2002,12 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 if bx + bw2 > bw as i32 {
                     break;
                 }
-                let bg = if focused == Some(wi) {
+                let base = if focused == Some(wi) {
                     theme.taskbtn_focused
                 } else {
                     theme.taskbtn
                 };
-                fill_rect(&mut back, bw, bh, bx, by, bw2, bh2, bg);
+                fill_rrect_grad(&mut back, bw, bh, bx, by, bw2, bh2, 6, RR_ALL, shade(base, 18), shade(base, -10), 255);
                 let mut label = [0u8; 2];
                 two_digits(&mut label, 0, (wi as u64) + 1);
                 draw_text_3x5(&mut back, bw, bh, bx + 8, by + 5, 2, theme.panel_text, &label);
@@ -1629,57 +2038,69 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             );
         }
 
-        // --- DWM dock: pinned app launchers down the left edge, below the panel ---
-        fill_rect(
-            &mut back,
-            bw,
-            bh,
-            0,
-            ly.panel_h,
-            ly.dock_w,
-            bh as i32 - ly.panel_h,
-            theme.panel,
-        );
+        // --- DWM dock: acrylic strip of pinned launchers down the left edge ---
+        if fx.blur {
+            blur_region(&mut back, bw, bh, 0, ly.panel_h, ly.dock_w, bh as i32 - ly.panel_h, fx.blur_radius, fx.blur_iters, &mut blur_a, &mut blur_b);
+        }
+        if fx.gradient {
+            fill_rrect_grad(&mut back, bw, bh, 0, ly.panel_h, ly.dock_w, bh as i32 - ly.panel_h, 0, 0, shade(theme.panel, 14), theme.panel, fx.panel_alpha);
+        } else {
+            fill_rect_alpha(&mut back, bw, bh, 0, ly.panel_h, ly.dock_w, bh as i32 - ly.panel_h, ((fx.panel_alpha.min(255) as u32) << 24) | (theme.panel & 0x00FF_FFFF));
+        }
+        // Hover easing step per frame (instant when animations are off).
+        let hover_step = if anim_frames == 0 { 255u8 } else { (255 / anim_frames).max(28) as u8 };
         for i in 0..LAUNCH_APPS.len() {
             let (ix, iy, iw, ih) = dock_icon_rect(&ly, i as i32);
             if iy + ih > bh as i32 {
                 break;
             }
-            let hover = mx >= ix && mx < ix + iw && my >= iy && my < iy + ih;
-            let bg = if hover {
-                theme.taskbtn_focused
+            let hovered = mx < ly.dock_w && mx >= ix && mx < ix + iw && my >= iy && my < iy + ih;
+            dock_hover[i] = if hovered {
+                dock_hover[i].saturating_add(hover_step)
             } else {
-                theme.taskbtn
+                dock_hover[i].saturating_sub(hover_step)
             };
-            fill_rect(&mut back, bw, bh, ix, iy, iw, ih, bg);
+            let hp = dock_hover[i] as i32; // 0..255 eased hover amount
+            let grow = 3 * hp / 255; // grow the cell up to 3px each side on hover
+            let (cx0, cy0, cw, ch) = (ix - grow, iy - grow, iw + 2 * grow, ih + 2 * grow);
+            let base = lerp_color(theme.taskbtn, theme.taskbtn_focused, hp as u32);
+            fill_rrect_grad(&mut back, bw, bh, cx0, cy0, cw, ch, 7, RR_ALL, shade(base, 20), shade(base, -10), 255);
             // App initial (W/C/S/F/T), centered in the icon cell.
-            let tx = ix + (iw - GLYPH_W * 3) / 2;
-            let ty = iy + (ih - 5 * 3) / 2;
+            let tx = cx0 + (cw - GLYPH_W * 3) / 2;
+            let ty = cy0 + (ch - 5 * 3) / 2;
             draw_text_3x5(&mut back, bw, bh, tx, ty, 3, theme.panel_text, &LAUNCH_APPS[i].0[..1]);
-            // Running marker: accent bar on the icon's left edge when any live
-            // window belongs to this app.
+            // Running marker: accent bar on the icon's left edge for a live app.
             if wins.iter().any(|w| w.alive && w.app == i as u8) {
-                fill_rect(&mut back, bw, bh, ix - 4, iy + 2, 3, ih - 4, theme.launcher);
+                fill_rrect(&mut back, bw, bh, cx0 - 3, cy0 + ch / 4, 3, ch / 2, 1, RR_ALL, 0xFF00_0000 | (theme.launcher & 0x00FF_FFFF));
             }
         }
 
-        // Launcher dropdown, painted on top of the panel and every window.
+        // Launcher dropdown: acrylic rounded menu with a drop-in reveal.
+        if menu_open && !menu_was_open {
+            menu_anim_tick = ticks; // stamp the open so the menu drops in
+        }
+        menu_was_open = menu_open;
         if menu_open {
+            let mprog = ramp(ticks, menu_anim_tick, anim_frames) as i32; // 0..255
+            let (mx0, my0, mw0, _) = menu_item_rect(&ly, 0);
+            let full_h = LAUNCH_APPS.len() as i32 * ly.menu_item_h;
+            let reveal_h = full_h * mprog / 255; // grow the card downward
+            if reveal_h > 0 {
+                if fx.blur {
+                    blur_region(&mut back, bw, bh, mx0, my0, mw0, reveal_h, fx.blur_radius, fx.blur_iters, &mut blur_a, &mut blur_b);
+                }
+                fill_rrect_grad(&mut back, bw, bh, mx0, my0, mw0, reveal_h, fx.corner_radius, RR_ALL, shade(theme.menu, 14), theme.menu, fx.menu_alpha);
+            }
             for i in 0..LAUNCH_APPS.len() {
                 let (ix, iy, iw, ih) = menu_item_rect(&ly, i as i32);
+                if iy + ih > my0 + reveal_h {
+                    break; // below the revealed edge — not shown yet
+                }
                 let hover = mx >= ix && mx < ix + iw && my >= iy && my < iy + ih;
-                let bg = if hover { theme.menu_hover } else { theme.menu };
-                fill_rect(&mut back, bw, bh, ix, iy, iw, ih, bg);
-                draw_text_3x5(
-                    &mut back,
-                    bw,
-                    bh,
-                    ix + 10,
-                    iy + (ih - 5 * 3) / 2,
-                    3,
-                    theme.panel_text,
-                    LAUNCH_APPS[i].0,
-                );
+                if hover {
+                    fill_rrect(&mut back, bw, bh, ix + 3, iy + 2, iw - 6, ih - 4, 5, RR_ALL, 0xC000_0000 | (theme.menu_hover & 0x00FF_FFFF));
+                }
+                draw_text_3x5(&mut back, bw, bh, ix + 10, iy + (ih - 5 * 3) / 2, 3, theme.panel_text, LAUNCH_APPS[i].0);
             }
         }
 
@@ -1691,6 +2112,30 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
 
         libdunit::sleep_ms(16);
         ticks += 1;
+        // Report average ms/frame once the loop is warm (a single line, so the
+        // blur/compositing cost shows up in the headless serial log without
+        // spamming it). >16 ms means compositing overran the frame budget.
+        if ticks == 20 {
+            let mut st = libdunit::SystemStats::default();
+            if libdunit::get_system_stats(&mut st) >= 0 {
+                prev_uptime = st.uptime_ticks;
+                prev_tick = ticks;
+            }
+        } else if ticks == 80 && prev_tick != 0 {
+            let mut st = libdunit::SystemStats::default();
+            if libdunit::get_system_stats(&mut st) >= 0 {
+                let win = (ticks - prev_tick) as u64;
+                let dt = st.uptime_ticks.saturating_sub(prev_uptime); // 100 Hz PIT
+                let ms = (dt * 10 / win).min(999);
+                let mut line = *b"gui_server: frame ~000 ms";
+                line[19] = b'0' + ((ms / 100) % 10) as u8;
+                line[20] = b'0' + ((ms / 10) % 10) as u8;
+                line[21] = b'0' + (ms % 10) as u8;
+                if let Ok(s) = core::str::from_utf8(&line) {
+                    libdunit::println(s);
+                }
+            }
+        }
         if ticks >= 60000 {
             break;
         }

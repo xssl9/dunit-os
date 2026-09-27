@@ -38,3 +38,20 @@ menu_item_h      = 26
 dock_w           = 48
 ws_w             = 22
 max_windows      = 8
+
+# Compositor visual effects (concept §5). Every effect is tunable or can be
+# switched off here without a rebuild. `corner_radius`/`shadow`/`blur_radius` are
+# pixels; the `*_alpha` values are 0-255 opacity; `blur`/`gradient`/`anim` are
+# booleans (true/false/1/0). Setting an effect to 0/false restores the flat look.
+[effects]
+corner_radius    = 8
+shadow           = 7
+shadow_alpha     = 90
+blur             = true
+blur_radius      = 4
+blur_iters       = 2
+panel_alpha      = 205
+menu_alpha       = 225
+gradient         = true
+anim             = true
+anim_ms          = 140
