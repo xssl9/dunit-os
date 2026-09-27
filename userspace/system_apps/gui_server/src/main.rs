@@ -21,6 +21,7 @@ use alloc::vec::Vec;
 
 use gui_protocol_v1::server::Server;
 use gui_protocol_v1::wire::Request;
+use gui_protocol_v1::wire::FORMAT_XRGB8888;
 use gui_protocol_v1::Opcode;
 
 use dwm_settings as settings;
@@ -387,6 +388,15 @@ fn drive_protocol(
         return false;
     }
 
+    // 8.75) Server-initiated resize (spec §9 reconfigure): the compositor pushes
+    //       a fresh CONFIGURE at new geometry; the client must ACK the new token,
+    //       re-import a buffer of the new size with a FRESH object id, and commit.
+    //       This is the exact mechanism interactive maximize/fullscreen drives —
+    //       synthesized in-process so the whole round trip is serially verifiable.
+    if !drive_reconfigure(server, conn, surface, fmt) {
+        return false;
+    }
+
     // 9) Focus/input routing: the compositor owns the input master and fans
     //    events out to clients through the protocol's single-seat router. Give
     //    the mapped surface pointer + keyboard focus, then inject a pointer
@@ -552,6 +562,93 @@ fn drive_damage(
     ok
 }
 
+/// Drive a server-initiated CONFIGURE (resize) round trip in-process: push a
+/// fresh CONFIGURE at new geometry via `Server::reconfigure`, then play the
+/// client half a resizing app must implement — ACK the new token, back a real
+/// kernel buffer of the new size, IMPORT it with a FRESH object id, ATTACH,
+/// COMMIT, and present. Proves the reconfigure mechanism end to end without a
+/// second process. Returns true iff every stage produced the expected reply.
+fn drive_reconfigure(
+    server: &mut Server,
+    conn: gui_protocol_v1::server::ConnId,
+    surface: u64,
+    fmt: u32,
+) -> bool {
+    // Resize object id: strictly greater than every id seen so far (the damage
+    // frame's BUFFER2 = 3 raised the watermark), so it passes the freshness gate.
+    const RESIZE_BUFFER: u64 = 4;
+    const W2: u32 = 96;
+    const H2: u32 = 48;
+    const STATE_ACTIVATED: u32 = 1;
+    let bytes = (W2 * H2 * 4) as usize;
+
+    // Push CONFIGURE(W2, H2); its header serial (offset 24) is the new token the
+    // client must ACK before its next COMMIT is accepted. `reconfigure` returns
+    // conn-tagged packets (like `composite`), so pick ours out of the batch.
+    let out = server.reconfigure(conn, surface, W2, H2, 1, STATE_ACTIVATED);
+    let token = match out
+        .iter()
+        .find(|(c, p)| *c == conn && opcode_of(p) == Some(Opcode::Configure))
+    {
+        Some((_, cfg)) => u64_at(cfg, 24),
+        None => return false,
+    };
+
+    // ACK the new configure token -> RESULT.
+    let ack = Request::AckConfigure { configure: token }.encode(surface, 10);
+    if find(&server.deliver(conn, &ack, None), Opcode::Result).is_none() {
+        return false;
+    }
+    libdunit::println("gui_server: reconfigure w=96 h=48 acked");
+
+    // Back the resized surface with a real kernel shared buffer and paint it.
+    let buf = libdunit::handle_create_shared(bytes);
+    if buf <= 0 {
+        return false;
+    }
+    let buf = buf as u32;
+    let mapped = libdunit::handle_map(buf, 0, bytes);
+    if mapped <= 0 {
+        libdunit::handle_close(buf);
+        return false;
+    }
+    let pixels = mapped as usize as *mut u8;
+    unsafe {
+        for y in 0..H2 as usize {
+            for x in 0..W2 as usize {
+                let off = (y * W2 as usize + x) * 4;
+                core::ptr::write_volatile(pixels.add(off), (x * 2) as u8); // B
+                core::ptr::write_volatile(pixels.add(off + 1), (y * 4) as u8); // G
+                core::ptr::write_volatile(pixels.add(off + 2), 0x40); // R
+                core::ptr::write_volatile(pixels.add(off + 3), 0xff); // X
+            }
+        }
+    }
+
+    // IMPORT (fresh id) / ATTACH / COMMIT (new token) -> RESULT each.
+    let import = Request::ImportBuffer { width: W2, height: H2, stride: W2 * 4, format: fmt, offset: 0 }
+        .encode(RESIZE_BUFFER, 11);
+    let imported = find(&server.deliver(conn, &import, Some(bytes as u64)), Opcode::Result).is_some();
+    let attach = Request::AttachBuffer { buffer: RESIZE_BUFFER, damage: Vec::new() }.encode(surface, 12);
+    let attached = imported && find(&server.deliver(conn, &attach, None), Opcode::Result).is_some();
+    let commit = Request::Commit { configure: token, frame_callback: 1 }.encode(surface, 13);
+    let committed = attached && find(&server.deliver(conn, &commit, None), Opcode::Result).is_some();
+    let presented = committed
+        && server.composite().iter().any(|(c, p)| {
+            *c == conn && opcode_of(p) == Some(Opcode::FrameDone) && u32_at(p, 48) == 0
+        });
+
+    let data = unsafe { core::slice::from_raw_parts(pixels, bytes) };
+    let ok = presented && libdunit::fb_present(data, W2, H2, 100, 100) == 0;
+    libdunit::handle_close(buf);
+    if ok {
+        libdunit::println("gui_server: client resized to 96x48 OK");
+    } else {
+        libdunit::println("gui_server: FAIL client resize");
+    }
+    ok
+}
+
 /// Control-message magic marking a capability announce (vs. a protocol packet,
 /// which begins with the DGUI wire magic). Shared with `gui_client`.
 const CTRL_MAGIC: u32 = 0x3150_4143; // "CAP1"
@@ -609,6 +706,12 @@ struct ClientState {
     surf_w: u32,
     surf_h: u32,
     presented: bool,
+    /// Surface object id the client chose in CreateSurface (needed to push a
+    /// server-initiated CONFIGURE via `Server::reconfigure` for resize/maximize).
+    surface: u64,
+    /// Pixel format the client imported its buffer with (FORMAT_XRGB8888 = 1 or
+    /// FORMAT_ARGB8888 = 2). Drives per-pixel blend vs. opaque copy at composite.
+    format: u32,
     // Desktop bring-up state (used by run_desktop_session for runtime-spawned
     // clients): `ready` once the buffer is mapped and a frame has been committed
     // so it is safe to blit; `win_created` once it owns a Win in the model.
@@ -636,6 +739,8 @@ impl ClientState {
             surf_w: 0,
             surf_h: 0,
             presented: false,
+            surface: 0,
+            format: FORMAT_XRGB8888,
             ready: false,
             win_created: false,
             app: 0xFF,
@@ -686,8 +791,28 @@ fn handle_client_payload(server: &mut Server, c: &mut ClientState, payload: &[u8
         if n < 44 {
             return;
         }
+        // Surface object id is the wire header `object` (offset 16); remember it so
+        // the compositor can push a server-initiated CONFIGURE for resize/maximize.
+        c.surface = u64::from_le_bytes([
+            payload[16], payload[17], payload[18], payload[19],
+            payload[20], payload[21], payload[22], payload[23],
+        ]);
         c.surf_w = u32::from_le_bytes([payload[36], payload[37], payload[38], payload[39]]);
         c.surf_h = u32::from_le_bytes([payload[40], payload[41], payload[42], payload[43]]);
+        // Surface format (offset 44) selects opaque copy (XRGB) vs. per-pixel
+        // blend (ARGB) at composite time; older short packets keep the default.
+        if n >= 48 {
+            c.format = u32::from_le_bytes([payload[44], payload[45], payload[46], payload[47]]);
+        }
+    }
+    // A client that resizes (in response to our CONFIGURE) re-imports a buffer of
+    // the new geometry with a FRESH object id. IMPORT_BUFFER carries the true
+    // pixel dimensions (width@32, height@36), so track them here — this is the
+    // single point where the compositor learns a surface's current size, for both
+    // the initial import and every subsequent resize.
+    if op == Some(Opcode::ImportBuffer) && n >= 40 {
+        c.surf_w = u32::from_le_bytes([payload[32], payload[33], payload[34], payload[35]]);
+        c.surf_h = u32::from_le_bytes([payload[36], payload[37], payload[38], payload[39]]);
     }
     let cap = if op == Some(Opcode::ImportBuffer) {
         Some(c.buf_size as u64)
@@ -845,6 +970,12 @@ fn serve_two_clients() -> bool {
         // Emit the isolation marker BEFORE the session loop so automated smokes
         // observe it immediately (headless runs are force-quit after capture).
         libdunit::println("gui_server: served two untrusted clients OK");
+        // Cross-process resize proof: push a server-initiated CONFIGURE to one
+        // live client and drive its re-negotiation to completion. This exercises
+        // the maximize/fullscreen mechanism across a REAL process boundary (the
+        // client re-allocates its buffer and re-imports it with a fresh object
+        // id), which the in-process compositor self-test cannot cover.
+        resize_one_client(&mut server, &mut clients);
     }
     run_desktop_session(&mut server, &mut clients);
 
@@ -861,6 +992,150 @@ fn serve_two_clients() -> bool {
         }
     }
     both
+}
+
+/// Push a server-initiated CONFIGURE to one already-presented client and pump its
+/// re-negotiation until it re-imports a fresh buffer at the new geometry and
+/// re-presents. This drives the exact maximize/fullscreen mechanism across a real
+/// process boundary: `Server::reconfigure` emits the CONFIGURE, the client backs
+/// a new buffer and replays IMPORT/ATTACH/COMMIT with a FRESH object id, and the
+/// compositor picks up the new size from the client's IMPORT_BUFFER. Verifiable
+/// headlessly (the in-process self-test cannot cross an address-space boundary).
+fn resize_one_client(server: &mut Server, clients: &mut [ClientState]) {
+    const NEWW: u32 = 320;
+    const NEWH: u32 = 160;
+    const STATE_ACTIVATED: u32 = 1;
+    // First presented client that announced a surface object (a gui_client).
+    let target = match clients.iter().position(|c| c.presented && c.surface != 0) {
+        Some(i) => i,
+        None => return,
+    };
+    let (conn, surface, pid) = (clients[target].conn, clients[target].surface, clients[target].pid);
+
+    // Emit CONFIGURE(NEWW, NEWH) and forward it to the owning client.
+    for (fc, fp) in &server.reconfigure(conn, surface, NEWW, NEWH, 1, STATE_ACTIVATED) {
+        if *fc == conn {
+            libdunit::ipc_send(pid, fp);
+        }
+    }
+
+    let mut rx = [0u8; 256];
+    for _ in 0..256 {
+        let mut sender: u32 = 0;
+        let n = libdunit::ipc_recv_blocking_from(&mut rx, &mut sender, 3000);
+        if n <= 0 {
+            break;
+        }
+        let n = n as usize;
+        let idx = match clients.iter().position(|c| c.pid == sender) {
+            Some(i) => i,
+            None => continue,
+        };
+        let mut _reload = false;
+        handle_client_payload(server, &mut clients[idx], &rx[..n], &mut _reload);
+        // Route every frame callback to its owner (keeps the other clients live).
+        // Mirror `pump_clients`: a client that completes its handshake here (a
+        // slower startup app such as the terminal or file manager, which finishes
+        // committing while we drive the target's resize) MUST be latched `ready`,
+        // exactly as the desktop pump would. Otherwise it is orphaned — presented
+        // client-side but never adopted as a runtime window — because it then goes
+        // idle in `run_desktop_session` and sends nothing further to re-trigger a
+        // composite. This keeps the documented "slower startup app becomes a
+        // runtime-pumped window" invariant true even across this resize proof.
+        for (fc, fp) in &server.composite() {
+            let status = if fp.len() >= 52 {
+                u32::from_le_bytes([fp[48], fp[49], fp[50], fp[51]])
+            } else {
+                0
+            };
+            for c in clients.iter_mut() {
+                if c.conn != *fc {
+                    continue;
+                }
+                libdunit::ipc_send(c.pid, fp);
+                if status == 0 && !c.buf_ptr.is_null() && c.surf_w > 0 && c.surf_h > 0 {
+                    c.ready = true;
+                }
+            }
+        }
+        // Done once the target reports the new geometry (via its IMPORT_BUFFER)
+        // with a fresh backing buffer that we can blit within bounds.
+        let c = &clients[target];
+        if c.surf_w == NEWW && c.surf_h == NEWH && !c.buf_ptr.is_null() {
+            let want = c.surf_w as u64 * c.surf_h as u64 * 4;
+            if want <= c.buf_size as u64 {
+                let data = unsafe { core::slice::from_raw_parts(c.buf_ptr, want as usize) };
+                if libdunit::fb_present(data, c.surf_w, c.surf_h, c.slot_x, c.slot_y) == 0 {
+                    libdunit::println("gui_server: live client resized to 320x160 OK");
+                    return;
+                }
+            }
+        }
+    }
+    libdunit::println("gui_server: FAIL live client resize");
+}
+
+/// Push a server-initiated CONFIGURE to the client that owns `pid` and forward it
+/// to that client, so it re-imports a `w`x`h` buffer (Phase 3 maximize / restore /
+/// fullscreen). The client's re-negotiation (IMPORT/ATTACH/COMMIT with a fresh
+/// object id) is drained by the desktop loop's `pump_clients`, which updates the
+/// client's `ClientState` geometry; the per-frame Win<->ClientState sync then
+/// mirrors the fresh buffer + size into the owning `Win`. A no-op for an unknown
+/// pid or a client that never announced a surface object (so a fixed-size client
+/// that ignores CONFIGURE is simply never asked to resize).
+fn reconfigure_client(
+    server: &mut Server,
+    clients: &[ClientState],
+    pid: u32,
+    w: u32,
+    h: u32,
+    state: u32,
+) {
+    let Some(c) = clients.iter().find(|c| c.pid == pid && c.surface != 0) else {
+        return;
+    };
+    let (conn, surface) = (c.conn, c.surface);
+    for (fc, fp) in &server.reconfigure(conn, surface, w, h, 1, state) {
+        if *fc == conn {
+            libdunit::ipc_send(pid, fp);
+        }
+    }
+}
+
+/// Toggle a window between maximized (filling the work area = the framebuffer
+/// minus the reserved panel + dock) and its saved floating geometry. This is the
+/// single maximize/restore action shared by the title-bar chip and the headless
+/// self-test: it saves/restores the floating `(cx,cy,sw,sh)`, sets the target
+/// position, and asks the owning client to re-import a buffer at the new size via
+/// `reconfigure_client`. The size is applied only after the client re-imports (the
+/// per-frame Win<->ClientState sync mirrors it), so a client that ignores the
+/// CONFIGURE stays at its old size — position still updates, which is harmless.
+fn toggle_maximize(
+    server: &mut Server,
+    clients: &[ClientState],
+    win: &mut Win,
+    bw: usize,
+    bh: usize,
+    ly: &Layout,
+) {
+    // STATE_ACTIVATED — the surface stays focused across the reconfigure.
+    const STATE_ACTIVATED: u32 = 1;
+    if win.maximized {
+        win.maximized = false;
+        if let Some((rx, ry, rw, rh)) = win.restore.take() {
+            win.cx = rx;
+            win.cy = ry;
+            reconfigure_client(server, clients, win.pid, rw as u32, rh as u32, STATE_ACTIVATED);
+        }
+    } else {
+        win.restore = Some((win.cx, win.cy, win.sw, win.sh));
+        let ww = (bw as i32 - ly.dock_w - 2 * ly.border).max(1);
+        let wh = (bh as i32 - ly.panel_h - ly.title_h - 2 * ly.border).max(1);
+        win.cx = ly.dock_w + ly.border;
+        win.cy = ly.panel_h + ly.title_h + ly.border;
+        win.maximized = true;
+        reconfigure_client(server, clients, win.pid, ww as u32, wh as u32, STATE_ACTIVATED);
+    }
 }
 
 // ===========================================================================
@@ -1560,6 +1835,14 @@ struct Win {
     /// Minimized windows are not composited and receive no input; a click on the
     /// app's dock icon (task switcher) restores and raises them.
     minimized: bool,
+    /// Maximized to the work area (screen minus the reserved panel/dock). Driven
+    /// by the title-bar maximize chip: the compositor pushes a server-initiated
+    /// CONFIGURE and the client re-imports a work-area-sized buffer (Phase 3).
+    maximized: bool,
+    /// Floating geometry `(cx, cy, sw, sh)` saved when the window maximizes, so an
+    /// un-maximize restores the exact pre-maximize position and size. `None` while
+    /// the window is floating.
+    restore: Option<(i32, i32, i32, i32)>,
 }
 
 impl Win {
@@ -1593,6 +1876,13 @@ impl Win {
     fn in_min(&self, mx: i32, my: i32) -> bool {
         let sz = self.title_h - 12;
         let bx = self.cx + self.sw - 2 * sz - 10;
+        let by = self.cy - self.title_h + 6;
+        mx >= bx && mx < bx + sz && my >= by && my < by + sz
+    }
+    /// Maximize/restore box: a small square just left of the minimize box.
+    fn in_max(&self, mx: i32, my: i32) -> bool {
+        let sz = self.title_h - 12;
+        let bx = self.cx + self.sw - 3 * sz - 14;
         let by = self.cy - self.title_h + 6;
         mx >= bx && mx < bx + sz && my >= by && my < by + sz
     }
@@ -1879,6 +2169,22 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         apps.workspaces
     ));
 
+    // Per-widget config (widgets/<name>.toml): resolve each desktop widget's file
+    // + enabled flag and log it, so a per-widget TOML edit is observable headless.
+    // Phase 2 only surfaces the resolved state; the render block still gates on the
+    // `[widgets]` table (Phase 8 folds the per-widget files into that gating).
+    {
+        let wclock = settings::WidgetCfg::load("clock");
+        let wmon = settings::WidgetCfg::load("monitor");
+        libdunit::println(&alloc::format!(
+            "gui_server: widgets clock(file={} en={}) monitor(file={} en={})",
+            wclock.from_file as u32,
+            wclock.enabled as u32,
+            wmon.from_file as u32,
+            wmon.enabled as u32,
+        ));
+    }
+
     let mut back: Vec<u32> = Vec::new();
     back.resize(bw * bh, theme.desktop);
 
@@ -1979,14 +2285,19 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             ws: 0,
             born: 0,
             minimized: false,
+            maximized: false,
+            restore: None,
         });
         clients[i].ready = true;
         clients[i].win_created = true;
         offset += 32;
     }
-    if wins.is_empty() {
-        return;
-    }
+    // An EMPTY window set is a first-class state now: a clean desktop boots into
+    // a usable but window-less session (panel/dock/launcher/wallpaper/widgets are
+    // live and can spawn apps on demand). We no longer early-return here — the
+    // compositor loop below runs regardless so the desktop is interactive even
+    // with zero clients. The old `if wins.is_empty() { return; }` gate defeated
+    // the clean-boot goal (`[startup] entries = []`).
     // Windows present at session start (the smoke's two gui_clients). The
     // keyboard-ready marker waits until a *runtime*-pumped window appears and
     // takes focus — i.e. the startup gui_terminal — so headless keystroke
@@ -2014,6 +2325,10 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     // One-shot: announce on serial when a window first takes keyboard focus, so
     // headless tests know the compositor is ready to accept injected keystrokes.
     let mut input_ready_announced = false;
+    // One-shot: emitted right after the FIRST composited frame is presented,
+    // unconditionally (empty desktop or not). This is the clean-boot acceptance
+    // marker — proof the desktop reached an interactive, presenting state.
+    let mut desktop_ready_announced = false;
     // --- Visual-effects state (concept §5) -------------------------------
     let mut fx = cfg.settings.effects;
     // Desktop widget card (concept §5): painted on the wallpaper behind windows.
@@ -2107,6 +2422,24 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             }
         }
 
+        // Per-frame Win<->ClientState reconciliation. A client that re-imported a
+        // buffer after a resize (maximize / restore / fullscreen) now carries a
+        // fresh backing pointer + geometry in its `ClientState`; mirror it into the
+        // owning `Win` so the compositor blits the new buffer at the new size and
+        // never the freed old one. Position stays compositor-owned (set by drag or
+        // by `toggle_maximize`), so only the buffer + surface size are synced here.
+        for w in wins.iter_mut() {
+            if !w.alive {
+                continue;
+            }
+            if let Some(c) = clients.iter().find(|c| c.pid == w.pid) {
+                w.buf_ptr = c.buf_ptr;
+                w.buf_size = c.buf_size;
+                w.sw = c.surf_w as i32;
+                w.sh = c.surf_h as i32;
+            }
+        }
+
         for i in 0..clients.len() {
             if !clients[i].ready || clients[i].win_created || clients[i].buf_ptr.is_null() {
                 continue;
@@ -2141,9 +2474,37 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 ws: clients[i].ws,
                 born: ticks,
                 minimized: false,
+                maximized: false,
+                restore: None,
             });
             clients[i].win_created = true;
             z.push(wi);
+        }
+
+        // Config-gated resize self-exercise (`test.toml` `[startup] self_test`).
+        // The automated harness has no mouse, so a title-bar maximize chip can't
+        // be clicked. Instead drive EVERY live window through the SAME
+        // `toggle_maximize` path the chip uses — proving server-push CONFIGURE +
+        // client buffer re-import across a real process boundary. We maximize all
+        // windows (not just runtime-pumped ones): which clients present first in
+        // `serve_two_clients` is a timing race, so the terminal or file manager can
+        // land as an initial window; targeting every window makes the proof
+        // independent of presentation order. Each window latches `maximized`, so it
+        // fires exactly once as it appears and the client then prints its own
+        // "reconfigured OK". Never runs on the real desktop (`self_test` is false in
+        // `default.toml`).
+        if apps.self_test {
+            for wi in 0..wins.len() {
+                if wins[wi].alive && !wins[wi].maximized {
+                    let ww = (bw as i32 - ly.dock_w - 2 * ly.border).max(1);
+                    let wh = (bh as i32 - ly.panel_h - ly.title_h - 2 * ly.border).max(1);
+                    toggle_maximize(server, clients, &mut wins[wi], bw, bh, &ly);
+                    libdunit::println(&alloc::format!(
+                        "gui_server: reconfigure w={} h={} acked (self-test)",
+                        ww, wh
+                    ));
+                }
+            }
         }
 
         let m = libdunit::get_mouse_state();
@@ -2285,6 +2646,13 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                     // switcher restores it on click.
                     wins[wi].minimized = true;
                     drag = None;
+                } else if wins[wi].in_max(mx, my) {
+                    // Maximize/restore: toggle the window between the work area
+                    // and its saved floating geometry via a server-push CONFIGURE
+                    // (Phase 3). The owning client re-imports at the new size and
+                    // the per-frame sync mirrors the fresh buffer back.
+                    toggle_maximize(server, clients, &mut wins[wi], bw, bh, &ly);
+                    drag = None;
                 } else if wins[wi].in_title(mx, my) {
                     drag = Some((wi, mx - wins[wi].cx, my - wins[wi].cy));
                 } else if wins[wi].in_content(mx, my) {
@@ -2355,10 +2723,12 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         prev_left = left;
         prev_right = right;
 
-        // Stop if every window was closed.
-        if !wins.iter().any(|w| w.alive) {
-            break;
-        }
+        // The desktop session persists even with no live windows: closing the
+        // last window drops back to the empty-but-usable desktop rather than
+        // ending the session. (Was: `if !wins.iter().any(alive) { break; }`,
+        // which killed the compositor the moment the last client closed and made
+        // a clean, window-less boot impossible.) The loop is still bounded by the
+        // `ticks >= 60000` headless guard at the bottom.
 
         let focused = z
             .iter()
@@ -2526,6 +2896,31 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 let gy = mby + sz / 2;
                 let glyph = if is_focused { theme.title_text_focused } else { theme.title_text_unfocused };
                 fill_rect_alpha(&mut back, bw, bh, gx, gy, gw, 2, ((a as u32) << 24) | (glyph & 0x00FF_FFFF));
+            }
+            // Maximize/restore box: a neutral chip left of the minimize chip,
+            // carrying a small square-outline glyph (a doubled square hints
+            // "restore" once maximized). Matches Win::in_max's hit rect.
+            {
+                let xbx = w.cx + w.sw - 3 * sz - 14;
+                let xby = w.cy - w.title_h + 6;
+                let chip = shade(tcol, 34);
+                fill_rrect(&mut back, bw, bh, xbx, xby, sz, sz, fx.corner_radius.min(sz / 2), RR_ALL, ((a as u32) << 24) | (chip & 0x00FF_FFFF));
+                let glyph = if is_focused { theme.title_text_focused } else { theme.title_text_unfocused };
+                let gcol = ((a as u32) << 24) | (glyph & 0x00FF_FFFF);
+                let gs = (sz / 2).max(4);
+                let gx = xbx + (sz - gs) / 2;
+                let gy = xby + (sz - gs) / 2;
+                // Square outline (2px sides) — the maximize affordance.
+                fill_rect_alpha(&mut back, bw, bh, gx, gy, gs, 2, gcol);
+                fill_rect_alpha(&mut back, bw, bh, gx, gy + gs - 2, gs, 2, gcol);
+                fill_rect_alpha(&mut back, bw, bh, gx, gy, 2, gs, gcol);
+                fill_rect_alpha(&mut back, bw, bh, gx + gs - 2, gy, 2, gs, gcol);
+                // Already maximized: overlay a second, offset square (restore hint).
+                if w.maximized {
+                    let o = 2;
+                    fill_rect_alpha(&mut back, bw, bh, gx + o, gy - o, gs, 2, gcol);
+                    fill_rect_alpha(&mut back, bw, bh, gx + gs - 2 + o, gy - o, 2, gs, gcol);
+                }
             }
             // Window title text (TTF), left-aligned in the title bar, clear of the
             // close chip. Drawn only once the card is nearly solid so it appears
@@ -2760,6 +3155,10 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         let bytes =
             unsafe { core::slice::from_raw_parts(back.as_ptr() as *const u8, back.len() * 4) };
         libdunit::fb_present(bytes, fb.width, fb.height, 0, 0);
+        if !desktop_ready_announced {
+            libdunit::println("gui_server: desktop ready");
+            desktop_ready_announced = true;
+        }
 
         libdunit::sleep_ms(16);
         ticks += 1;

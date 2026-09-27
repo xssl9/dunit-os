@@ -57,7 +57,31 @@ static GUI_SETTINGS_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_
 
 /// DWM system settings (TOML), read at desktop start by gui_server. Not an ELF —
 /// a plain text asset embedded in the MemFS at /system/share/dwm/default.toml.
+///
+/// The SOURCE blob is a compile-time choice on the existing `boot-smoke-tests`
+/// feature (the ONLY thing that differs per limine config; userspace is built
+/// once for all ISOs, so gui_server itself cannot know which desktop it is). The
+/// plain desktop kernel (limine_dwm.conf) embeds `default.toml`, which boots
+/// clean with no windows; the smoke kernels (limine_test_gui.conf /
+/// limine_test_terminal.conf) embed `test.toml`, whose `[startup]` autostarts two
+/// gui_clients for the M3 isolation invariant. The mount PATH is identical, so
+/// the kernel stays app-agnostic — it only picks an opaque data blob.
+#[cfg(not(feature = "boot-smoke-tests"))]
 static DWM_DEFAULT_TOML: &[u8] = include_bytes!("../../../assets/dwm/default.toml");
+#[cfg(feature = "boot-smoke-tests")]
+static DWM_DEFAULT_TOML: &[u8] = include_bytes!("../../../assets/dwm/test.toml");
+
+/// Per-app and per-widget DWM config (TOML). Layered beside `default.toml`: each
+/// desktop app/widget owns a small file under /system/share/dwm/{apps,widgets}/,
+/// so its user-facing knobs (terminal palette/prompt, file-manager colors,
+/// per-widget toggle) live in config, not baked into the app ELF. These blobs are
+/// identical for every ISO (unlike `DWM_DEFAULT_TOML`, they carry no startup
+/// policy), so they are NOT feature-gated. Mounted writable; a missing file makes
+/// the owning app fall back to its built-in baseline.
+static DWM_APP_TERMINAL_TOML: &[u8] = include_bytes!("../../../assets/dwm/apps/gui_terminal.toml");
+static DWM_APP_FILES_TOML: &[u8] = include_bytes!("../../../assets/dwm/apps/gui_files.toml");
+static DWM_WIDGET_CLOCK_TOML: &[u8] = include_bytes!("../../../assets/dwm/widgets/clock.toml");
+static DWM_WIDGET_MONITOR_TOML: &[u8] = include_bytes!("../../../assets/dwm/widgets/monitor.toml");
 
 pub struct AssetEntry {
     pub path: &'static str,
@@ -707,6 +731,16 @@ pub fn init() -> Result<()> {
         let _ = (*ROOT_MEMFS.0.get()).mkdir("/system/share");
         let _ = (*ROOT_MEMFS.0.get()).mkdir("/system/share/dwm");
         (*ROOT_MEMFS.0.get()).add_file("/system/share/dwm/default.toml", DWM_DEFAULT_TOML.to_vec());
+
+        // Layered per-app / per-widget config (slice 9b). Subdirs are pre-created
+        // here because PROTECTED_ROOTS blocks runtime mkdir under /system; the leaf
+        // files are writable, so an app may still open+edit them at runtime.
+        let _ = (*ROOT_MEMFS.0.get()).mkdir("/system/share/dwm/apps");
+        let _ = (*ROOT_MEMFS.0.get()).mkdir("/system/share/dwm/widgets");
+        (*ROOT_MEMFS.0.get()).add_file("/system/share/dwm/apps/gui_terminal.toml", DWM_APP_TERMINAL_TOML.to_vec());
+        (*ROOT_MEMFS.0.get()).add_file("/system/share/dwm/apps/gui_files.toml", DWM_APP_FILES_TOML.to_vec());
+        (*ROOT_MEMFS.0.get()).add_file("/system/share/dwm/widgets/clock.toml", DWM_WIDGET_CLOCK_TOML.to_vec());
+        (*ROOT_MEMFS.0.get()).add_file("/system/share/dwm/widgets/monitor.toml", DWM_WIDGET_MONITOR_TOML.to_vec());
 
         vfs.mount("/", &mut *ROOT_MEMFS.0.get())?;
         serial_log("[MEMFS] mounted as /\r\n");

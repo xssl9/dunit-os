@@ -18,7 +18,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use gui_protocol_v1::wire::{Request, FEATURE_ARGB8888};
+use gui_protocol_v1::wire::{Request, FEATURE_ARGB8888, MAGIC};
 
 use dunit_render::Surface;
 use dunit_style::value::Color;
@@ -87,8 +87,9 @@ const W: u32 = 560;
 const H: u32 = 360;
 const FMT_XRGB8888: u32 = 1;
 
-/// Visible text rows (bounded by H at font-size 13) and total scrollback cap.
-const VISIBLE_ROWS: usize = 15;
+/// Total scrollback cap. The number of visible rows is derived from the live
+/// surface height at runtime (see `visible_rows_for`), since the compositor can
+/// resize us via a server-pushed CONFIGURE (maximize/restore).
 const SCROLL_CAP: usize = 200;
 /// Poll cadence: block on compositor IPC at most this long, then drain the pty
 /// and repaint. The compositor blits our buffer every tick regardless.
@@ -129,6 +130,12 @@ const BG: u32 = 0xFF0B0F14;
 const FG_DEFAULT: u32 = 0xFFA6E3A1;
 const FONT_PX: f32 = 13.0;
 const ROW_PX: i32 = 16;
+
+/// Visible text rows that fit in a surface `h` px tall: an 8px top pad, then one
+/// `ROW_PX`-tall row each. At least one row so a tiny surface still paints.
+fn visible_rows_for(h: u32) -> usize {
+    (((h as i32 - 8) / ROW_PX).max(1)) as usize
+}
 
 /// The 8 ANSI colors (30-37) and bright variants (90-97), tinted to the desktop
 /// palette so program output stays coherent with the theme.
@@ -353,19 +360,22 @@ fn draw_text(surf: &mut Surface, font: &Font, x: i32, y_top: i32, color: Color, 
 }
 
 /// Paint the scrollback into the mapped ARGB8888 buffer: fill the background,
-/// then draw the last VISIBLE_ROWS rows (completed lines plus the in-progress
-/// line) as sequences of colored spans, advancing the pen per span.
-fn render(px: *mut u8, font: &Font, term: &Term) {
-    let pixels = unsafe { core::slice::from_raw_parts_mut(px as *mut u32, (W * H) as usize) };
-    let mut surf = Surface::new(pixels, W as usize, H as usize);
-    surf.fill_rect(0.0, 0.0, W as f32, H as f32, col(BG));
+/// then draw the last `visible_rows_for(h)` rows (completed lines plus the
+/// in-progress line) as sequences of colored spans, advancing the pen per span.
+/// `w`/`h` are the surface's CURRENT size — the compositor can resize us via a
+/// server-pushed CONFIGURE, so paint against the live geometry, not the consts.
+fn render(px: *mut u8, font: &Font, term: &Term, w: u32, h: u32) {
+    let pixels = unsafe { core::slice::from_raw_parts_mut(px as *mut u32, (w * h) as usize) };
+    let mut surf = Surface::new(pixels, w as usize, h as usize);
+    surf.fill_rect(0.0, 0.0, w as f32, h as f32, col(BG));
 
     // The document is `lines` (completed rows) followed by the in-progress
     // `cur` row at index `lines.len()`. `scroll` counts how many rows the view
     // is lifted above the live bottom (0 = pinned to `cur`).
+    let visible = visible_rows_for(h);
     let total = term.lines.len() + 1; // +1 for the in-progress line
     let bottom = (total - 1).saturating_sub(term.scroll); // last visible row index
-    let start = (bottom + 1).saturating_sub(VISIBLE_ROWS);
+    let start = (bottom + 1).saturating_sub(visible);
     let mut y = 8; // top padding
     let mut draw_row = |spans: &[Span]| {
         let mut x = 8; // left padding
@@ -387,8 +397,104 @@ fn render(px: *mut u8, font: &Font, term: &Term) {
 
 // APPEND_START
 
+/// Re-negotiate the surface at a new size after a server-pushed CONFIGURE: back
+/// a FRESH kernel buffer of `new_w*new_h`, render the scrollback into it at the
+/// new geometry, then replay the buffer half of the handshake with a NEW object
+/// id (the compositor's freshness gate rejects a re-used id). Returns the new
+/// `(handle, mapped ptr)`; the OLD buffer handle is closed. `serial` advances so
+/// every request keeps a unique, increasing client serial. This is the terminal
+/// half of maximize/restore — the compositor owns the geometry, we re-buffer.
+#[allow(clippy::too_many_arguments)]
+fn resize_surface(
+    compositor: u32,
+    old_buf: u32,
+    font: &Font,
+    term: &Term,
+    new_w: u32,
+    new_h: u32,
+    obj: u64,
+    token: u64,
+    serial: &mut u64,
+) -> Option<(u32, *mut u8)> {
+    let bytes = (new_w * new_h * 4) as usize;
+    let nb = libdunit::handle_create_shared(bytes);
+    if nb <= 0 {
+        return None;
+    }
+    let nb = nb as u32;
+    let mapped = libdunit::handle_map(nb, 0, bytes);
+    if mapped <= 0 {
+        libdunit::handle_close(nb);
+        return None;
+    }
+    let npx = mapped as usize as *mut u8;
+    render(npx, font, term, new_w, new_h);
+
+    // ACK the new configure token so the compositor accepts our next COMMIT.
+    let ack = Request::AckConfigure { configure: token }.encode(SURFACE, *serial);
+    *serial += 1;
+    libdunit::ipc_send(compositor, &ack);
+
+    // Transfer the fresh buffer (read-only) and announce {handle, size, object}.
+    let dup = libdunit::handle_dup(
+        nb,
+        libdunit::RIGHT_READ | libdunit::RIGHT_MAP | libdunit::RIGHT_TRANSFER,
+    );
+    let ch = if dup > 0 {
+        libdunit::handle_transfer(dup as u32, compositor)
+    } else {
+        -1
+    };
+    if ch <= 0 {
+        libdunit::handle_close(nb);
+        return None;
+    }
+    let mut ann = [0u8; 16];
+    ann[0..4].copy_from_slice(&CTRL_MAGIC.to_le_bytes());
+    ann[4..8].copy_from_slice(&(ch as u32).to_le_bytes());
+    ann[8..12].copy_from_slice(&(bytes as u32).to_le_bytes());
+    ann[12..16].copy_from_slice(&(obj as u32).to_le_bytes());
+    libdunit::ipc_send(compositor, &ann);
+
+    // IMPORT (fresh object id) / ATTACH / COMMIT (new token).
+    let import = Request::ImportBuffer {
+        width: new_w,
+        height: new_h,
+        stride: new_w * 4,
+        format: FMT_XRGB8888,
+        offset: 0,
+    }
+    .encode(obj, *serial);
+    *serial += 1;
+    libdunit::ipc_send(compositor, &import);
+    let attach = Request::AttachBuffer { buffer: obj, damage: Vec::new() }.encode(SURFACE, *serial);
+    *serial += 1;
+    libdunit::ipc_send(compositor, &attach);
+    let commit = Request::Commit { configure: token, frame_callback: 1 }.encode(SURFACE, *serial);
+    *serial += 1;
+    libdunit::ipc_send(compositor, &commit);
+
+    // Release the old backing buffer; the compositor now blits the new one.
+    libdunit::handle_close(old_buf);
+    Some((nb, npx))
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
+    // 0) Load this app's config (apps/gui_terminal.toml). A missing/garbage file
+    // yields the built-in baseline. The resolved values go to serial so a TOML
+    // edit is observable headless (config→behavior proof); Phase 6 applies them.
+    let tcfg = dwm_settings::TerminalCfg::load("gui_terminal");
+    libdunit::println(&alloc::format!(
+        "gui_terminal: cfg from_file={} prompt={} fg={:#010X} bg={:#010X} bg_alpha={} font={}",
+        tcfg.from_file as u32,
+        tcfg.prompt.as_str(),
+        tcfg.fg,
+        tcfg.bg,
+        tcfg.bg_alpha,
+        if tcfg.font.as_str().is_empty() { "<desktop>" } else { tcfg.font.as_str() },
+    ));
+
     // 1) Handshake: compositor pid + our client id (id is a tint hint only).
     let mut m = [0u8; 8];
     if libdunit::ipc_recv_blocking(&mut m, 0) < 8 {
@@ -410,7 +516,7 @@ pub extern "C" fn _start() -> ! {
         libdunit::println("gui_terminal: FAIL map buffer");
         libdunit::exit(3);
     }
-    let px = mapped as usize as *mut u8;
+    let mut px = mapped as usize as *mut u8;
     let font = match load_font() {
         Ok(f) => f,
         Err(_) => {
@@ -419,7 +525,13 @@ pub extern "C" fn _start() -> ! {
         }
     };
     let mut term = Term::new();
-    render(px, &font, &term);
+    // The surface's live geometry. The compositor may resize us via a
+    // server-pushed CONFIGURE, so track it rather than reusing the W/H consts.
+    let mut cur_buf = buf;
+    let mut cur_w = W;
+    let mut cur_h = H;
+    let mut visible_rows = visible_rows_for(H);
+    render(px, &font, &term, cur_w, cur_h);
 
     let mut rx = [0u8; 256];
 
@@ -512,11 +624,41 @@ pub extern "C" fn _start() -> ! {
 
     // 10) Bridge loop: block on compositor IPC (short timeout). Forward IN_KEY
     //     bytes into the pty master; on any wake, drain the shell's stdout into
-    //     the scrollback and repaint if it changed. Exit on IN_QUIT.
+    //     the scrollback and repaint if it changed. A server-pushed CONFIGURE
+    //     (maximize/restore) re-buffers us at the new geometry. Exit on IN_QUIT.
     let mut sbuf = [0u8; 256];
+    let mut next_obj: u64 = 3; // fresh buffer object id per resize (> import id 2)
+    let mut serial: u64 = 7; // client request serial, continues past the handshake
     loop {
         let n = libdunit::ipc_recv_blocking(&mut rx, POLL_MS);
-        if n >= 8 && u32::from_le_bytes([rx[0], rx[1], rx[2], rx[3]]) == INPUT_MAGIC {
+        let magic = if n >= 8 {
+            u32::from_le_bytes([rx[0], rx[1], rx[2], rx[3]])
+        } else {
+            0
+        };
+        // Server-pushed CONFIGURE (opcode 0x8010): the compositor resized us.
+        // Re-negotiate a fresh buffer at the new geometry, then keep rendering
+        // the scrollback into it (visible rows recomputed from the new height).
+        if magic == MAGIC && n >= 48 && u16::from_le_bytes([rx[8], rx[9]]) == 0x8010 {
+            let tok = u64_at(&rx, 24);
+            let nw = u32::from_le_bytes([rx[32], rx[33], rx[34], rx[35]]);
+            let nh = u32::from_le_bytes([rx[36], rx[37], rx[38], rx[39]]);
+            if nw == 0 || nh == 0 || (nw == cur_w && nh == cur_h) {
+                let ack = Request::AckConfigure { configure: tok }.encode(SURFACE, serial);
+                serial += 1;
+                libdunit::ipc_send(compositor, &ack);
+            } else if let Some((nb, npx)) =
+                resize_surface(compositor, cur_buf, &font, &term, nw, nh, next_obj, tok, &mut serial)
+            {
+                cur_buf = nb;
+                px = npx;
+                cur_w = nw;
+                cur_h = nh;
+                visible_rows = visible_rows_for(nh);
+                next_obj += 1;
+                libdunit::println("gui_terminal: reconfigured OK");
+            }
+        } else if magic == INPUT_MAGIC && n >= 8 {
             match rx[4] {
                 IN_QUIT => break,
                 IN_SCROLL => {
@@ -539,9 +681,9 @@ pub extern "C" fn _start() -> ! {
                     // PgUp/PgDn scroll the local view a page at a time and are
                     // never forwarded to the pty.
                     if scancode == SC_PGUP {
-                        term.scroll_by(VISIBLE_ROWS - 1, true);
+                        term.scroll_by(visible_rows - 1, true);
                     } else if scancode == SC_PGDN {
-                        term.scroll_by(VISIBLE_ROWS - 1, false);
+                        term.scroll_by(visible_rows - 1, false);
                     } else {
                         let mut seq = [0u8; 4];
                         let len = encode_key(scancode, mods, ascii, &mut seq);
@@ -563,13 +705,13 @@ pub extern "C" fn _start() -> ! {
             }
         }
         if term.dirty {
-            render(px, &font, &term);
+            render(px, &font, &term, cur_w, cur_h);
             term.dirty = false;
         }
     }
 
     libdunit::pty_close(pty);
-    libdunit::handle_close(buf);
+    libdunit::handle_close(cur_buf);
     libdunit::exit(0)
 }
 

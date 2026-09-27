@@ -1,0 +1,17 @@
+{
+  "description": "Clean-boot budget for the userspace-DWM desktop (limine_dwm.conf). Proves the acceptance goal of Phase 1: the plain desktop kernel embeds assets/dwm/default.toml (empty [startup]), so gui_server boots into an interactive but WINDOWLESS session — panel/dock/launcher/wallpaper/widgets are live and presenting — without autostarting any test windows or a terminal. `startup=0` traces the empty startup list to the resolved config; `desktop ready` proves the compositor reached a presenting state; the forbidden `served two untrusted clients OK` proves NO test clients were autostarted (that isolation smoke lives only in the boot-smoke-tests kernel / test.toml). Run: tools/qemu_test.py --build --markers-file tools/gui_boot_markers.json --ready-marker 'gui_server: desktop ready'. The GUI kernel never prints [TERM-007], so --ready-marker MUST be overridden as shown.",
+  "run": {
+    "config": "limine_dwm.conf"
+  },
+  "required": [
+    { "marker": "gui_server: start", "claim": "compositor process launched by the kernel GUI branch", "source": "userspace/system_apps/gui_server/src/main.rs" },
+    { "marker": "gui_server: no startup apps to autostart", "claim": "empty [startup] honored — no test windows/terminal autostarted", "source": "userspace/system_apps/gui_server/src/main.rs" },
+    { "marker": "startup=0", "claim": "resolved DWM config has an empty startup list (data-driven clean boot)", "source": "assets/dwm/default.toml" },
+    { "marker": "gui_server: desktop ready", "claim": "desktop reached an interactive, presenting state with zero windows", "source": "userspace/system_apps/gui_server/src/main.rs" }
+  ],
+  "forbidden": [
+    { "marker": "served two untrusted clients OK", "why": "test-client autostart must NOT happen on the clean desktop; the M3 isolation smoke belongs to the boot-smoke-tests kernel (test.toml)", "source": "userspace/system_apps/gui_server/src/main.rs" },
+    { "marker": "[PANIC]", "why": "kernel panic during desktop bring-up", "source": "kernel/src/lib.rs" },
+    { "marker": "gui_server: FAIL", "why": "any gui_server self-test failure during bring-up", "source": "userspace/system_apps/gui_server/src/main.rs" }
+  ]
+}

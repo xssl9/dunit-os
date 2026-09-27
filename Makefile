@@ -41,9 +41,15 @@ KERNEL_FEATURES =
 ifneq ($(filter limine_test_terminal.conf limine_test_gui.conf,$(notdir $(LIMINE_CONFIG))),)
 KERNEL_FEATURES = --features boot-smoke-tests
 endif
-# The userspace-DWM config boots straight into /app/gui_server as the desktop.
-# The in-kernel legacy GUI has been removed entirely, so no special kernel
-# features are needed here — the default build is the userspace-DWM kernel.
+# `boot-smoke-tests` is enabled ONLY for the two smoke ISOs above. Besides the
+# in-kernel smoke assertions, it now also swaps the embedded DWM config blob
+# (kernel/src/fs/vfs.rs): the plain desktop kernel embeds assets/dwm/default.toml
+# (clean, windowless boot), while the smoke kernels embed assets/dwm/test.toml
+# (its [startup] autostarts two gui_clients for the M3 isolation invariant). The
+# userspace side is built ONCE for every ISO; only this kernel data blob differs,
+# so the choice stays a compile-time kernel concern and gui_server learns nothing
+# about which desktop it serves. The in-kernel legacy GUI has been removed
+# entirely; the default build is the userspace-DWM kernel.
 
 HAL_OBJS = $(BUILD_DIR)/boot.o $(BUILD_DIR)/boot_main.o $(BUILD_DIR)/limine.o $(BUILD_DIR)/hal.o $(BUILD_DIR)/ports.o \
            $(BUILD_DIR)/gdt.o $(BUILD_DIR)/gdt_asm.o \

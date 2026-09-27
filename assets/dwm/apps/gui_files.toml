@@ -1,0 +1,26 @@
+# Dunit DWM per-app config — gui_files (file manager).
+#
+# Loaded by the file manager at start from /system/share/dwm/apps/gui_files.toml
+# (embedded in the kernel MemFS, writable). A missing/unparseable file falls
+# back to the file manager's built-in Green Tea palette (last-known-good).
+# Unknown keys are ignored for forward compatibility.
+#
+# Colors are #RRGGBB or #AARRGGBB (alpha defaults to opaque).
+
+[files]
+# Icon theme directory name under /assets/icons/<name>/; empty inherits the
+# desktop `[desktop] icon_theme`.
+icon_theme = ""
+# Window / header / status-bar backgrounds.
+bg         = "#121820"
+header_bg  = "#0E141B"
+status_bg  = "#0E141B"
+# Accent (selection outline, active cell), primary label and muted text.
+accent     = "#2F8F5A"
+label      = "#CDD6F4"
+muted      = "#8A94A8"
+# Selection wash painted behind the active cell's icon+label (translucent).
+sel_bg     = "#502F8F5A"
+# Background opacity 0-255. 255 keeps the opaque fast path; lower requests a
+# translucent ARGB backdrop.
+bg_alpha   = 255

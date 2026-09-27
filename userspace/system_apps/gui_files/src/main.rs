@@ -17,7 +17,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use gui_protocol_v1::wire::{Request, FEATURE_ARGB8888};
+use gui_protocol_v1::wire::{Request, FEATURE_ARGB8888, MAGIC};
 
 use dunit_render::Surface;
 use dunit_style::value::Color;
@@ -51,13 +51,12 @@ const FMT_XRGB8888: u32 = 1;
 const PAD: i32 = 10;
 const HEADER_H: i32 = 30;
 const STATUS_H: i32 = 24;
-const COLS: i32 = 5;
-const CELL_W: i32 = (W as i32 - 2 * PAD) / COLS; // 100
+/// Fixed cell size; the column count and row count derive from the live surface
+/// size at runtime (see `Files::cols`/`rows`), since the compositor can resize
+/// us via a server-pushed CONFIGURE (maximize/restore).
+const CELL_W: i32 = 100;
 const CELL_H: i32 = 72;
 const ICON: i32 = 32;
-/// Rows that fit between the header and status bar, and the resulting cell cap.
-const ROWS: i32 = (H as i32 - HEADER_H - STATUS_H) / CELL_H; // 4
-const CAP: usize = (COLS * ROWS) as usize; // 20 visible cells
 
 
 // --- Palette (opaque ARGB via Color) ---
@@ -294,13 +293,40 @@ struct Files {
     total: usize,
     /// Copy/cut clipboard: (absolute source path, `true` if cut).
     clip: Option<(String, bool)>,
+    /// Live surface size in px. The compositor can resize us via a server-pushed
+    /// CONFIGURE, so the grid geometry (columns/rows/cap) derives from these.
+    w: i32,
+    h: i32,
 }
 
 impl Files {
     fn new() -> Files {
-        let mut f = Files { path: String::from("/"), items: Vec::new(), selected: None, total: 0, clip: None };
+        let mut f = Files {
+            path: String::from("/"),
+            items: Vec::new(),
+            selected: None,
+            total: 0,
+            clip: None,
+            w: W as i32,
+            h: H as i32,
+        };
         f.reload();
         f
+    }
+
+    /// Columns that fit across the current surface width (at least one).
+    fn cols(&self) -> i32 {
+        ((self.w - 2 * PAD) / CELL_W).max(1)
+    }
+
+    /// Rows that fit between the header and status bar (at least one).
+    fn rows(&self) -> i32 {
+        ((self.h - HEADER_H - STATUS_H) / CELL_H).max(1)
+    }
+
+    /// Number of grid cells visible at the current size (columns × rows).
+    fn cap(&self) -> usize {
+        (self.cols() * self.rows()) as usize
     }
 
     /// Whether a ".." parent cell precedes the entries (everywhere but root).
@@ -333,7 +359,7 @@ impl Files {
             }
         }
         self.total = dirs.len() + files.len();
-        let cap_items = CAP - self.has_parent() as usize;
+        let cap_items = self.cap().saturating_sub(self.has_parent() as usize);
         for it in dirs.into_iter().chain(files.into_iter()) {
             if self.items.len() >= cap_items {
                 break;
@@ -499,22 +525,25 @@ fn push_u32(d: &mut String, mut v: u32) {
 /// Paint the whole window: header breadcrumb, icon grid, status bar, and any
 /// active overlay (context menu / text-entry / delete-confirm).
 fn render(px: *mut u8, font: &Font, files: &Files, icons: &Icons, mode: &Mode) {
-    let pixels = unsafe { core::slice::from_raw_parts_mut(px as *mut u32, (W * H) as usize) };
-    let mut s = Surface::new(pixels, W as usize, H as usize);
+    let w = files.w;
+    let h = files.h;
+    let cols = files.cols();
+    let pixels = unsafe { core::slice::from_raw_parts_mut(px as *mut u32, (w * h) as usize) };
+    let mut s = Surface::new(pixels, w as usize, h as usize);
 
-    s.fill_rect(0.0, 0.0, W as f32, H as f32, BG);
+    s.fill_rect(0.0, 0.0, w as f32, h as f32, BG);
 
     // Header bar + breadcrumb path.
-    s.fill_rect(0.0, 0.0, W as f32, HEADER_H as f32, HEADER_BG);
-    let crumb = fit_label(font, &files.path, 15.0, (W as i32 - 2 * PAD) as f32);
+    s.fill_rect(0.0, 0.0, w as f32, HEADER_H as f32, HEADER_BG);
+    let crumb = fit_label(font, &files.path, 15.0, (w - 2 * PAD) as f32);
     draw_text(&mut s, font, PAD, 20, 15.0, &crumb, ACCENT);
 
     // Grid of cells: an optional ".." parent cell, then the entries.
     let has_parent = files.has_parent();
     let cell_count = files.items.len() + has_parent as usize;
     for ci in 0..cell_count {
-        let col = (ci as i32) % COLS;
-        let row = (ci as i32) / COLS;
+        let col = (ci as i32) % cols;
+        let row = (ci as i32) / cols;
         let cx = PAD + col * CELL_W;
         let cy = HEADER_H + row * CELL_H;
 
@@ -548,7 +577,7 @@ fn render(px: *mut u8, font: &Font, files: &Files, icons: &Icons, mode: &Mode) {
     }
 
     // Status bar: entry count (+ hidden overflow) and the selected name.
-    s.fill_rect(0.0, (H as i32 - STATUS_H) as f32, W as f32, STATUS_H as f32, STATUS_BG);
+    s.fill_rect(0.0, (h - STATUS_H) as f32, w as f32, STATUS_H as f32, STATUS_BG);
     let mut status = String::new();
     push_u32(&mut status, files.total as u32);
     status.push_str(" items");
@@ -563,14 +592,14 @@ fn render(px: *mut u8, font: &Font, files: &Files, icons: &Icons, mode: &Mode) {
             status.push_str(&files.items[ii].name);
         }
     }
-    let sb = fit_label(font, &status, 12.0, (W as i32 - 2 * PAD) as f32);
-    draw_text(&mut s, font, PAD, H as i32 - 7, 12.0, &sb, MUTED);
+    let sb = fit_label(font, &status, 12.0, (w - 2 * PAD) as f32);
+    draw_text(&mut s, font, PAD, h - 7, 12.0, &sb, MUTED);
 
     // Overlays on top of the base view.
     match mode {
         Mode::Browse => {}
         Mode::Menu { mx, my } => draw_menu(&mut s, font, files, *mx, *my),
-        Mode::Text { rename, buf } => draw_text_box(&mut s, font, *rename, buf),
+        Mode::Text { rename, buf } => draw_text_box(&mut s, font, w, h, *rename, buf),
         Mode::Confirm => draw_confirm(&mut s, font, files),
     }
 }
@@ -584,15 +613,16 @@ enum Hit {
 
 /// Map a client-local pointer `(lx, ly)` to a grid cell, if any.
 fn hit_cell(files: &Files, lx: i32, ly: i32) -> Option<Hit> {
-    if lx < PAD || ly < HEADER_H || ly >= H as i32 - STATUS_H {
+    if lx < PAD || ly < HEADER_H || ly >= files.h - STATUS_H {
         return None;
     }
+    let cols = files.cols();
     let col = (lx - PAD) / CELL_W;
     let row = (ly - HEADER_H) / CELL_H;
-    if col < 0 || col >= COLS || row < 0 || row >= ROWS {
+    if col < 0 || col >= cols || row < 0 || row >= files.rows() {
         return None;
     }
-    let ci = (row * COLS + col) as usize;
+    let ci = (row * cols + col) as usize;
     let has_parent = files.has_parent();
     if ci >= files.items.len() + has_parent as usize {
         return None;
@@ -650,16 +680,16 @@ fn action_enabled(a: Action, files: &Files) -> bool {
     }
 }
 
-/// Clamp a menu opened at `(mx, my)` so it stays fully inside the window.
-fn menu_origin(mx: i32, my: i32) -> (i32, i32) {
-    let ox = mx.min(W as i32 - MENU_W - 2).max(2);
-    let oy = my.min(H as i32 - MENU_H - 2).max(2);
+/// Clamp a menu opened at `(mx, my)` so it stays fully inside a `w`×`h` window.
+fn menu_origin(w: i32, h: i32, mx: i32, my: i32) -> (i32, i32) {
+    let ox = mx.min(w - MENU_W - 2).max(2);
+    let oy = my.min(h - MENU_H - 2).max(2);
     (ox, oy)
 }
 
 /// The menu row a client-local pointer `(lx, ly)` landed on, if inside the menu.
-fn menu_hit(mx: i32, my: i32, lx: i32, ly: i32) -> Option<usize> {
-    let (ox, oy) = menu_origin(mx, my);
+fn menu_hit(w: i32, h: i32, mx: i32, my: i32, lx: i32, ly: i32) -> Option<usize> {
+    let (ox, oy) = menu_origin(w, h, mx, my);
     if lx < ox || lx >= ox + MENU_W || ly < oy || ly >= oy + MENU_H {
         return None;
     }
@@ -673,7 +703,7 @@ fn menu_hit(mx: i32, my: i32, lx: i32, ly: i32) -> Option<usize> {
 
 /// Draw the context menu at its clamped origin.
 fn draw_menu(s: &mut Surface, font: &Font, files: &Files, mx: i32, my: i32) {
-    let (ox, oy) = menu_origin(mx, my);
+    let (ox, oy) = menu_origin(files.w, files.h, mx, my);
     s.fill_rect(ox as f32, oy as f32, MENU_W as f32, MENU_H as f32, HEADER_BG);
     s.stroke_rect(ox as f32, oy as f32, MENU_W as f32, MENU_H as f32, 1.0, ACCENT);
     for (i, (action, label)) in MENU_ACTIONS.iter().enumerate() {
@@ -683,19 +713,20 @@ fn draw_menu(s: &mut Surface, font: &Font, files: &Files, mx: i32, my: i32) {
     }
 }
 
-/// Draw a centered dialog box (bg + accent border) and return its origin.
-fn draw_dialog(s: &mut Surface) -> (i32, i32) {
-    let ox = (W as i32 - DLG_W) / 2;
-    let oy = (H as i32 - DLG_H) / 2;
-    s.fill_rect(0.0, 0.0, W as f32, H as f32, Color::rgba(0, 0, 0, 0x70)); // scrim
+/// Draw a centered dialog box (bg + accent border) in a `w`×`h` window and
+/// return its origin.
+fn draw_dialog(s: &mut Surface, w: i32, h: i32) -> (i32, i32) {
+    let ox = (w - DLG_W) / 2;
+    let oy = (h - DLG_H) / 2;
+    s.fill_rect(0.0, 0.0, w as f32, h as f32, Color::rgba(0, 0, 0, 0x70)); // scrim
     s.fill_rect(ox as f32, oy as f32, DLG_W as f32, DLG_H as f32, HEADER_BG);
     s.stroke_rect(ox as f32, oy as f32, DLG_W as f32, DLG_H as f32, 1.0, ACCENT);
     (ox, oy)
 }
 
 /// Draw the text-entry overlay (New Folder / Rename) with the current buffer.
-fn draw_text_box(s: &mut Surface, font: &Font, rename: bool, buf: &str) {
-    let (ox, oy) = draw_dialog(s);
+fn draw_text_box(s: &mut Surface, font: &Font, w: i32, h: i32, rename: bool, buf: &str) {
+    let (ox, oy) = draw_dialog(s, w, h);
     let title = if rename { "Rename to:" } else { "New folder name:" };
     draw_text(s, font, ox + 14, oy + 26, 14.0, title, ACCENT);
     // Input field.
@@ -715,7 +746,7 @@ fn draw_text_box(s: &mut Surface, font: &Font, rename: bool, buf: &str) {
 
 /// Draw the delete-confirmation overlay for the selected entry.
 fn draw_confirm(s: &mut Surface, font: &Font, files: &Files) {
-    let (ox, oy) = draw_dialog(s);
+    let (ox, oy) = draw_dialog(s, files.w, files.h);
     draw_text(s, font, ox + 14, oy + 26, 14.0, "Delete this file?", ACCENT);
     let name = files
         .selected
@@ -728,8 +759,108 @@ fn draw_confirm(s: &mut Surface, font: &Font, files: &Files) {
 }
 
 
+/// Re-negotiate the surface at a new size after a server-pushed CONFIGURE: back
+/// a FRESH kernel buffer of `new_w*new_h`, re-read the directory at the new cell
+/// cap, render into the new buffer, then replay the buffer half of the handshake
+/// with a NEW object id (the compositor's freshness gate rejects a re-used id).
+/// Returns the new `(handle, mapped ptr)`; the OLD buffer handle is closed.
+/// `serial` advances so every request keeps a unique, increasing client serial.
+#[allow(clippy::too_many_arguments)]
+fn resize_surface(
+    compositor: u32,
+    old_buf: u32,
+    font: &Font,
+    files: &mut Files,
+    icons: &Icons,
+    mode: &Mode,
+    new_w: u32,
+    new_h: u32,
+    obj: u64,
+    token: u64,
+    serial: &mut u64,
+) -> Option<(u32, *mut u8)> {
+    let bytes = (new_w * new_h * 4) as usize;
+    let nb = libdunit::handle_create_shared(bytes);
+    if nb <= 0 {
+        return None;
+    }
+    let nb = nb as u32;
+    let mapped = libdunit::handle_map(nb, 0, bytes);
+    if mapped <= 0 {
+        libdunit::handle_close(nb);
+        return None;
+    }
+    let npx = mapped as usize as *mut u8;
+    // Adopt the new geometry and re-cap the listing to the new grid, then paint.
+    files.w = new_w as i32;
+    files.h = new_h as i32;
+    files.reload();
+    render(npx, font, files, icons, mode);
+
+    // ACK the new configure token so the compositor accepts our next COMMIT.
+    let ack = Request::AckConfigure { configure: token }.encode(SURFACE, *serial);
+    *serial += 1;
+    libdunit::ipc_send(compositor, &ack);
+
+    // Transfer the fresh buffer (read-only) and announce {handle, size, object}.
+    let dup = libdunit::handle_dup(
+        nb,
+        libdunit::RIGHT_READ | libdunit::RIGHT_MAP | libdunit::RIGHT_TRANSFER,
+    );
+    let ch = if dup > 0 {
+        libdunit::handle_transfer(dup as u32, compositor)
+    } else {
+        -1
+    };
+    if ch <= 0 {
+        libdunit::handle_close(nb);
+        return None;
+    }
+    let mut ann = [0u8; 16];
+    ann[0..4].copy_from_slice(&CTRL_MAGIC.to_le_bytes());
+    ann[4..8].copy_from_slice(&(ch as u32).to_le_bytes());
+    ann[8..12].copy_from_slice(&(bytes as u32).to_le_bytes());
+    ann[12..16].copy_from_slice(&(obj as u32).to_le_bytes());
+    libdunit::ipc_send(compositor, &ann);
+
+    // IMPORT (fresh object id) / ATTACH / COMMIT (new token).
+    let import = Request::ImportBuffer {
+        width: new_w,
+        height: new_h,
+        stride: new_w * 4,
+        format: FMT_XRGB8888,
+        offset: 0,
+    }
+    .encode(obj, *serial);
+    *serial += 1;
+    libdunit::ipc_send(compositor, &import);
+    let attach = Request::AttachBuffer { buffer: obj, damage: Vec::new() }.encode(SURFACE, *serial);
+    *serial += 1;
+    libdunit::ipc_send(compositor, &attach);
+    let commit = Request::Commit { configure: token, frame_callback: 1 }.encode(SURFACE, *serial);
+    *serial += 1;
+    libdunit::ipc_send(compositor, &commit);
+
+    // Release the old backing buffer; the compositor now blits the new one.
+    libdunit::handle_close(old_buf);
+    Some((nb, npx))
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
+    // 0) Load this app's config (apps/gui_files.toml). A missing/garbage file
+    // yields the built-in baseline. The resolved values go to serial so a TOML
+    // edit is observable headless (config→behavior proof); Phase 6 applies them.
+    let fcfg = dwm_settings::FilesCfg::load("gui_files");
+    libdunit::println(&alloc::format!(
+        "gui_files: cfg from_file={} icon_theme={} bg={:#010X} accent={:#010X} bg_alpha={}",
+        fcfg.from_file as u32,
+        if fcfg.icon_theme.as_str().is_empty() { "<desktop>" } else { fcfg.icon_theme.as_str() },
+        fcfg.bg,
+        fcfg.accent,
+        fcfg.bg_alpha,
+    ));
+
     // 1) Handshake: compositor pid + our client id (id is a tint hint only).
     let mut m = [0u8; 8];
     if libdunit::ipc_recv_blocking(&mut m, 0) < 8 {
@@ -751,7 +882,7 @@ pub extern "C" fn _start() -> ! {
         libdunit::println("gui_files: FAIL map buffer");
         libdunit::exit(3);
     }
-    let px = mapped as usize as *mut u8;
+    let mut px = mapped as usize as *mut u8;
     let font = match load_font() {
         Ok(f) => f,
         Err(_) => {
@@ -762,6 +893,11 @@ pub extern "C" fn _start() -> ! {
     let icons = Icons::load();
     let mut files = Files::new();
     let mut mode = Mode::Browse;
+    // The surface's live geometry. The compositor may resize us via a
+    // server-pushed CONFIGURE, so track it rather than reusing the W/H consts.
+    let mut cur_buf = buf;
+    let mut cur_w = W;
+    let mut cur_h = H;
     render(px, &font, &files, &icons, &mode);
 
     let mut rx = [0u8; 256];
@@ -844,9 +980,39 @@ pub extern "C" fn _start() -> ! {
     //    file operations (New Folder / Rename / Delete / Copy / Cut / Paste).
     //    Text-entry and delete-confirm overlays consume IN_KEY. Any state change
     //    repaints the buffer.
+    let mut next_obj: u64 = 3; // fresh buffer object id per resize (> import id 2)
+    let mut serial: u64 = 7; // client request serial, continues past the handshake
     loop {
         let n = libdunit::ipc_recv_blocking(&mut rx, 0);
-        if n < 8 || u32::from_le_bytes([rx[0], rx[1], rx[2], rx[3]]) != INPUT_MAGIC {
+        if n < 8 {
+            continue;
+        }
+        let magic = u32::from_le_bytes([rx[0], rx[1], rx[2], rx[3]]);
+        // Server-pushed CONFIGURE (opcode 0x8010): the compositor resized us
+        // (maximize/restore). Re-negotiate a fresh buffer at the new geometry,
+        // then keep browsing at the new grid size.
+        if magic == MAGIC && n >= 48 && u16::from_le_bytes([rx[8], rx[9]]) == 0x8010 {
+            let tok = u64_at(&rx, 24);
+            let nw = u32::from_le_bytes([rx[32], rx[33], rx[34], rx[35]]);
+            let nh = u32::from_le_bytes([rx[36], rx[37], rx[38], rx[39]]);
+            if nw == 0 || nh == 0 || (nw == cur_w && nh == cur_h) {
+                let ack = Request::AckConfigure { configure: tok }.encode(SURFACE, serial);
+                serial += 1;
+                libdunit::ipc_send(compositor, &ack);
+            } else if let Some((nb, npx)) = resize_surface(
+                compositor, cur_buf, &font, &mut files, &icons, &mode, nw, nh, next_obj, tok,
+                &mut serial,
+            ) {
+                cur_buf = nb;
+                px = npx;
+                cur_w = nw;
+                cur_h = nh;
+                next_obj += 1;
+                libdunit::println("gui_files: reconfigured OK");
+            }
+            continue;
+        }
+        if magic != INPUT_MAGIC {
             continue;
         }
         let kind = rx[4];
@@ -906,7 +1072,7 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
                 Mk::Menu(mx, my) => {
-                    match menu_hit(mx, my, lx, ly) {
+                    match menu_hit(files.w, files.h, mx, my, lx, ly) {
                         Some(row) => {
                             let (action, _) = MENU_ACTIONS[row];
                             if action_enabled(action, &files) {
@@ -1022,7 +1188,7 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    libdunit::handle_close(buf);
+    libdunit::handle_close(cur_buf);
     libdunit::exit(0)
 }
 

@@ -1,4 +1,14 @@
-# Dunit DWM system defaults (Stack B compositor).
+# Dunit DWM system defaults — BOOT-SMOKE-TESTS variant.
+#
+# IDENTICAL to assets/dwm/default.toml EXCEPT for the [startup] table at the
+# bottom, which autostarts two gui_clients (M3 cross-process isolation invariant,
+# "served two untrusted clients OK") plus gui_terminal + gui_files so their
+# per-app config is exercised headless. Selected at build time in
+# kernel/src/fs/vfs.rs when the `boot-smoke-tests` feature is on
+# (limine_test_gui.conf / limine_test_terminal.conf); the plain desktop kernel
+# (limine_dwm.conf) embeds default.toml, which boots clean with no windows.
+#
+# KEEP IN SYNC with default.toml: the two files must differ ONLY in [startup].
 #
 # Loaded by gui_server at desktop start from /system/share/dwm/default.toml
 # (embedded in the kernel MemFS). Unknown keys are ignored for forward
@@ -140,17 +150,23 @@ entries = ["gui_client", "gui_calc", "gui_stat", "gui_files", "gui_terminal", "g
 [launcher]
 entries = ["gui_client", "gui_calc", "gui_stat", "gui_files", "gui_terminal", "gui_settings"]
 
-# Autostart: apps spawned at desktop bring-up, in order (ids may repeat). EMPTY
-# by design — the production desktop boots CLEAN into an interactive but window-
-# less session (panel/dock/launcher/wallpaper/widgets are live; the user launches
-# apps from the dock or launcher). The cross-process isolation smoke lives in
-# `test.toml` (selected at build time by the `boot-smoke-tests` kernel feature),
-# which autostarts two gui_clients instead. Add ids here to pin startup apps.
+# Autostart: THE ONLY DIFFERENCE FROM default.toml. Two gui_clients prove the M3
+# cross-process isolation invariant (two untrusted clients composited at once);
+# gui_terminal + gui_files then autostart so their per-app config (apps/*.toml)
+# is exercised and its resolved-config diagnostic is observable headless. The
+# isolation marker fires off the two gui_clients — the heavier apps come up later
+# as runtime-pumped windows and do not gate it.
 [startup]
-entries = []
+entries = ["gui_client", "gui_client", "gui_terminal", "gui_files"]
+# Phase 3 headless resize proof: the automated harness has no mouse, so the
+# title-bar maximize chip can't be clicked. With this set, the compositor drives
+# each runtime-pumped window (terminal + files) through the SAME maximize path
+# the chip uses — server-push CONFIGURE + client buffer re-import across a real
+# process boundary. NEVER set in default.toml (a real desktop must not auto-
+# maximize its windows).
+self_test = true
 
 # Virtual workspace count (the panel switcher lays out this many pips). Clamped
 # to 1..=9 on load.
 [workspaces]
 count = 5
-

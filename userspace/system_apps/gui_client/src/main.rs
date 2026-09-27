@@ -83,6 +83,85 @@ fn u64_at(p: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(a)
 }
 
+/// Re-negotiate the surface at a new size after a server-pushed CONFIGURE: back
+/// a FRESH kernel buffer of `new_w*new_h`, render into it, then replay the
+/// buffer half of the handshake with a NEW object id (the compositor's freshness
+/// gate rejects a re-used id). Returns the new `(handle, mapped ptr, ok-button
+/// rect)` on success; the OLD buffer handle is closed. `serial` advances so
+/// every request keeps a unique, increasing client serial. This is the client
+/// half of maximize/fullscreen/restore — identical for every resizing app.
+#[allow(clippy::too_many_arguments)]
+fn resize_surface(
+    compositor: u32,
+    id: u32,
+    old_buf: u32,
+    font: &Font,
+    st: UiState,
+    new_w: u32,
+    new_h: u32,
+    obj: u64,
+    token: u64,
+    serial: &mut u64,
+) -> Option<(u32, *mut u8, (i32, i32, i32, i32))> {
+    let bytes = (new_w * new_h * 4) as usize;
+    let nb = libdunit::handle_create_shared(bytes);
+    if nb <= 0 {
+        return None;
+    }
+    let nb = nb as u32;
+    let mapped = libdunit::handle_map(nb, 0, bytes);
+    if mapped <= 0 {
+        libdunit::handle_close(nb);
+        return None;
+    }
+    let npx = mapped as usize as *mut u8;
+    let btn = render_window(npx, font, id, st, new_w, new_h);
+
+    // ACK the new configure token so the compositor accepts our next COMMIT.
+    let ack = Request::AckConfigure { configure: token }.encode(SURFACE, *serial);
+    *serial += 1;
+    send_env(compositor, id, &ack);
+
+    // Transfer the fresh buffer (read-only) and announce {handle, size, object}.
+    let dup = libdunit::handle_dup(
+        nb,
+        libdunit::RIGHT_READ | libdunit::RIGHT_MAP | libdunit::RIGHT_TRANSFER,
+    );
+    let ch = if dup > 0 {
+        libdunit::handle_transfer(dup as u32, compositor)
+    } else {
+        -1
+    };
+    if ch <= 0 {
+        libdunit::handle_close(nb);
+        return None;
+    }
+    let mut ann = [0u8; 16];
+    ann[0..4].copy_from_slice(&CTRL_MAGIC.to_le_bytes());
+    ann[4..8].copy_from_slice(&(ch as u32).to_le_bytes());
+    ann[8..12].copy_from_slice(&(bytes as u32).to_le_bytes());
+    ann[12..16].copy_from_slice(&(obj as u32).to_le_bytes());
+    send_env(compositor, id, &ann);
+
+    // IMPORT (fresh object id) / ATTACH / COMMIT (new token).
+    let import =
+        Request::ImportBuffer { width: new_w, height: new_h, stride: new_w * 4, format: FMT_XRGB8888, offset: 0 }
+            .encode(obj, *serial);
+    *serial += 1;
+    send_env(compositor, id, &import);
+    let attach =
+        Request::AttachBuffer { buffer: obj, damage: alloc::vec::Vec::new() }.encode(SURFACE, *serial);
+    *serial += 1;
+    send_env(compositor, id, &attach);
+    let commit = Request::Commit { configure: token, frame_callback: 1 }.encode(SURFACE, *serial);
+    *serial += 1;
+    send_env(compositor, id, &commit);
+
+    // Release the old backing buffer; the compositor now blits the new one.
+    libdunit::handle_close(old_buf);
+    Some((nb, npx, btn))
+}
+
 /// Send `payload` to the compositor. The compositor routes inbound messages by
 /// the kernel-authenticated sender pid, so no client-side envelope is needed (a
 /// client-supplied id could be spoofed and is therefore never trusted). `_id`
@@ -97,8 +176,10 @@ fn send_env(dst: u32, _id: u32, payload: &[u8]) {
 /// Runtime (DUI tree -> DSS cascade -> content-measured layout -> dunit-render),
 /// reflecting the current `UiState` (button hover/press + a live click counter).
 /// Returns the OK button's rect in client-local pixels so the input loop can
-/// hit-test the pointer against it.
-fn render_window(px: *mut u8, font: &Font, id: u32, st: UiState) -> (i32, i32, i32, i32) {
+/// hit-test the pointer against it. `w`/`h` are the surface's CURRENT size — the
+/// compositor can grow/shrink us via a server-pushed CONFIGURE (resize/maximize),
+/// so the layout must be measured against the live geometry, not a fixed const.
+fn render_window(px: *mut u8, font: &Font, id: u32, st: UiState, w: u32, h: u32) -> (i32, i32, i32, i32) {
     let accent = if id == 1 { "#a6e3a1" } else { "#94e2d5" };
     let title = if id == 1 { "Dunit" } else { "Window 2" };
     // Live subtext: click count so a press is visibly acknowledged even without
@@ -163,10 +244,10 @@ fn render_window(px: *mut u8, font: &Font, id: u32, st: UiState) -> (i32, i32, i
         }
         (0.0, 0.0)
     };
-    let lay = layout_measured(&tree, W as f32, H as f32, &measure_fn);
+    let lay = layout_measured(&tree, w as f32, h as f32, &measure_fn);
 
-    let pixels = unsafe { core::slice::from_raw_parts_mut(px as *mut u32, (W * H) as usize) };
-    let mut surface = Surface::new(pixels, W as usize, H as usize);
+    let pixels = unsafe { core::slice::from_raw_parts_mut(px as *mut u32, (w * h) as usize) };
+    let mut surface = Surface::new(pixels, w as usize, h as usize);
     paint(&tree, &lay, &style_of, font, &mut surface);
 
     // Report the OK button's rect (client-local) for pointer hit-testing.
@@ -201,12 +282,13 @@ pub extern "C" fn _start() -> ! {
         libdunit::exit(2);
     }
     let buf = buf as u32;
+    let mut cur_buf = buf;
     let mapped = libdunit::handle_map(buf, 0, bytes);
     if mapped <= 0 {
         libdunit::println("gui_client: FAIL map buffer");
         libdunit::exit(3);
     }
-    let px = mapped as usize as *mut u8;
+    let mut px = mapped as usize as *mut u8;
     let font = match load_font() {
         Ok(f) => f,
         Err(_) => {
@@ -215,7 +297,11 @@ pub extern "C" fn _start() -> ! {
         }
     };
     let mut st = UiState::default();
-    let mut btn = render_window(px, &font, id, st);
+    // The surface's live geometry. The compositor may resize us via a
+    // server-pushed CONFIGURE, so track it rather than reusing the W/H consts.
+    let mut cur_w = W;
+    let mut cur_h = H;
+    let mut btn = render_window(px, &font, id, st, cur_w, cur_h);
 
     let mut rx = [0u8; 256];
 
@@ -295,13 +381,48 @@ pub extern "C" fn _start() -> ! {
     // 9) Interactive event loop. The compositor owns the display and forwards
     //    pointer input for the focused window as INPUT_MAGIC control messages;
     //    we react by re-painting into our shared buffer (the compositor blits it
-    //    every tick, so repaints appear without us presenting). Exit on QUIT.
+    //    every tick, so repaints appear without us presenting). It can also push
+    //    a server-initiated CONFIGURE (resize/maximize/fullscreen); we re-buffer
+    //    at the new size. Exit on QUIT.
+    let mut next_obj: u64 = 3; // fresh buffer object id per resize (> import id 2)
+    let mut serial: u64 = 7; // client request serial, continues past the handshake
     loop {
         let n = libdunit::ipc_recv_blocking(&mut rx, 0);
         if n < 8 {
             continue;
         }
-        if u32::from_le_bytes([rx[0], rx[1], rx[2], rx[3]]) != INPUT_MAGIC {
+        let magic = u32::from_le_bytes([rx[0], rx[1], rx[2], rx[3]]);
+        // Server-pushed CONFIGURE (opcode 0x8010): the compositor resized us
+        // (maximize/fullscreen/restore). Re-negotiate a fresh buffer at the new
+        // geometry, then keep rendering into it at the new size.
+        if magic == gui_protocol_v1::wire::MAGIC
+            && n >= 48
+            && u16::from_le_bytes([rx[8], rx[9]]) == 0x8010
+        {
+            let tok = u64_at(&rx, 24);
+            let new_w = u32::from_le_bytes([rx[32], rx[33], rx[34], rx[35]]);
+            let new_h = u32::from_le_bytes([rx[36], rx[37], rx[38], rx[39]]);
+            if new_w == 0 || new_h == 0 || (new_w == cur_w && new_h == cur_h) {
+                // No geometry change: just re-ack so a later COMMIT stays valid.
+                let ack = Request::AckConfigure { configure: tok }.encode(SURFACE, serial);
+                serial += 1;
+                send_env(compositor, id, &ack);
+                continue;
+            }
+            if let Some((nb, npx, nbtn)) = resize_surface(
+                compositor, id, cur_buf, &font, st, new_w, new_h, next_obj, tok, &mut serial,
+            ) {
+                cur_buf = nb;
+                px = npx;
+                cur_w = new_w;
+                cur_h = new_h;
+                next_obj += 1;
+                btn = nbtn;
+                libdunit::println("gui_client: reconfigured OK");
+            }
+            continue;
+        }
+        if magic != INPUT_MAGIC {
             continue;
         }
         let kind = rx[4];
@@ -339,11 +460,11 @@ pub extern "C" fn _start() -> ! {
         }
         // Repaint only when the visible state actually changed.
         if st.hover != before.hover || st.press != before.press || st.clicks != before.clicks {
-            btn = render_window(px, &font, id, st);
+            btn = render_window(px, &font, id, st, cur_w, cur_h);
         }
     }
 
-    libdunit::handle_close(buf);
+    libdunit::handle_close(cur_buf);
     libdunit::exit(0)
 }
 

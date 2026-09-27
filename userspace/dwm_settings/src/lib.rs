@@ -461,6 +461,12 @@ pub struct Applications {
     pub startup: Vec<usize>,
     /// Number of virtual workspaces.
     pub workspaces: usize,
+    /// Test-only: `[startup] self_test = true` makes the compositor drive its
+    /// runtime windows through a headless resize self-exercise (Phase 3) — no
+    /// mouse exists in the automated harness, so a title-bar maximize chip can't
+    /// be clicked. NEVER set in `default.toml`: a real desktop must not auto-
+    /// maximize its windows; only `test.toml` opts in.
+    pub self_test: bool,
 }
 
 impl AppEntry {
@@ -491,9 +497,14 @@ impl Applications {
         Applications {
             dock: alloc::vec![0, 1, 2, 3, 4, 5],
             launcher: alloc::vec![0, 1, 2, 3, 4, 5],
-            startup: alloc::vec![0, 0, 4], // gui_client, gui_client, gui_terminal
+            // Clean-boot baseline: NO autostart. Matches `default.toml`'s empty
+            // `[startup]`, so a missing/garbage config falls back to the same
+            // windowless desktop rather than resurrecting hardcoded test windows.
+            startup: alloc::vec![],
             workspaces: 5,
             apps,
+            // Never self-exercise on the real desktop; only test.toml sets this.
+            self_test: false,
         }
     }
 }
@@ -661,6 +672,7 @@ fn parse_apps(text: &str) -> (Applications, bool) {
     let mut startup_ids: Vec<String> = Vec::new();
     let (mut have_dock, mut have_launcher, mut have_startup) = (false, false, false);
     let mut workspaces: usize = 1;
+    let mut self_test = false;
 
     let mut section = String::new(); // full header, e.g. "application.gui_files"
     for raw in text.lines() {
@@ -707,6 +719,8 @@ fn parse_apps(text: &str) -> (Applications, bool) {
         } else if section == "startup" && key == "entries" {
             startup_ids = parse_str_array(rhs);
             have_startup = true;
+        } else if section == "startup" && key == "self_test" {
+            self_test = parse_bool(rhs).unwrap_or(false);
         } else if section == "workspaces" && (key == "count" || key == "n") {
             if let Some(n) = parse_uint(rhs) {
                 workspaces = (n as usize).clamp(1, MAX_WS);
@@ -740,7 +754,7 @@ fn parse_apps(text: &str) -> (Applications, bool) {
     let launcher = if have_launcher { resolve(&launcher_ids, &apps) } else { all.clone() };
     let startup = if have_startup { resolve(&startup_ids, &apps) } else { Vec::new() };
 
-    (Applications { apps, dock, launcher, startup, workspaces }, true)
+    (Applications { apps, dock, launcher, startup, workspaces, self_test }, true)
 }
 
 /// Parse a single-line TOML string array (`["a", "b"]`) into its elements.
@@ -1025,4 +1039,255 @@ pub fn roundtrip_ok(s: &Settings) -> bool {
     let mut back = Settings::defaults();
     parse_into(&text, &mut back);
     back.theme == s.theme && back.layout == s.layout && back.effects == s.effects && back.desktop == s.desktop && back.widgets == s.widgets
+}
+
+// ===========================================================================
+// Per-app / per-widget config (layered TOML). Each app and widget owns a small
+// file under /system/share/dwm/{apps,widgets}/<id>.toml, so its user-facing
+// knobs (prompt, palette, transparency, per-widget toggle) live beside the
+// desktop policy instead of being baked into the app ELF. A missing/garbage
+// file yields the typed baseline (last-known-good), exactly like `load_config`.
+// The app/widget id is passed by the CALLER (the app knows its own identity,
+// the compositor drives widget names off `[widgets]`), so no id is hardcoded
+// here — this stays a generic path-driven loader.
+// ===========================================================================
+
+/// Directory holding per-app config files (`<id>.toml`).
+pub const APPS_DIR: &str = "/system/share/dwm/apps";
+/// Directory holding per-widget config files (`<name>.toml`).
+pub const WIDGETS_DIR: &str = "/system/share/dwm/widgets";
+
+/// Build "<dir>/<name>.toml".
+fn config_path(dir: &str, name: &str) -> String {
+    let mut p = String::from(dir);
+    p.push('/');
+    p.push_str(name);
+    p.push_str(".toml");
+    p
+}
+
+/// Overlay a single-line TOML color array (`["#...", ...]`) onto `out`, element
+/// by element; a malformed entry leaves that slot at its baseline.
+fn parse_color_array_into(rhs: &str, out: &mut [u32]) {
+    for (i, s) in parse_str_array(rhs).iter().enumerate() {
+        if i >= out.len() {
+            break;
+        }
+        if let Some(c) = parse_color(s) {
+            out[i] = c;
+        }
+    }
+}
+
+/// Per-terminal config (`apps/gui_terminal.toml`, table `[terminal]`). Mirrors
+/// the palette/prompt knobs the terminal used to hardcode. `font` empty means
+/// "inherit the desktop `[desktop] font`"; `bg_alpha` 255 keeps the opaque
+/// XRGB fast path (values <255 request a translucent ARGB backdrop).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct TerminalCfg {
+    pub prompt: ConfigStr,
+    pub font: ConfigStr,
+    pub fg: u32,
+    pub bg: u32,
+    pub bg_alpha: u32,
+    pub ansi: [u32; 8],
+    pub ansi_bright: [u32; 8],
+    /// True when a config file was actually found (diagnostics only).
+    pub from_file: bool,
+}
+
+impl TerminalCfg {
+    pub const fn baseline() -> Self {
+        TerminalCfg {
+            prompt: ConfigStr::new("dsh"),
+            font: ConfigStr::new(""),
+            fg: 0xFFA6_E3A1,
+            bg: 0xFF0B_0F14,
+            bg_alpha: 255,
+            ansi: [
+                0xFF45_475A, 0xFFF3_8BA8, 0xFFA6_E3A1, 0xFFF9_E2AF,
+                0xFF89_B4FA, 0xFFCB_A6F7, 0xFF94_E2D5, 0xFFCD_D6F4,
+            ],
+            ansi_bright: [
+                0xFF58_5B70, 0xFFEB_A0AC, 0xFFA6_E3A1, 0xFFFA_B387,
+                0xFF89_DCEB, 0xFFF5_C2E7, 0xFF94_E2D5, 0xFFFF_FFFF,
+            ],
+            from_file: false,
+        }
+    }
+
+    /// Load `apps/<app_id>.toml`, overlaying `[terminal]` onto the baseline.
+    pub fn load(app_id: &str) -> Self {
+        let mut c = Self::baseline();
+        if let Some(text) = read_file(&config_path(APPS_DIR, app_id)) {
+            c.from_file = true;
+            c.parse(&text);
+        }
+        c
+    }
+
+    fn parse(&mut self, text: &str) {
+        let mut section = String::new();
+        for raw in text.lines() {
+            let line = strip_comment(raw).trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(name) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                section.clear();
+                section.push_str(name.trim());
+                continue;
+            }
+            if section != "terminal" {
+                continue;
+            }
+            let Some(eq) = line.find('=') else { continue };
+            let key = line[..eq].trim();
+            let rhs = line[eq + 1..].trim();
+            match key {
+                "prompt" => self.prompt.set(unquote(rhs)),
+                "font" => self.font.set(unquote(rhs)),
+                "fg" => if let Some(c) = parse_color(unquote(rhs)) { self.fg = c; },
+                "bg" => if let Some(c) = parse_color(unquote(rhs)) { self.bg = c; },
+                "bg_alpha" => if let Some(n) = parse_uint(rhs) { self.bg_alpha = n.min(255); },
+                "ansi" => parse_color_array_into(rhs, &mut self.ansi),
+                "ansi_bright" => parse_color_array_into(rhs, &mut self.ansi_bright),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Per-file-manager config (`apps/gui_files.toml`, table `[files]`). `icon_theme`
+/// empty means "inherit the desktop `[desktop] icon_theme`". Colors mirror the
+/// old hardcoded palette; `bg_alpha` 255 keeps the opaque fast path.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct FilesCfg {
+    pub icon_theme: ConfigStr,
+    pub bg: u32,
+    pub header_bg: u32,
+    pub status_bg: u32,
+    pub accent: u32,
+    pub label: u32,
+    pub muted: u32,
+    pub sel_bg: u32,
+    pub bg_alpha: u32,
+    pub from_file: bool,
+}
+
+impl FilesCfg {
+    pub const fn baseline() -> Self {
+        FilesCfg {
+            icon_theme: ConfigStr::new(""),
+            bg: 0xFF12_1820,
+            header_bg: 0xFF0E_141B,
+            status_bg: 0xFF0E_141B,
+            accent: 0xFF2F_8F5A,
+            label: 0xFFCD_D6F4,
+            muted: 0xFF8A_94A8,
+            sel_bg: 0x502F_8F5A,
+            bg_alpha: 255,
+            from_file: false,
+        }
+    }
+
+    pub fn load(app_id: &str) -> Self {
+        let mut c = Self::baseline();
+        if let Some(text) = read_file(&config_path(APPS_DIR, app_id)) {
+            c.from_file = true;
+            c.parse(&text);
+        }
+        c
+    }
+
+    fn parse(&mut self, text: &str) {
+        let mut section = String::new();
+        for raw in text.lines() {
+            let line = strip_comment(raw).trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(name) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                section.clear();
+                section.push_str(name.trim());
+                continue;
+            }
+            if section != "files" {
+                continue;
+            }
+            let Some(eq) = line.find('=') else { continue };
+            let key = line[..eq].trim();
+            let rhs = line[eq + 1..].trim();
+            match key {
+                "icon_theme" => self.icon_theme.set(unquote(rhs)),
+                "bg" => if let Some(c) = parse_color(unquote(rhs)) { self.bg = c; },
+                "header_bg" => if let Some(c) = parse_color(unquote(rhs)) { self.header_bg = c; },
+                "status_bg" => if let Some(c) = parse_color(unquote(rhs)) { self.status_bg = c; },
+                "accent" => if let Some(c) = parse_color(unquote(rhs)) { self.accent = c; },
+                "label" => if let Some(c) = parse_color(unquote(rhs)) { self.label = c; },
+                "muted" => if let Some(c) = parse_color(unquote(rhs)) { self.muted = c; },
+                "sel_bg" => if let Some(c) = parse_color(unquote(rhs)) { self.sel_bg = c; },
+                "bg_alpha" => if let Some(n) = parse_uint(rhs) { self.bg_alpha = n.min(255); },
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Per-widget config (`widgets/<name>.toml`, table `[widget]`). The compositor
+/// draws desktop widgets (clock, monitor, …); each owns a small file. `enabled`
+/// is the removal switch — a widget whose file is missing OR whose `enabled` is
+/// false is not drawn. `accent` 0 / `corner` -1 mean "inherit the desktop theme
+/// accent / `[widgets] corner`".
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct WidgetCfg {
+    pub enabled: bool,
+    pub accent: u32,
+    pub corner: i32,
+    /// True when a config file was actually found.
+    pub from_file: bool,
+}
+
+impl WidgetCfg {
+    pub const fn baseline() -> Self {
+        WidgetCfg { enabled: true, accent: 0, corner: -1, from_file: false }
+    }
+
+    /// Load `widgets/<name>.toml`. A missing file yields `from_file=false` with
+    /// the baseline — the caller decides whether "no file" means "not present".
+    pub fn load(name: &str) -> Self {
+        let mut c = Self::baseline();
+        if let Some(text) = read_file(&config_path(WIDGETS_DIR, name)) {
+            c.from_file = true;
+            c.parse(&text);
+        }
+        c
+    }
+
+    fn parse(&mut self, text: &str) {
+        let mut section = String::new();
+        for raw in text.lines() {
+            let line = strip_comment(raw).trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(name) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                section.clear();
+                section.push_str(name.trim());
+                continue;
+            }
+            if section != "widget" {
+                continue;
+            }
+            let Some(eq) = line.find('=') else { continue };
+            let key = line[..eq].trim();
+            let rhs = line[eq + 1..].trim();
+            match key {
+                "enabled" => if let Some(b) = parse_bool(rhs) { self.enabled = b; },
+                "accent" => if let Some(c) = parse_color(unquote(rhs)) { self.accent = c; },
+                "corner" => if let Some(n) = parse_uint(rhs) { self.corner = n as i32; },
+                _ => {}
+            }
+        }
+    }
 }

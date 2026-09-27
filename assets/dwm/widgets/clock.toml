@@ -1,0 +1,14 @@
+# Dunit DWM per-widget config — clock (desktop uptime clock).
+#
+# Loaded by gui_server from /system/share/dwm/widgets/clock.toml (embedded in
+# the kernel MemFS, writable). The widget is drawn only when this file exists
+# AND `enabled` is true — deleting the file OR setting `enabled = false` removes
+# the widget from the desktop. Unknown keys are ignored.
+
+[widget]
+enabled = true
+# Accent color; empty/omitted inherits the desktop theme accent.
+# accent = "#A6E3A1"
+# Screen corner (0=top-left, 1=top-right, 2=bottom-left, 3=bottom-right);
+# omitted inherits `[widgets] corner` from default.toml.
+# corner = 1
