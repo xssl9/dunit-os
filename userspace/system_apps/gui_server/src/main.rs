@@ -585,6 +585,14 @@ fn send_input(pid: u32, kind: u8, lx: i32, ly: i32, button: u32) {
     libdunit::ipc_send(pid, &msg);
 }
 
+/// True for the modifier keys themselves (Shift/Ctrl/Alt/Super/Caps), whose
+/// make/break we never forward to clients — their state already rides in every
+/// other event's `mods` field. Scancodes are the `sc & 0x7F` form the kernel
+/// reports (no release bit).
+fn is_modifier_scancode(sc: u8) -> bool {
+    matches!(sc, 0x1D | 0x2A | 0x36 | 0x38 | 0x3A | 0x5B | 0x5C)
+}
+
 /// Per-client compositing state held by the multi-client server loop.
 #[derive(Clone, Copy)]
 struct ClientState {
@@ -2140,26 +2148,33 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             .copied()
             .find(|&i| wins[i].alive && wins[i].ws == current_ws);
 
-        // --- Keyboard: drain the seat and route bytes to the focused window ---
-        // The compositor is the sole reader of the kernel key ring. It now reads
-        // full key events (`get_key_event`) rather than cooked bytes, so modifier
-        // state (Super/Ctrl/Alt/Shift) is available for future hotkeys (tiling,
-        // workspace switch); ordinary typing is unchanged — on a plain press the
-        // event still carries the cooked `ascii` byte, forwarded to the topmost
-        // live window as an IN_KEY event (the byte travels in the `button`
-        // field). Keyboard focus follows the z-order top, matching how the
-        // taskbar/raise model already works.
+        // --- Keyboard: drain the seat and route events to the focused window ---
+        // The compositor is the sole reader of the kernel key ring. Every key
+        // press (make) for a non-modifier key is forwarded to the focused window
+        // as an IN_KEY event carrying the full trio the kernel already cooks:
+        //   lx     = scancode (sc & 0x7F)
+        //   ly     = modifier mask (KEYMOD_*)
+        //   button = cooked ASCII byte (0 for extended/arrow/nav keys)
+        // Old clients read only the ASCII byte in `button` (unchanged); the
+        // terminal decodes scancode+mods for control keys (Ctrl-C, arrows, …).
+        // Modifier-only presses and key releases are dropped — their state is
+        // already reflected in the `mods` field of the events we do send.
         if focused.is_some() && wins.len() > initial_wins && !input_ready_announced {
             libdunit::println("gui_server: desktop input ready");
             input_ready_announced = true;
         }
         while let Some(ev) = libdunit::get_key_event() {
-            // No hotkeys wired yet: forward the cooked byte on plain presses,
-            // identical to the previous get_char() behaviour.
-            if ev.pressed && ev.ascii != 0 {
-                if let Some(wi) = focused {
-                    send_input(wins[wi].pid, IN_KEY, 0, 0, ev.ascii as u32);
-                }
+            if !ev.pressed || is_modifier_scancode(ev.scancode) {
+                continue;
+            }
+            if let Some(wi) = focused {
+                send_input(
+                    wins[wi].pid,
+                    IN_KEY,
+                    ev.scancode as i32,
+                    ev.mods as i32,
+                    ev.ascii as u32,
+                );
             }
         }
 

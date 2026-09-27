@@ -327,8 +327,14 @@ pub extern "C" fn _start() -> ! {
             match rx[4] {
                 IN_QUIT => break,
                 IN_KEY => {
+                    // scancode@rx[8..12], mods@rx[12..16], cooked ASCII@rx[16].
+                    // Forward the cooked byte when there is one; extended keys
+                    // (arrows/Home/End/Del, ASCII 0) are decoded in a later slice
+                    // — for now they are dropped rather than written as NUL.
                     let byte = rx[16];
-                    libdunit::pty_write(pty, &[byte]);
+                    if byte != 0 {
+                        libdunit::pty_write(pty, &[byte]);
+                    }
                 }
                 _ => {}
             }
