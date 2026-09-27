@@ -2704,9 +2704,15 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                     .unwrap_or(b'?');
                 draw_text_3x5(&mut back, bw, bh, tx, ty, 3, theme.panel_text, &[ch0]);
             }
-            // Running marker: accent bar on the icon's left edge for a live app.
+            // Running/active marker: an accent bar on the icon's left edge. A
+            // merely-running app gets a short, dimmed pip; the app that owns the
+            // focused window gets a longer, full-accent bar — the dock's active
+            // indicator, like the reference dock.
             if wins.iter().any(|w| w.alive && w.app == ri as u8) {
-                fill_rrect(&mut back, bw, bh, cx0 - 3, cy0 + ch / 4, 3, ch / 2, 1, RR_ALL, 0xFF00_0000 | (theme.launcher & 0x00FF_FFFF));
+                let active = focused.map(|wi| wins[wi].app) == Some(ri as u8);
+                let barh = if active { ch * 2 / 3 } else { ch / 4 };
+                let bcol = if active { theme.launcher } else { shade(theme.launcher, -40) };
+                fill_rrect(&mut back, bw, bh, cx0 - 3, cy0 + (ch - barh) / 2, 3, barh, 1, RR_ALL, 0xFF00_0000 | (bcol & 0x00FF_FFFF));
             }
         }
 
