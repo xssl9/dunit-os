@@ -335,6 +335,61 @@ impl Desktop {
     }
 }
 
+/// Desktop widget card (concept §5): a translucent plasmoid painted on the
+/// wallpaper (behind windows). Shows the uptime clock and a live system monitor.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Widgets {
+    /// Master toggle for the desktop widget card.
+    pub enabled: bool,
+    /// Show the big uptime clock (HH:MM:SS) at the top of the card.
+    pub clock: bool,
+    /// Show the RAM/process monitor rows under the clock.
+    pub monitor: bool,
+    /// Screen corner: 0 = top-left, 1 = top-right, 2 = bottom-left, 3 = bottom-right.
+    pub corner: i32,
+}
+
+impl Widgets {
+    /// The built-in baseline: a monitor+clock card in the top-right corner.
+    pub const fn baseline() -> Self {
+        Widgets {
+            enabled: true,
+            clock: true,
+            monitor: true,
+            corner: 1,
+        }
+    }
+
+    /// Apply one `key`/`value` pair from the `[widgets]` table. Bool keys accept
+    /// `true`/`false`/`1`/`0`; `corner` is a non-negative integer clamped to 0..3.
+    /// Unknown keys and malformed values are ignored (field keeps its baseline).
+    fn apply(&mut self, key: &str, value: &str) {
+        match key {
+            "enabled" => {
+                if let Some(b) = parse_bool(value) {
+                    self.enabled = b;
+                }
+            }
+            "clock" => {
+                if let Some(b) = parse_bool(value) {
+                    self.clock = b;
+                }
+            }
+            "monitor" => {
+                if let Some(b) = parse_bool(value) {
+                    self.monitor = b;
+                }
+            }
+            "corner" => {
+                if let Some(n) = parse_uint(value) {
+                    self.corner = (n as i32).clamp(0, 3);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Resolved DWM settings. Extends with `[layout]` etc. in later sub-slices.
 #[derive(Clone, Copy)]
 pub struct Settings {
@@ -342,6 +397,7 @@ pub struct Settings {
     pub layout: Layout,
     pub effects: Effects,
     pub desktop: Desktop,
+    pub widgets: Widgets,
     /// True when a config file was found and read (parse still best-effort).
     pub from_file: bool,
     /// Count of recognised keys applied over the baseline (0 for pure default).
@@ -355,6 +411,7 @@ impl Settings {
             layout: Layout::baseline(),
             effects: Effects::baseline(),
             desktop: Desktop::baseline(),
+            widgets: Widgets::baseline(),
             from_file: false,
             applied: 0,
         }
@@ -550,6 +607,9 @@ pub fn parse_into(text: &str, settings: &mut Settings) {
             settings.applied += 1;
         } else if section == "desktop" {
             settings.desktop.apply(key, value);
+            settings.applied += 1;
+        } else if section == "widgets" {
+            settings.widgets.apply(key, value);
             settings.applied += 1;
         }
     }
@@ -946,6 +1006,13 @@ pub fn to_toml(s: &Settings) -> String {
     push_string(&mut out, "icon_theme", s.desktop.icon_theme.as_str());
     push_string(&mut out, "font", s.desktop.font.as_str());
     push_string(&mut out, "logo", s.desktop.logo.as_str());
+    out.push('\n');
+
+    out.push_str("[widgets]\n");
+    push_bool(&mut out, "enabled", s.widgets.enabled);
+    push_bool(&mut out, "clock", s.widgets.clock);
+    push_bool(&mut out, "monitor", s.widgets.monitor);
+    push_int(&mut out, "corner", s.widgets.corner as i64);
 
     out
 }
@@ -957,5 +1024,5 @@ pub fn roundtrip_ok(s: &Settings) -> bool {
     let text = to_toml(s);
     let mut back = Settings::defaults();
     parse_into(&text, &mut back);
-    back.theme == s.theme && back.layout == s.layout && back.effects == s.effects && back.desktop == s.desktop
+    back.theme == s.theme && back.layout == s.layout && back.effects == s.effects && back.desktop == s.desktop && back.widgets == s.widgets
 }

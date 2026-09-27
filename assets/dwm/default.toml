@@ -85,6 +85,15 @@ font             = "/assets/fonts/DejaVuSans.ttf"
 # wordmark draws its flat accent mark instead).
 logo             = "/assets/images/logo.rgba"
 
+# Desktop widget card: a translucent plasmoid painted on the wallpaper (behind
+# windows) with the uptime clock and a live RAM/process monitor. `corner`:
+# 0 = top-left, 1 = top-right, 2 = bottom-left, 3 = bottom-right.
+[widgets]
+enabled = true
+clock   = true
+monitor = true
+corner  = 1
+
 # ============================================================================
 # Application registry + desktop composition (data-driven; concept: no app
 # names/exec paths/icons are baked into gui_server). Each `[application.<id>]`

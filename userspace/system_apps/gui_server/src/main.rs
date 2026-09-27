@@ -2016,6 +2016,8 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     let mut input_ready_announced = false;
     // --- Visual-effects state (concept §5) -------------------------------
     let mut fx = cfg.settings.effects;
+    // Desktop widget card (concept §5): painted on the wallpaper behind windows.
+    let mut wg = cfg.settings.widgets;
     // Animation length in frames (~16ms/frame); 0 when animations are off, so
     // every ramp/reveal collapses to instant (the flat look).
     let mut anim_frames = if fx.anim { (fx.anim_ms / 16).max(1) as u32 } else { 0 };
@@ -2066,6 +2068,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 theme = ncfg.settings.theme;
                 ly = ncfg.settings.layout;
                 fx = ncfg.settings.effects;
+                wg = ncfg.settings.widgets;
                 apps = ncfg.apps;
                 anim_frames = if fx.anim { (fx.anim_ms / 16).max(1) as u32 } else { 0 };
                 // Every Win caches its own title_h/border (used by outer/contains):
@@ -2421,6 +2424,65 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         } else {
             for px in back.iter_mut() {
                 *px = theme.desktop;
+            }
+        }
+
+        // --- Desktop widget card (concept §5) --------------------------------
+        // A translucent plasmoid on the wallpaper, behind windows: the uptime
+        // clock over a live RAM/process monitor. Config-driven via `[widgets]`
+        // (enable, per-part toggles, screen corner); windows composite on top.
+        if wg.enabled && (wg.clock || wg.monitor) {
+            if let Some(f) = font.as_ref() {
+                let mut wst = libdunit::SystemStats::default();
+                let whave = libdunit::get_system_stats(&mut wst) >= 0;
+                let card_w = 236i32;
+                let pad = 16i32;
+                let clock_px = (ly.title_font_px as f32 * 2.4).max(24.0);
+                let clock_h = if wg.clock { clock_px as i32 + 10 } else { 0 };
+                let mon_h = if wg.monitor { 58 } else { 0 };
+                let card_h = pad * 2 + clock_h + mon_h;
+                let margin = 24i32;
+                let cx = if wg.corner == 1 || wg.corner == 3 {
+                    bw as i32 - card_w - margin
+                } else {
+                    margin
+                };
+                let cy = if wg.corner == 2 || wg.corner == 3 {
+                    bh as i32 - card_h - margin
+                } else {
+                    ly.panel_h + margin
+                };
+                if fx.blur {
+                    blur_region(&mut back, bw, bh, cx, cy, card_w, card_h, fx.blur_radius, fx.blur_iters, &mut blur_a, &mut blur_b);
+                }
+                fill_rrect_grad(&mut back, bw, bh, cx, cy, card_w, card_h, fx.corner_radius, RR_ALL, shade(theme.menu, 16), shade(theme.menu, -8), fx.menu_alpha);
+                let secs = if whave { wst.uptime_ticks / 100 } else { 0 };
+                let mut ty = cy + pad;
+                if wg.clock {
+                    let clk = alloc::format!("{:02}:{:02}:{:02}", (secs / 3600) % 100, (secs / 60) % 60, secs % 60);
+                    let tw = text_width_ttf(f, &clk, clock_px);
+                    let baseline = ty + clock_px as i32 - 4;
+                    draw_text_ttf(&mut back, bw, bh, f, cx + (card_w - tw) / 2, baseline, clock_px, &clk, theme.panel_text & 0x00FF_FFFF);
+                    ty += clock_h;
+                }
+                if wg.monitor {
+                    let px = ly.title_font_px as f32;
+                    let ram_pct = if whave && wst.pmm_total_bytes > 0 {
+                        (wst.pmm_used_bytes * 100 / wst.pmm_total_bytes) as u32
+                    } else {
+                        0
+                    };
+                    let line = alloc::format!("RAM {}%    {} proc", ram_pct, wst.process_running);
+                    draw_text_ttf(&mut back, bw, bh, f, cx + pad, ty + px as i32, px, &line, theme.panel_text & 0x00FF_FFFF);
+                    // RAM usage bar under the text row.
+                    let bar_y = ty + px as i32 + 12;
+                    let bar_w = card_w - 2 * pad;
+                    fill_rrect(&mut back, bw, bh, cx + pad, bar_y, bar_w, 8, 4, RR_ALL, ((fx.menu_alpha.min(255) as u32) << 24) | (shade(theme.menu, -20) & 0x00FF_FFFF));
+                    let fill_w = (bar_w * ram_pct.min(100) as i32) / 100;
+                    if fill_w > 0 {
+                        fill_rrect(&mut back, bw, bh, cx + pad, bar_y, fill_w, 8, 4, RR_ALL, 0xFF00_0000 | (theme.launcher & 0x00FF_FFFF));
+                    }
+                }
             }
         }
 
