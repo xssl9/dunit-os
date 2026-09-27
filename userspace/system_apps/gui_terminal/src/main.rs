@@ -28,6 +28,7 @@ use dunit_text::Font;
 const CTRL_MAGIC: u32 = 0x3150_4143; // "CAP1" — capability announce
 const INPUT_MAGIC: u32 = 0x3150_4E49; // "INP1" — input events
 const IN_KEY: u8 = 5;
+const IN_SCROLL: u8 = 6;
 const IN_QUIT: u8 = 9;
 
 // Modifier bit in the IN_KEY `mods` field (mirrors libdunit::KEYMOD_CTRL).
@@ -42,6 +43,9 @@ const SC_RIGHT: u8 = 0x4D;
 const SC_END: u8 = 0x4F;
 const SC_DOWN: u8 = 0x50;
 const SC_DELETE: u8 = 0x53;
+// Page keys are handled locally for scrollback (never forwarded to the pty).
+const SC_PGUP: u8 = 0x49;
+const SC_PGDN: u8 = 0x51;
 
 /// Translate a widened IN_KEY event (scancode + mods + cooked ASCII) into the
 /// byte sequence to feed the pty. Returns the number of bytes written to `out`.
@@ -170,6 +174,8 @@ struct Term {
     cur: Vec<Span>,
     fg: u32,
     dirty: bool,
+    /// Rows scrolled up from the live bottom (0 = following new output).
+    scroll: usize,
     esc: Esc,
     params: [u32; 8],
     nparams: usize,
@@ -184,6 +190,7 @@ impl Term {
             cur: Vec::new(),
             fg: FG_DEFAULT,
             dirty: true,
+            scroll: 0,
             esc: Esc::Normal,
             params: [0; 8],
             nparams: 0,
@@ -191,6 +198,19 @@ impl Term {
             has_param: false,
         }
     }
+
+    /// Move the view up (`up = true`) or down through the scrollback by `rows`,
+    /// clamped so it never scrolls past the top or below the live bottom.
+    fn scroll_by(&mut self, rows: usize, up: bool) {
+        let max = self.lines.len().saturating_sub(1);
+        self.scroll = if up {
+            (self.scroll + rows).min(max)
+        } else {
+            self.scroll.saturating_sub(rows)
+        };
+        self.dirty = true;
+    }
+
     /// Append one printable char to the active span, opening a new run when the
     /// current foreground color differs from the last span's.
     fn push_char(&mut self, c: char) {
@@ -218,6 +238,7 @@ impl Term {
             let excess = self.lines.len() - SCROLL_CAP;
             self.lines.drain(0..excess);
         }
+        self.scroll = 0; // new output snaps the view back to the live bottom
     }
 
     /// Erase the last char of the active line (crossing span boundaries).
@@ -339,8 +360,12 @@ fn render(px: *mut u8, font: &Font, term: &Term) {
     let mut surf = Surface::new(pixels, W as usize, H as usize);
     surf.fill_rect(0.0, 0.0, W as f32, H as f32, col(BG));
 
+    // The document is `lines` (completed rows) followed by the in-progress
+    // `cur` row at index `lines.len()`. `scroll` counts how many rows the view
+    // is lifted above the live bottom (0 = pinned to `cur`).
     let total = term.lines.len() + 1; // +1 for the in-progress line
-    let start = total.saturating_sub(VISIBLE_ROWS);
+    let bottom = (total - 1).saturating_sub(term.scroll); // last visible row index
+    let start = (bottom + 1).saturating_sub(VISIBLE_ROWS);
     let mut y = 8; // top padding
     let mut draw_row = |spans: &[Span]| {
         let mut x = 8; // left padding
@@ -351,10 +376,13 @@ fn render(px: *mut u8, font: &Font, term: &Term) {
         }
         y += ROW_PX;
     };
-    for line in term.lines.iter().skip(start) {
-        draw_row(line);
+    for idx in start..=bottom {
+        if idx < term.lines.len() {
+            draw_row(&term.lines[idx]);
+        } else {
+            draw_row(&term.cur);
+        }
     }
-    draw_row(&term.cur);
 }
 
 // APPEND_START
@@ -491,6 +519,14 @@ pub extern "C" fn _start() -> ! {
         if n >= 8 && u32::from_le_bytes([rx[0], rx[1], rx[2], rx[3]]) == INPUT_MAGIC {
             match rx[4] {
                 IN_QUIT => break,
+                IN_SCROLL => {
+                    // Wheel delta (i32) in the lx field: positive = scroll up
+                    // into the backlog, negative = back toward the live bottom.
+                    let delta = i32::from_le_bytes([rx[8], rx[9], rx[10], rx[11]]);
+                    if delta != 0 {
+                        term.scroll_by(delta.unsigned_abs() as usize * 3, delta > 0);
+                    }
+                }
                 IN_KEY => {
                     // Widened IN_KEY: scancode@rx[8..12], mods@rx[12..16],
                     // cooked ASCII@rx[16] (see gui_server::send_input). Decode
@@ -500,10 +536,18 @@ pub extern "C" fn _start() -> ! {
                     let scancode = rx[8];
                     let mods = rx[12];
                     let ascii = rx[16];
-                    let mut seq = [0u8; 4];
-                    let len = encode_key(scancode, mods, ascii, &mut seq);
-                    if len > 0 {
-                        libdunit::pty_write(pty, &seq[..len]);
+                    // PgUp/PgDn scroll the local view a page at a time and are
+                    // never forwarded to the pty.
+                    if scancode == SC_PGUP {
+                        term.scroll_by(VISIBLE_ROWS - 1, true);
+                    } else if scancode == SC_PGDN {
+                        term.scroll_by(VISIBLE_ROWS - 1, false);
+                    } else {
+                        let mut seq = [0u8; 4];
+                        let len = encode_key(scancode, mods, ascii, &mut seq);
+                        if len > 0 {
+                            libdunit::pty_write(pty, &seq[..len]);
+                        }
                     }
                 }
                 _ => {}

@@ -572,6 +572,7 @@ const IN_DOWN: u8 = 2;
 const IN_UP: u8 = 3;
 const IN_LEAVE: u8 = 4;
 const IN_KEY: u8 = 5;
+const IN_SCROLL: u8 = 6;
 const IN_QUIT: u8 = 9;
 
 /// Send one input control message to a client.
@@ -2192,6 +2193,15 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             .rev()
             .copied()
             .find(|&i| wins[i].alive && wins[i].ws == current_ws);
+
+        // --- Mouse wheel: forward the tick's scroll delta to the focused window
+        // as IN_SCROLL (delta in `lx`). Clients that don't scroll ignore it; the
+        // terminal uses it to move through its scrollback history.
+        if m.wheel != 0 {
+            if let Some(wi) = focused {
+                send_input(wins[wi].pid, IN_SCROLL, m.wheel, 0, 0);
+            }
+        }
 
         // --- Keyboard: drain the seat and route events to the focused window ---
         // The compositor is the sole reader of the kernel key ring. Every key
