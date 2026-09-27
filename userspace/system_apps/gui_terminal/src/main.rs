@@ -35,6 +35,53 @@ const INPUT_MAGIC: u32 = 0x3150_4E49; // "INP1" — input events
 const IN_KEY: u8 = 5;
 const IN_QUIT: u8 = 9;
 
+// Modifier bit in the IN_KEY `mods` field (mirrors libdunit::KEYMOD_CTRL).
+const KEYMOD_CTRL: u8 = 1 << 1;
+
+// PS/2 scancodes (sc & 0x7F) for keys the kernel leaves un-cooked (ascii = 0).
+const SC_BACKSPACE: u8 = 0x0E;
+const SC_HOME: u8 = 0x47;
+const SC_UP: u8 = 0x48;
+const SC_LEFT: u8 = 0x4B;
+const SC_RIGHT: u8 = 0x4D;
+const SC_END: u8 = 0x4F;
+const SC_DOWN: u8 = 0x50;
+const SC_DELETE: u8 = 0x53;
+
+/// Translate a widened IN_KEY event (scancode + mods + cooked ASCII) into the
+/// byte sequence to feed the pty. Returns the number of bytes written to `out`.
+///
+/// - Ctrl + letter -> the control code (`c & 0x1F`): Ctrl-C=0x03, Ctrl-D=0x04,
+///   Ctrl-L=0x0C, etc.
+/// - Any other cooked byte (printable, Enter `\n`, Tab `\t`) -> itself.
+/// - Backspace (no ASCII) -> 0x08.
+/// - Arrows / Home / End / Delete (no ASCII) -> the usual xterm ESC sequences,
+///   which `dsh` parses for line editing and history.
+fn encode_key(scancode: u8, mods: u8, ascii: u8, out: &mut [u8; 4]) -> usize {
+    if mods & KEYMOD_CTRL != 0 && ascii.is_ascii_alphabetic() {
+        out[0] = ascii & 0x1F;
+        return 1;
+    }
+    if ascii != 0 {
+        out[0] = ascii;
+        return 1;
+    }
+    // Extended / navigation keys arrive with ascii == 0.
+    let esc: &[u8] = match scancode {
+        SC_BACKSPACE => &[0x08],
+        SC_UP => &[0x1B, b'[', b'A'],
+        SC_DOWN => &[0x1B, b'[', b'B'],
+        SC_RIGHT => &[0x1B, b'[', b'C'],
+        SC_LEFT => &[0x1B, b'[', b'D'],
+        SC_HOME => &[0x1B, b'[', b'H'],
+        SC_END => &[0x1B, b'[', b'F'],
+        SC_DELETE => &[0x1B, b'[', b'3', b'~'],
+        _ => &[],
+    };
+    out[..esc.len()].copy_from_slice(esc);
+    esc.len()
+}
+
 const SURFACE: u64 = 1;
 const BUFFER: u64 = 2;
 const W: u32 = 560;
@@ -327,13 +374,18 @@ pub extern "C" fn _start() -> ! {
             match rx[4] {
                 IN_QUIT => break,
                 IN_KEY => {
-                    // scancode@rx[8..12], mods@rx[12..16], cooked ASCII@rx[16].
-                    // Forward the cooked byte when there is one; extended keys
-                    // (arrows/Home/End/Del, ASCII 0) are decoded in a later slice
-                    // — for now they are dropped rather than written as NUL.
-                    let byte = rx[16];
-                    if byte != 0 {
-                        libdunit::pty_write(pty, &[byte]);
+                    // Widened IN_KEY: scancode@rx[8..12], mods@rx[12..16],
+                    // cooked ASCII@rx[16] (see gui_server::send_input). Decode
+                    // into a pty byte sequence: control codes for Ctrl+letter,
+                    // the cooked byte for printables/Enter/Tab, and xterm ESC
+                    // sequences for the extended nav keys (arrows/Home/End/Del).
+                    let scancode = rx[8];
+                    let mods = rx[12];
+                    let ascii = rx[16];
+                    let mut seq = [0u8; 4];
+                    let len = encode_key(scancode, mods, ascii, &mut seq);
+                    if len > 0 {
+                        libdunit::pty_write(pty, &seq[..len]);
                     }
                 }
                 _ => {}
