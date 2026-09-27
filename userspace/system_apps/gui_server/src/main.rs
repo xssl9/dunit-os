@@ -23,7 +23,7 @@ use gui_protocol_v1::server::Server;
 use gui_protocol_v1::wire::Request;
 use gui_protocol_v1::Opcode;
 
-mod settings;
+use dwm_settings as settings;
 use settings::{Layout, Theme};
 
 #[panic_handler]
@@ -554,6 +554,14 @@ fn drive_damage(
 /// which begins with the DGUI wire magic). Shared with `gui_client`.
 const CTRL_MAGIC: u32 = 0x3150_4143; // "CAP1"
 
+// Client -> compositor "reload settings" signal (slice C). A settings app
+// (gui_settings) rewrites /system/share/dwm/default.toml, then sends this 4-byte
+// control message so the compositor re-reads the config and re-seeds its live
+// theme/layout/effects state without a reboot — the GUI<->TOML round-trip. A
+// distinct magic (not CAP1/INP1/DGUI) so `handle_client_payload` can tell it
+// apart from a buffer announce or a wire packet.
+const RELOAD_MAGIC: u32 = 0x3144_4C52; // "RLD1"
+
 // Compositor -> client input control messages (20 bytes). Distinct magic from
 // CTRL_MAGIC and the DGUI wire magic so the client can tell them apart. Coords
 // are client-local (relative to the surface origin). Kept deliberately simple:
@@ -627,7 +635,7 @@ impl ClientState {
 /// Process one inbound (envelope-stripped) message for client `c`: either map
 /// its announced buffer capability, or track geometry + feed the protocol
 /// packet through the Server and relay the replies back to the client.
-fn handle_client_payload(server: &mut Server, c: &mut ClientState, payload: &[u8]) {
+fn handle_client_payload(server: &mut Server, c: &mut ClientState, payload: &[u8], reload: &mut bool) {
     let n = payload.len();
     if n >= 16 && u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) == CTRL_MAGIC
     {
@@ -644,6 +652,15 @@ fn handle_client_payload(server: &mut Server, c: &mut ClientState, payload: &[u8
                 c.mapped_handle = handle;
             }
         }
+        return;
+    }
+    // "Reload settings" signal from a trusted-enough client (gui_settings): the
+    // config file was just rewritten, so raise a flag the desktop loop drains at
+    // the top of the next frame (re-read + re-seed derived state). No payload
+    // beyond the magic — the new values come from the config file, not the wire.
+    if n >= 4 && u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) == RELOAD_MAGIC
+    {
+        *reload = true;
         return;
     }
     // Заголовок wire-протокола — 32 байта; CreateSurface читает поля вплоть до
@@ -736,7 +753,9 @@ fn serve_two_clients() -> bool {
             Some(idx) => idx,
             None => continue, // message from an unknown pid — ignore
         };
-        handle_client_payload(&mut server, &mut clients[idx], &rx[..n]);
+        // Startup smoke: no live-reload here, so discard the signal into a scratch.
+        let mut _reload = false;
+        handle_client_payload(&mut server, &mut clients[idx], &rx[..n], &mut _reload);
 
         // A composition tick: route each FRAME_DONE to its client and blit that
         // client's committed buffer into its own slot.
@@ -1295,12 +1314,13 @@ fn draw_cursor(buf: &mut [u32], bw: usize, bh: usize, px: i32, py: i32) {
 // so a stuck loop cannot fork the machine to death.
 
 /// Launcher menu: label shown in the dropdown paired with the ELF to spawn.
-const LAUNCH_APPS: [(&[u8], &str); 5] = [
+const LAUNCH_APPS: [(&[u8], &str); 6] = [
     (b"WIN", "gui_client"),
     (b"CALC", "gui_calc"),
     (b"STAT", "gui_stat"),
     (b"FILE", "gui_files"),
     (b"TERM", "gui_terminal"),
+    (b"SET", "gui_settings"),
 ];
 
 /// Index of `path` in `LAUNCH_APPS`, or 0xFF if it is not a launchable app.
@@ -1488,7 +1508,7 @@ impl Win {
 /// complete their handshake while the compositor keeps rendering. Bounded per
 /// tick so a chatty client cannot starve the frame. Routing is by the
 /// kernel-authenticated sender pid, so clients stay isolated.
-fn pump_clients(server: &mut Server, clients: &mut Vec<ClientState>) {
+fn pump_clients(server: &mut Server, clients: &mut Vec<ClientState>, reload: &mut bool) {
     let mut rx = [0u8; 256];
     let mut sender: u32 = 0;
     for _ in 0..64 {
@@ -1501,7 +1521,7 @@ fn pump_clients(server: &mut Server, clients: &mut Vec<ClientState>) {
             Some(i) => i,
             None => continue, // message from an unknown pid — ignore
         };
-        handle_client_payload(server, &mut clients[idx], &rx[..n]);
+        handle_client_payload(server, &mut clients[idx], &rx[..n], reload);
         for (fc, fp) in &server.composite() {
             let status = if fp.len() >= 52 {
                 u32::from_le_bytes([fp[48], fp[49], fp[50], fp[51]])
@@ -1617,6 +1637,7 @@ fn app_icon_path(app: &str) -> Option<&'static str> {
         "gui_stat" => Some("/assets/icons/breeze/gui_stat.rgba"),
         "gui_files" => Some("/assets/icons/breeze/gui_files.rgba"),
         "gui_terminal" => Some("/assets/icons/breeze/gui_terminal.rgba"),
+        "gui_settings" => Some("/assets/icons/breeze/gui_settings.rgba"),
         _ => None,
     }
 }
@@ -1691,9 +1712,11 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
 
     // Slice 9: the palette is data. Overlay /system/share/dwm/default.toml on the
     // Green Tea baseline; a missing/garbage file keeps the baseline (last-known-good).
+    // Slice C: `theme`/`ly`/`fx` are `mut` because a gui_settings "reload" signal
+    // re-reads the config live and re-seeds them (see the reload block in `loop`).
     let cfg = settings::load();
-    let theme: Theme = cfg.theme;
-    let ly: Layout = cfg.layout;
+    let mut theme: Theme = cfg.theme;
+    let mut ly: Layout = cfg.layout;
     if cfg.from_file {
         libdunit::println("gui_server: settings loaded from /system/share/dwm/default.toml");
     } else {
@@ -1807,10 +1830,10 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     // headless tests know the compositor is ready to accept injected keystrokes.
     let mut input_ready_announced = false;
     // --- Visual-effects state (concept §5) -------------------------------
-    let fx = cfg.effects;
+    let mut fx = cfg.effects;
     // Animation length in frames (~16ms/frame); 0 when animations are off, so
     // every ramp/reveal collapses to instant (the flat look).
-    let anim_frames = if fx.anim { (fx.anim_ms / 16).max(1) as u32 } else { 0 };
+    let mut anim_frames = if fx.anim { (fx.anim_ms / 16).max(1) as u32 } else { 0 };
     // Workspace-switch crossfade: the active workspace's windows fade in from
     // this tick (bumped on every switch below).
     let mut ws_switch_tick = 0u32;
@@ -1831,10 +1854,48 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     // log even headless: report ms/frame once warm, then periodically.
     let mut prev_uptime = 0u64;
     let mut prev_tick = 0u32;
+    // Slice C: raised by a gui_settings "reload" control message (see
+    // `handle_client_payload`); drained at the top of the frame to re-read the
+    // config and re-seed live theme/layout/effects state.
+    let mut reload_requested = false;
     loop {
         // Advance any runtime-spawned clients through their protocol handshake,
         // then hand each newly-ready client a cascaded, focused window.
-        pump_clients(server, clients);
+        pump_clients(server, clients, &mut reload_requested);
+
+        // Live settings reload (GUI<->TOML round-trip): a gui_settings client
+        // rewrote the config and pinged us. Re-read it and re-seed everything
+        // derived from theme/layout/effects. Wallpaper is not part of the TOML
+        // dialect yet, so it is left as-is. Never fatal — load() falls back to
+        // the baseline on a bad file.
+        if reload_requested {
+            reload_requested = false;
+            let ncfg = settings::load();
+            theme = ncfg.theme;
+            ly = ncfg.layout;
+            fx = ncfg.effects;
+            anim_frames = if fx.anim { (fx.anim_ms / 16).max(1) as u32 } else { 0 };
+            // Every Win caches its own title_h/border (used by outer/contains):
+            // re-seed them so existing windows adopt the new geometry.
+            for w in wins.iter_mut() {
+                w.title_h = ly.title_h;
+                w.border = ly.border;
+            }
+            // The blur scratch is sized for the largest blurred region; a larger
+            // panel/dock/menu after reload needs a bigger buffer (never shrink —
+            // a smaller region simply uses a prefix of the existing allocation).
+            let panel_area = bw * ly.panel_h.max(0) as usize;
+            let dock_area = ly.dock_w.max(0) as usize * (bh as i32 - ly.panel_h).max(0) as usize;
+            let menu_area =
+                ly.menu_w.max(0) as usize * (LAUNCH_APPS.len() * ly.menu_item_h.max(0) as usize);
+            let need = panel_area.max(dock_area).max(menu_area).max(1);
+            if blur_a.len() < need {
+                blur_a.resize(need, 0);
+                blur_b.resize(need, 0);
+            }
+            libdunit::println("gui_server: settings reloaded (config changed)");
+        }
+
         for i in 0..clients.len() {
             if !clients[i].ready || clients[i].win_created || clients[i].buf_ptr.is_null() {
                 continue;

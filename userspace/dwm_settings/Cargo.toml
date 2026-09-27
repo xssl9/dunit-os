@@ -1,0 +1,18 @@
+# Shared DWM settings library (slice C).
+#
+# The compositor (gui_server) and the settings app (gui_settings) both need to
+# parse `/system/share/dwm/default.toml` into `Settings` and serialize `Settings`
+# back to that TOML dialect (the GUI<->TOML round-trip). This crate holds that
+# logic — Theme/Layout/Effects, `parse_into`, `load`, `to_toml`, `roundtrip_ok` —
+# so there is exactly one source of truth for the config format.
+[package]
+name = "dwm_settings"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "dwm_settings"
+crate-type = ["rlib"]
+
+[dependencies]
+libdunit = { path = "../libdunit" }

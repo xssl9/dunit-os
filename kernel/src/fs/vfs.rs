@@ -59,6 +59,7 @@ static PTY_ECHO_BYTES: &[u8] = include_bytes!("../../../build/userspace/pty_echo
 static PTY_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/pty_test");
 static DSH_BYTES: &[u8] = include_bytes!("../../../build/userspace/dsh");
 static GUI_TERMINAL_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_terminal");
+static GUI_SETTINGS_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_settings");
 
 /// DWM system settings (TOML), read at desktop start by gui_server. Not an ELF —
 /// a plain text asset embedded in the MemFS at /system/share/dwm/default.toml.
@@ -693,6 +694,7 @@ pub fn init() -> Result<()> {
         (*ROOT_MEMFS.0.get()).add_file("/app/pty_test", PTY_TEST_BYTES.to_vec());
         (*ROOT_MEMFS.0.get()).add_file("/app/dsh", DSH_BYTES.to_vec());
         (*ROOT_MEMFS.0.get()).add_file("/app/gui_terminal", GUI_TERMINAL_BYTES.to_vec());
+        (*ROOT_MEMFS.0.get()).add_file("/app/gui_settings", GUI_SETTINGS_BYTES.to_vec());
 
         // DWM system settings tree (slice 9): read-only defaults for gui_server.
         // MemFS mkdir is not recursive and `/system` is not a base dir, so each

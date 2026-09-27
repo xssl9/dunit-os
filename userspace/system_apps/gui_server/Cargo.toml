@@ -12,6 +12,7 @@ edition = "2021"
 [dependencies]
 libdunit = { path = "../../libdunit" }
 gui_protocol_v1 = { path = "../../../protocols/gui-v1" }
+dwm_settings = { path = "../../dwm_settings" }
 
 [[bin]]
 name = "gui_server"
