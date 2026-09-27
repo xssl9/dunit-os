@@ -1557,6 +1557,9 @@ struct Win {
     ws: usize,
     /// Desktop tick when this window first appeared — drives the open fade-in.
     born: u32,
+    /// Minimized windows are not composited and receive no input; a click on the
+    /// app's dock icon (task switcher) restores and raises them.
+    minimized: bool,
 }
 
 impl Win {
@@ -1583,6 +1586,13 @@ impl Win {
     fn in_close(&self, mx: i32, my: i32) -> bool {
         let sz = self.title_h - 12;
         let bx = self.cx + self.sw - sz - 6;
+        let by = self.cy - self.title_h + 6;
+        mx >= bx && mx < bx + sz && my >= by && my < by + sz
+    }
+    /// Minimize box: a small square just left of the close box.
+    fn in_min(&self, mx: i32, my: i32) -> bool {
+        let sz = self.title_h - 12;
+        let bx = self.cx + self.sw - 2 * sz - 10;
         let by = self.cy - self.title_h + 6;
         mx >= bx && mx < bx + sz && my >= by && my < by + sz
     }
@@ -1968,6 +1978,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             app: clients[i].app,
             ws: 0,
             born: 0,
+            minimized: false,
         });
         clients[i].ready = true;
         clients[i].win_created = true;
@@ -2126,6 +2137,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 app: clients[i].app,
                 ws: clients[i].ws,
                 born: ticks,
+                minimized: false,
             });
             clients[i].win_created = true;
             z.push(wi);
@@ -2148,7 +2160,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             while zi > 0 {
                 zi -= 1;
                 let wi = z[zi];
-                if wins[wi].alive && wins[wi].ws == current_ws && wins[wi].in_content(mx, my) {
+                if wins[wi].alive && wins[wi].ws == current_ws && !wins[wi].minimized && wins[wi].in_content(mx, my) {
                     z.retain(|&i| i != wi);
                     z.push(wi);
                     send_input(wins[wi].pid, IN_DOWN, mx - wins[wi].cx, my - wins[wi].cy, 1);
@@ -2229,6 +2241,11 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                             ws_switch_tick = ticks; // crossfade into the target ws
                             current_ws = wins[wi].ws;
                         }
+                        // Restore if it was minimized, then raise to the top.
+                        if wins[wi].minimized {
+                            wins[wi].minimized = false;
+                            wins[wi].born = ticks; // replay the grow-in on restore
+                        }
                         z.retain(|&i| i != wi);
                         z.push(wi);
                     } else if clients.len() < ly.max_windows {
@@ -2247,7 +2264,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             while zi > 0 {
                 zi -= 1;
                 let wi = z[zi];
-                if wins[wi].alive && wins[wi].ws == current_ws && wins[wi].contains(mx, my) {
+                if wins[wi].alive && wins[wi].ws == current_ws && !wins[wi].minimized && wins[wi].contains(mx, my) {
                     hit = Some(wi);
                     break;
                 }
@@ -2259,6 +2276,11 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 if wins[wi].in_close(mx, my) {
                     wins[wi].alive = false;
                     send_input(wins[wi].pid, IN_QUIT, 0, 0, 0);
+                    drag = None;
+                } else if wins[wi].in_min(mx, my) {
+                    // Minimize: drop it from compositing/input; the dock task
+                    // switcher restores it on click.
+                    wins[wi].minimized = true;
                     drag = None;
                 } else if wins[wi].in_title(mx, my) {
                     drag = Some((wi, mx - wins[wi].cx, my - wins[wi].cy));
@@ -2292,7 +2314,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             while zi > 0 {
                 zi -= 1;
                 let wi = z[zi];
-                if wins[wi].alive && wins[wi].ws == current_ws && wins[wi].in_content(mx, my) {
+                if wins[wi].alive && wins[wi].ws == current_ws && !wins[wi].minimized && wins[wi].in_content(mx, my) {
                     c = Some(wi);
                     break;
                 }
@@ -2339,7 +2361,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             .iter()
             .rev()
             .copied()
-            .find(|&i| wins[i].alive && wins[i].ws == current_ws);
+            .find(|&i| wins[i].alive && wins[i].ws == current_ws && !wins[i].minimized);
 
         // --- Mouse wheel: forward the tick's scroll delta to the focused window
         // as IN_SCROLL (delta in `lx`). Clients that don't scroll ignore it; the
@@ -2409,7 +2431,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         let ws_fade = ramp(ticks, ws_switch_tick, anim_frames);
         for &wi in z.iter() {
             let w = &wins[wi];
-            if !w.alive || w.ws != current_ws {
+            if !w.alive || w.ws != current_ws || w.minimized {
                 continue;
             }
             let is_focused = focused == Some(wi);
@@ -2430,6 +2452,19 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             // Close box: a small rounded chip in the danger color.
             let sz = w.title_h - 12;
             fill_rrect(&mut back, bw, bh, w.cx + w.sw - sz - 6, w.cy - w.title_h + 6, sz, sz, fx.corner_radius.min(sz / 2), RR_ALL, ((a as u32) << 24) | (theme.close & 0x00FF_FFFF));
+            // Minimize box: a neutral chip just left of the close chip, carrying a
+            // horizontal minus glyph. Matches Win::in_min's hit rect.
+            {
+                let mbx = w.cx + w.sw - 2 * sz - 10;
+                let mby = w.cy - w.title_h + 6;
+                let chip = shade(tcol, 34);
+                fill_rrect(&mut back, bw, bh, mbx, mby, sz, sz, fx.corner_radius.min(sz / 2), RR_ALL, ((a as u32) << 24) | (chip & 0x00FF_FFFF));
+                let gw = (sz / 2).max(3);
+                let gx = mbx + (sz - gw) / 2;
+                let gy = mby + sz / 2;
+                let glyph = if is_focused { theme.title_text_focused } else { theme.title_text_unfocused };
+                fill_rect_alpha(&mut back, bw, bh, gx, gy, gw, 2, ((a as u32) << 24) | (glyph & 0x00FF_FFFF));
+            }
             // Window title text (TTF), left-aligned in the title bar, clear of the
             // close chip. Drawn only once the card is nearly solid so it appears
             // with the surface rather than through the grow-in blend.
