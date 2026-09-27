@@ -119,7 +119,13 @@ impl Layout {
             title_h: 26,
             border: 2,
             panel_h: 28,
-            launcher_w: 40,
+            // App-menu button width at the left of the panel. Holds the "Dunit"
+            // wordmark (logo mark + label); the workspace pips start right after
+            // it. Widened from the old 40px hamburger slot to fit the wordmark.
+            launcher_w: 92,
+            // Vestigial: the top-panel per-window taskbar was replaced by the
+            // dock-as-task-switcher + centered focused title (REF-2). Kept for
+            // config round-trip stability; no compositor consumer today.
             taskbtn_w: 120,
             taskbtn_gap: 4,
             menu_w: 130,

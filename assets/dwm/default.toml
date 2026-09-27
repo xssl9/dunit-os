@@ -35,7 +35,10 @@ title_text_unfocused = "#A8B4AC"
 title_h          = 26
 border           = 2
 panel_h          = 28
-launcher_w       = 40
+# App-menu button width (holds the "Dunit" wordmark; workspace pips follow it).
+launcher_w       = 92
+# Vestigial after REF-2 (top taskbar → dock task-switcher + centered title);
+# kept for config round-trip stability.
 taskbtn_w        = 120
 taskbtn_gap      = 4
 menu_w           = 130

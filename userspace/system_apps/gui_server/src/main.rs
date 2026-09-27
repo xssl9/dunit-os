@@ -1371,16 +1371,6 @@ fn menu_item_rect(ly: &Layout, i: i32) -> (i32, i32, i32, i32) {
     (0, ly.panel_h + i * ly.menu_item_h, ly.menu_w, ly.menu_item_h)
 }
 
-/// Rect of the i-th taskbar button (0-based), laid out left-to-right after the
-/// launcher glyph and the workspace switcher. `ws_count` is the live workspace
-/// count (config `[workspaces] count`), so hit-testing and drawing agree.
-fn taskbtn_rect(ly: &Layout, ws_count: usize, i: i32) -> (i32, i32, i32, i32) {
-    let base = ly.launcher_w + ws_count as i32 * ly.ws_w;
-    let x = base + ly.taskbtn_gap + i * (ly.taskbtn_w + ly.taskbtn_gap);
-    let y = 3;
-    (x, y, ly.taskbtn_w, ly.panel_h - 6)
-}
-
 /// Rect of the i-th workspace pip (0-based) in the panel switcher, laid out
 /// left-to-right immediately after the launcher glyph. Clicking a pip activates
 /// that workspace.
@@ -2183,10 +2173,10 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 }
             }
         } else if press && my < ly.panel_h {
-            // Panel click. The launcher glyph opens the app menu; the workspace
-            // pips switch workspaces; the taskbar buttons raise + focus their
-            // window. Either way the click never reaches a client — the shell
-            // owns the panel band.
+            // Panel click. The wordmark (launcher_w band) opens the app menu; the
+            // workspace pips switch workspaces; the rest of the panel is consumed
+            // by the shell (task switching lives on the dock now). Either way the
+            // click never reaches a client — the shell owns the panel band.
             if mx < ly.launcher_w {
                 menu_open = true;
             } else if mx < ly.launcher_w + apps.workspaces as i32 * ly.ws_w {
@@ -2202,24 +2192,12 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                         break;
                     }
                 }
-            } else {
-                let mut slot = 0i32;
-                for wi in 0..wins.len() {
-                    if !wins[wi].alive || wins[wi].ws != current_ws {
-                        continue;
-                    }
-                    let (bx, by, bw2, bh2) = taskbtn_rect(&ly, apps.workspaces, slot);
-                    if mx >= bx && mx < bx + bw2 && my >= by && my < by + bh2 {
-                        z.retain(|&i| i != wi);
-                        z.push(wi);
-                        break;
-                    }
-                    slot += 1;
-                }
             }
+            // Any other panel click (centered title, tray) is consumed.
         } else if press && mx < ly.dock_w {
-            // Dock strip (left edge, below the panel): a click on a pinned icon
-            // spawns that app; any other click is consumed. The dock owns its
+            // Dock strip (left edge, below the panel): the task switcher. A click
+            // on a pinned icon raises its running window (switching workspace if
+            // needed) or spawns the app when none is running. The dock owns its
             // band — clicks never reach a client.
             let mut chosen: Option<usize> = None;
             for i in 0..apps.dock.len() {
@@ -2230,8 +2208,19 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 }
             }
             if let Some(i) = chosen {
-                if clients.len() < ly.max_windows {
-                    if let Some(ri) = apps.dock.get(i).copied() {
+                if let Some(ri) = apps.dock.get(i).copied() {
+                    // Raise-if-running: newest live window registered to this app.
+                    let running = (0..wins.len())
+                        .rev()
+                        .find(|&wi| wins[wi].alive && wins[wi].app as usize == ri);
+                    if let Some(wi) = running {
+                        if current_ws != wins[wi].ws {
+                            ws_switch_tick = ticks; // crossfade into the target ws
+                            current_ws = wins[wi].ws;
+                        }
+                        z.retain(|&i| i != wi);
+                        z.push(wi);
+                    } else if clients.len() < ly.max_windows {
                         let exec = apps.apps[ri].exec.as_str();
                         if let Some(mut c) = spawn_client(server, next_id, 0, 0, ri as u8, exec) {
                             c.ws = current_ws;
@@ -2465,9 +2454,25 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         } else {
             fill_rect_alpha(&mut back, bw, bh, 0, 0, bw as i32, ly.panel_h, ((fx.panel_alpha.min(255) as u32) << 24) | (theme.panel & 0x00FF_FFFF));
         }
-        // Launcher glyph: three stacked bars (hamburger) in the accent color.
-        for r in 0..3 {
-            fill_rect(&mut back, bw, bh, 10, 8 + r * 5, 20, 2, theme.launcher);
+        // App-menu button: the "Dunit" wordmark (logo mark + label) at the far
+        // left of the panel, clickable to open the launcher dropdown (hit-tested
+        // against `launcher_w`). Falls back to the old hamburger bars when the
+        // shell font is unavailable.
+        {
+            let logo = (ly.panel_h - 12).clamp(8, 20);
+            let ly0 = (ly.panel_h - logo) / 2;
+            fill_rrect(&mut back, bw, bh, 8, ly0, logo, logo, logo / 2, RR_ALL, 0xFF00_0000 | (theme.launcher & 0x00FF_FFFF));
+            fill_rrect(&mut back, bw, bh, 8 + logo / 3, ly0 + logo / 3, logo / 3, logo / 3, logo / 6, RR_ALL, 0xFF00_0000 | (theme.panel & 0x00FF_FFFF));
+            let text_x = 8 + logo + 6;
+            if let Some(f) = font.as_ref() {
+                let px = ly.panel_font_px as f32;
+                let baseline = ly.panel_h / 2 + 5;
+                draw_text_ttf(&mut back, bw, bh, f, text_x, baseline, px, "Dunit", theme.panel_text & 0x00FF_FFFF);
+            } else {
+                for r in 0..3 {
+                    fill_rect(&mut back, bw, bh, text_x, 8 + r * 5, 18, 2, theme.launcher);
+                }
+            }
         }
         // Workspace switcher: pips 1..=ws_count after the launcher glyph. The
         // active workspace is highlighted; any workspace holding a live window
@@ -2488,43 +2493,25 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 fill_rrect(&mut back, bw, bh, px + 2, py + ph - 3, pw - 4, 2, 1, RR_ALL, 0xFF00_0000 | (theme.launcher & 0x00FF_FFFF));
             }
         }
-        // One taskbar button per live window, in creation order; the focused
-        // window's button is highlighted. Label = 1-based window number.
-        {
-            let mut slot = 0i32;
-            for wi in 0..wins.len() {
-                if !wins[wi].alive || wins[wi].ws != current_ws {
-                    continue;
-                }
-                let (bx, by, bw2, bh2) = taskbtn_rect(&ly, apps.workspaces, slot);
-                if bx + bw2 > bw as i32 {
-                    break;
-                }
-                let base = if focused == Some(wi) {
-                    theme.taskbtn_focused
-                } else {
-                    theme.taskbtn
-                };
-                fill_rrect_grad(&mut back, bw, bh, bx, by, bw2, bh2, 6, RR_ALL, shade(base, 18), shade(base, -10), 255);
-                // Label the button with the app's name (TTF) so the panel reads
-                // like the reference; fall back to the 1-based window number when
-                // the shell font is unavailable.
-                if let Some(f) = font.as_ref() {
-                    let px = ly.panel_font_px as f32;
-                    let baseline = by + bh2 / 2 + 4;
-                    let tcol = if focused == Some(wi) {
-                        theme.title_text_focused & 0x00FF_FFFF
-                    } else {
-                        theme.panel_text
-                    };
-                    draw_text_ttf(&mut back, bw, bh, f, bx + 10, baseline, px, win_title(&apps, wins[wi].app), tcol);
-                } else {
-                    let mut label = [0u8; 2];
-                    two_digits(&mut label, 0, (wi as u64) + 1);
-                    draw_text_3x5(&mut back, bw, bh, bx + 8, by + 5, 2, theme.panel_text, &label);
-                }
-                slot += 1;
+        // Centered focused-window title (icon + app name), like the reference
+        // panel. Replaces the per-window taskbar strip — task switching now lives
+        // on the dock. Only drawn when a window holds focus on this workspace.
+        if let (Some(wi), Some(f)) = (focused, font.as_ref()) {
+            let title = win_title(&apps, wins[wi].app);
+            let px = ly.title_font_px as f32;
+            let tw = text_width_ttf(f, title, px);
+            let icon = app_icons.get(wins[wi].app as usize).and_then(|s| s.as_ref());
+            let isz = (ly.panel_h - 8).clamp(8, 22);
+            let gap = if icon.is_some() { 6 } else { 0 };
+            let iw = if icon.is_some() { isz } else { 0 };
+            let total = iw + gap + tw;
+            let sx = (bw as i32 - total) / 2;
+            if let Some(ic) = icon {
+                let iy = (ly.panel_h - isz) / 2;
+                blit_icon(&mut back, bw, bh, ic, ICON_W, ICON_H, sx, iy, isz, isz);
             }
+            let baseline = ly.panel_h / 2 + 5;
+            draw_text_ttf(&mut back, bw, bh, f, sx + iw + gap, baseline, px, title, theme.title_text_focused & 0x00FF_FFFF);
         }
         // Right-side system tray: live RAM usage, running-process count and the
         // uptime clock (MM:SS), right-aligned. TTF when the shell font is loaded;
