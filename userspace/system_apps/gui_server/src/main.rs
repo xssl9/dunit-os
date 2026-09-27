@@ -1521,6 +1521,87 @@ fn pump_clients(server: &mut Server, clients: &mut Vec<ClientState>) {
     }
 }
 
+// --- Desktop wallpaper (ported from the legacy Stack A renderer) ---------
+// The backdrop image lives in the (read-only) asset VFS as a 1600x900 24-bit
+// BMP. It is loaded and pre-scaled to the framebuffer once at session start
+// into an XRGB8888 buffer the size of `back`, so compositing the desktop each
+// frame is a single `copy_from_slice` (no per-pixel BMP sampling in the hot
+// loop). A missing/garbage file yields `None` and the gradient fallback stays.
+const WALLPAPER_PATH: &str = "/assets/wallpapers/wallpaper.bmp";
+const WALLPAPER_WIDTH: usize = 1600;
+const WALLPAPER_HEIGHT: usize = 900;
+const WALLPAPER_OFFSET: usize = 54;
+const WALLPAPER_STRIDE: usize = WALLPAPER_WIDTH * 3;
+
+/// Slurp a whole (binary) VFS file into a byte vector. Unlike
+/// `settings::read_file` this imposes no UTF-8 requirement and a larger cap, so
+/// it can carry the multi-megabyte wallpaper. `None` on open error.
+fn read_binary(path: &str, cap: usize) -> Option<Vec<u8>> {
+    let fd = libdunit::open(path, libdunit::OPEN_READ);
+    if fd < 0 {
+        return None;
+    }
+    let fd = fd as usize;
+    let mut data: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let n = libdunit::read(fd, &mut chunk);
+        if n <= 0 {
+            break;
+        }
+        data.extend_from_slice(&chunk[..n as usize]);
+        if data.len() > cap {
+            break;
+        }
+    }
+    libdunit::close(fd);
+    Some(data)
+}
+
+/// A 1600x900 24-bit BMP: "BM" magic, 54-byte pixel offset, matching
+/// dimensions and 24 bpp. Mirrors the legacy `validate_wallpaper_bmp`.
+fn validate_wallpaper_bmp(data: &[u8]) -> bool {
+    data.len() >= WALLPAPER_OFFSET + WALLPAPER_STRIDE * WALLPAPER_HEIGHT
+        && data[0] == b'B'
+        && data[1] == b'M'
+        && data.get(10).copied() == Some(WALLPAPER_OFFSET as u8)
+        && data.get(18).copied() == Some((WALLPAPER_WIDTH & 0xff) as u8)
+        && data.get(19).copied() == Some(((WALLPAPER_WIDTH >> 8) & 0xff) as u8)
+        && data.get(22).copied() == Some((WALLPAPER_HEIGHT & 0xff) as u8)
+        && data.get(23).copied() == Some(((WALLPAPER_HEIGHT >> 8) & 0xff) as u8)
+        && data.get(28).copied() == Some(24)
+}
+
+/// Load + pre-scale the wallpaper into an XRGB8888 buffer sized `bw*bh`
+/// (nearest-neighbor, bottom-up BGR source). `None` if the file is absent or
+/// not a valid 1600x900 24-bit BMP — the caller keeps the gradient backdrop.
+/// Full brightness (unlike the legacy 46% dim) so the image reads as intended.
+fn load_wallpaper(bw: usize, bh: usize) -> Option<Vec<u32>> {
+    let data = read_binary(WALLPAPER_PATH, 8 * 1024 * 1024)?;
+    if !validate_wallpaper_bmp(&data) {
+        return None;
+    }
+    let mut out: Vec<u32> = Vec::new();
+    out.resize(bw * bh, 0xFF00_0000);
+    for y in 0..bh {
+        let src_y = y.saturating_mul(WALLPAPER_HEIGHT) / bh.max(1);
+        let bmp_y = WALLPAPER_HEIGHT
+            .saturating_sub(1)
+            .saturating_sub(src_y.min(WALLPAPER_HEIGHT - 1));
+        let row_off = WALLPAPER_OFFSET + bmp_y * WALLPAPER_STRIDE;
+        let dst_base = y * bw;
+        for x in 0..bw {
+            let src_x = x.saturating_mul(WALLPAPER_WIDTH) / bw.max(1);
+            let off = row_off + src_x.min(WALLPAPER_WIDTH - 1) * 3;
+            let b = data[off] as u32;
+            let g = data[off + 1] as u32;
+            let r = data[off + 2] as u32;
+            out[dst_base + x] = 0xFF00_0000 | (r << 16) | (g << 8) | b;
+        }
+    }
+    Some(out)
+}
+
 fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     let mut fb = libdunit::FbInfo {
         addr: 0,
@@ -1548,6 +1629,15 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
 
     let mut back: Vec<u32> = Vec::new();
     back.resize(bw * bh, theme.desktop);
+
+    // Desktop wallpaper: loaded + pre-scaled once (XRGB8888, framebuffer-sized).
+    // Absent/invalid file → gradient backdrop fallback below.
+    let wallpaper: Option<Vec<u32>> = load_wallpaper(bw, bh);
+    if wallpaper.is_some() {
+        libdunit::println("gui_server: wallpaper loaded (/assets/wallpapers/wallpaper.bmp)");
+    } else {
+        libdunit::println("gui_server: wallpaper absent — gradient backdrop");
+    }
 
     // Build the window model from presented clients, tiling them if their slot
     // origins collide, and keeping the title bar on-screen.
@@ -1900,9 +1990,12 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             }
         }
 
-        // Desktop backdrop: a subtle vertical gradient (or a flat fill when the
-        // gradient effect is off — the pre-§5 look).
-        if fx.gradient {
+        // Desktop backdrop: the wallpaper (pre-scaled) when present, else a
+        // subtle vertical gradient (or a flat fill when the gradient effect is
+        // off — the pre-§5 look).
+        if let Some(wp) = &wallpaper {
+            back.copy_from_slice(wp);
+        } else if fx.gradient {
             let top = shade(theme.desktop, 12);
             let bot = shade(theme.desktop, -8);
             let span = (bh as u32 - 1).max(1);
