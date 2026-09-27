@@ -764,6 +764,32 @@ pub fn read_line() -> Result<String, isize> {
     }
 }
 
+/// Slurp a whole (binary) VFS file into a byte vector, up to `cap` bytes. Unlike
+/// `read_to_string` this imposes no UTF-8 requirement, so it can carry fonts,
+/// wallpapers and other raw assets. Returns `None` on open error; a file larger
+/// than `cap` is returned truncated at the first chunk that crosses the cap.
+pub fn read_binary(path: &str, cap: usize) -> Option<Vec<u8>> {
+    let fd = open(path, OPEN_READ);
+    if fd < 0 {
+        return None;
+    }
+    let fd = fd as usize;
+    let mut data: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let n = read(fd, &mut chunk);
+        if n <= 0 {
+            break;
+        }
+        data.extend_from_slice(&chunk[..n as usize]);
+        if data.len() > cap {
+            break;
+        }
+    }
+    close(fd);
+    Some(data)
+}
+
 pub fn read_to_string(path: &str) -> Result<String, isize> {
     let fd = open(path, OPEN_READ);
     if fd < 0 {

@@ -45,6 +45,18 @@ const POLL_MS: u64 = 500;
 /// The window's text font, embedded in the ELF (M4 still ships assets in-image).
 static FONT_BYTES: &[u8] = include_bytes!("../../../../assets/fonts/DejaVuSans.ttf");
 
+/// Load the configured TTF (`[desktop] font`) from the VFS, falling back to the
+/// embedded `FONT_BYTES` on any error — the desktop font is a live config knob.
+fn load_font() -> Result<Font, ()> {
+    let cfg = dwm_settings::load();
+    if let Some(bytes) = libdunit::read_binary(cfg.desktop.font.as_str(), 4 * 1024 * 1024) {
+        if let Ok(f) = Font::parse(bytes) {
+            return Ok(f);
+        }
+    }
+    Font::parse(FONT_BYTES.to_vec()).map_err(|_| ())
+}
+
 #[panic_handler]
 fn panic(_: &PanicInfo) -> ! {
     libdunit::println("gui_stat: PANIC");
@@ -196,7 +208,7 @@ pub extern "C" fn _start() -> ! {
         libdunit::exit(3);
     }
     let px = mapped as usize as *mut u8;
-    let font = match Font::parse(FONT_BYTES.to_vec()) {
+    let font = match load_font() {
         Ok(f) => f,
         Err(_) => {
             libdunit::println("gui_stat: FAIL font parse");

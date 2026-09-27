@@ -231,12 +231,88 @@ impl Effects {
     }
 }
 
+/// Bounded inline string for filesystem paths in the config, kept `Copy` (and
+/// heap-free) so `Settings` stays `Copy` like the rest of the schema. Paths are
+/// short; anything past `CAP` bytes is truncated.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ConfigStr {
+    buf: [u8; ConfigStr::CAP],
+    len: usize,
+}
+
+impl ConfigStr {
+    const CAP: usize = 128;
+
+    /// Build from a `&str` at const time (baselines), truncating to `CAP`.
+    pub const fn new(s: &str) -> Self {
+        let src = s.as_bytes();
+        let mut buf = [0u8; ConfigStr::CAP];
+        let mut i = 0;
+        while i < src.len() && i < ConfigStr::CAP {
+            buf[i] = src[i];
+            i += 1;
+        }
+        ConfigStr { buf, len: i }
+    }
+
+    /// Overwrite in place from a runtime `&str` (config apply), truncating to `CAP`.
+    fn set(&mut self, s: &str) {
+        let src = s.as_bytes();
+        let n = if src.len() > ConfigStr::CAP { ConfigStr::CAP } else { src.len() };
+        self.buf[..n].copy_from_slice(&src[..n]);
+        self.len = n;
+    }
+
+    /// Borrow as `&str` (bytes originate from `&str`, so always valid UTF-8).
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
+    }
+}
+
+/// Asset paths (`[desktop]` table): everything the desktop loads *by path* lives
+/// here, so it is fully config-driven. Baseline values are the in-tree assets; a
+/// config may point any of them elsewhere in the VFS.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Desktop {
+    /// Wallpaper BMP (1600x900, 24-bit) painted as the compositor backdrop.
+    pub wallpaper: ConfigStr,
+    /// Icon theme directory name under `/assets/icons/<name>/`; dock/launcher and
+    /// the file-manager mimetypes resolve `<name>/<key>.rgba` from it.
+    pub icon_theme: ConfigStr,
+    /// TrueType font every GUI app loads for text (falls back to the embedded
+    /// copy when the path is missing or unparseable).
+    pub font: ConfigStr,
+}
+
+impl Desktop {
+    /// The built-in baseline: the assets shipped in-tree today.
+    pub const fn baseline() -> Self {
+        Desktop {
+            wallpaper: ConfigStr::new("/assets/wallpapers/wallpaper.bmp"),
+            icon_theme: ConfigStr::new("breeze"),
+            font: ConfigStr::new("/assets/fonts/DejaVuSans.ttf"),
+        }
+    }
+
+    /// Apply one `key`/`value` pair from the `[desktop]` table (string values;
+    /// already unquoted by the caller). Unknown keys are ignored.
+    fn apply(&mut self, key: &str, value: &str) {
+        match key {
+            "wallpaper" => self.wallpaper.set(value),
+            "icon_theme" => self.icon_theme.set(value),
+            "font" => self.font.set(value),
+            _ => {}
+        }
+    }
+}
+
 /// Resolved DWM settings. Extends with `[layout]` etc. in later sub-slices.
 #[derive(Clone, Copy)]
 pub struct Settings {
     pub theme: Theme,
     pub layout: Layout,
     pub effects: Effects,
+    pub desktop: Desktop,
     /// True when a config file was found and read (parse still best-effort).
     pub from_file: bool,
     /// Count of recognised keys applied over the baseline (0 for pure default).
@@ -249,6 +325,7 @@ impl Settings {
             theme: Theme::baseline(),
             layout: Layout::baseline(),
             effects: Effects::baseline(),
+            desktop: Desktop::baseline(),
             from_file: false,
             applied: 0,
         }
@@ -305,6 +382,9 @@ pub fn parse_into(text: &str, settings: &mut Settings) {
             settings.applied += 1;
         } else if section == "effects" {
             settings.effects.apply(key, value);
+            settings.applied += 1;
+        } else if section == "desktop" {
+            settings.desktop.apply(key, value);
             settings.applied += 1;
         }
     }
@@ -463,6 +543,14 @@ fn push_bool(out: &mut String, key: &str, b: bool) {
     out.push_str(if b { " = true\n" } else { " = false\n" });
 }
 
+/// Append `key = "value"\n` for a string value (matches `unquote` on read).
+fn push_string(out: &mut String, key: &str, value: &str) {
+    out.push_str(key);
+    out.push_str(" = \"");
+    out.push_str(value);
+    out.push_str("\"\n");
+}
+
 /// Serialize `Settings` back to the TOML dialect `parse_into` accepts, mirroring
 /// `assets/dwm/default.toml`. Lossless for every recognised key: parsing the
 /// output reproduces the same `theme`/`layout`/`effects` (see `roundtrip_ok`).
@@ -512,6 +600,12 @@ pub fn to_toml(s: &Settings) -> String {
     push_bool(&mut out, "gradient", s.effects.gradient);
     push_bool(&mut out, "anim", s.effects.anim);
     push_int(&mut out, "anim_ms", s.effects.anim_ms as i64);
+    out.push('\n');
+
+    out.push_str("[desktop]\n");
+    push_string(&mut out, "wallpaper", s.desktop.wallpaper.as_str());
+    push_string(&mut out, "icon_theme", s.desktop.icon_theme.as_str());
+    push_string(&mut out, "font", s.desktop.font.as_str());
 
     out
 }
@@ -523,5 +617,5 @@ pub fn roundtrip_ok(s: &Settings) -> bool {
     let text = to_toml(s);
     let mut back = Settings::defaults();
     parse_into(&text, &mut back);
-    back.theme == s.theme && back.layout == s.layout && back.effects == s.effects
+    back.theme == s.theme && back.layout == s.layout && back.effects == s.effects && back.desktop == s.desktop
 }

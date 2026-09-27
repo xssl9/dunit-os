@@ -33,6 +33,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dwm_settings"
+version = "0.1.0"
+dependencies = [
+ "libdunit",
+]
+
+[[package]]
 name = "gui_files"
 version = "0.1.0"
 dependencies = [
@@ -41,6 +48,7 @@ dependencies = [
  "dunit_text",
  "dunit_ui",
  "dunit_widgets",
+ "dwm_settings",
  "gui_protocol_v1",
  "libdunit",
 ]

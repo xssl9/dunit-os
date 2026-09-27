@@ -55,3 +55,16 @@ menu_alpha       = 225
 gradient         = true
 anim             = true
 anim_ms          = 140
+
+# Asset paths — everything the desktop loads by path, so it is fully config-
+# driven (no hardcoded asset locations). `wallpaper` is a 1600x900 24-bit BMP
+# painted as the backdrop (absent/invalid → gradient fallback). `icon_theme` is a
+# directory name under /assets/icons/<name>/; the compositor dock/launcher and
+# the file manager resolve <name>/<key>.rgba from it. `font` is the TrueType font
+# every GUI app renders text with (missing/unparseable → the app's embedded
+# fallback copy). Paths must exist in the VFS; assets under /assets/ are embedded.
+[desktop]
+wallpaper        = "/assets/wallpapers/wallpaper.bmp"
+icon_theme       = "breeze"
+font             = "/assets/fonts/DejaVuSans.ttf"
+

@@ -1555,7 +1555,8 @@ fn pump_clients(server: &mut Server, clients: &mut Vec<ClientState>, reload: &mu
 // into an XRGB8888 buffer the size of `back`, so compositing the desktop each
 // frame is a single `copy_from_slice` (no per-pixel BMP sampling in the hot
 // loop). A missing/garbage file yields `None` and the gradient fallback stays.
-const WALLPAPER_PATH: &str = "/assets/wallpapers/wallpaper.bmp";
+// The path is no longer hardcoded here: it comes from `[desktop] wallpaper` in
+// the config (baseline `/assets/wallpapers/wallpaper.bmp`).
 const WALLPAPER_WIDTH: usize = 1600;
 const WALLPAPER_HEIGHT: usize = 900;
 const WALLPAPER_OFFSET: usize = 54;
@@ -1604,8 +1605,8 @@ fn validate_wallpaper_bmp(data: &[u8]) -> bool {
 /// (nearest-neighbor, bottom-up BGR source). `None` if the file is absent or
 /// not a valid 1600x900 24-bit BMP — the caller keeps the gradient backdrop.
 /// Full brightness (unlike the legacy 46% dim) so the image reads as intended.
-fn load_wallpaper(bw: usize, bh: usize) -> Option<Vec<u32>> {
-    let data = read_binary(WALLPAPER_PATH, 8 * 1024 * 1024)?;
+fn load_wallpaper(path: &str, bw: usize, bh: usize) -> Option<Vec<u32>> {
+    let data = read_binary(path, 8 * 1024 * 1024)?;
     if !validate_wallpaper_bmp(&data) {
         return None;
     }
@@ -1642,19 +1643,44 @@ const ICON_H: usize = 32;
 /// adding an app to `LAUNCH_APPS` picks up its icon automatically if the file
 /// exists, and a genuinely icon-less app simply fails the load. The path is
 /// assembled on the stack to keep the compositor's no-heap-`String` style.
-fn load_app_icon(app: &str) -> Option<Vec<u32>> {
-    const PREFIX: &[u8] = b"/assets/icons/breeze/";
+/// Load the Breeze launcher icon for a `LAUNCH_APPS` binary *by convention* —
+/// `<dir><app>.rgba` — into packed ARGB, or `None` when no such asset ships (the
+/// dock then falls back to the app initial). `dir` is the configured icon-theme
+/// directory (e.g. `/assets/icons/breeze/`, ending in `/`), so the theme is a
+/// config knob, not a constant. No per-app table: adding an app to `LAUNCH_APPS`
+/// picks up its icon automatically if the file exists. The path is assembled on
+/// the stack to keep the compositor's no-heap-`String` style.
+fn load_app_icon(app: &str, dir: &str) -> Option<Vec<u32>> {
     const SUFFIX: &[u8] = b".rgba";
-    let mut buf = [0u8; 128];
-    let n = PREFIX.len() + app.len() + SUFFIX.len();
+    let prefix = dir.as_bytes();
+    let mut buf = [0u8; 160];
+    let n = prefix.len() + app.len() + SUFFIX.len();
     if n > buf.len() {
         return None;
     }
-    buf[..PREFIX.len()].copy_from_slice(PREFIX);
-    buf[PREFIX.len()..PREFIX.len() + app.len()].copy_from_slice(app.as_bytes());
-    buf[PREFIX.len() + app.len()..n].copy_from_slice(SUFFIX);
+    buf[..prefix.len()].copy_from_slice(prefix);
+    buf[prefix.len()..prefix.len() + app.len()].copy_from_slice(app.as_bytes());
+    buf[prefix.len() + app.len()..n].copy_from_slice(SUFFIX);
     let path = core::str::from_utf8(&buf[..n]).ok()?;
     load_icon_rgba(path)
+}
+
+/// Build the icon-theme directory path `/assets/icons/<theme>/` into `buf` and
+/// return the slice. An empty or over-long theme name falls back to `breeze`, so
+/// a bad config never leaves the dock icon-less. Stack-assembled (no `String`).
+fn icon_dir<'a>(theme: &str, buf: &'a mut [u8; 160]) -> &'a str {
+    const PRE: &[u8] = b"/assets/icons/";
+    const FALLBACK: &str = "/assets/icons/breeze/";
+    let theme = if theme.is_empty() { "breeze" } else { theme };
+    let n = PRE.len() + theme.len() + 1;
+    if n > buf.len() {
+        buf[..FALLBACK.len()].copy_from_slice(FALLBACK.as_bytes());
+        return core::str::from_utf8(&buf[..FALLBACK.len()]).unwrap_or(FALLBACK);
+    }
+    buf[..PRE.len()].copy_from_slice(PRE);
+    buf[PRE.len()..PRE.len() + theme.len()].copy_from_slice(theme.as_bytes());
+    buf[n - 1] = b'/';
+    core::str::from_utf8(&buf[..n]).unwrap_or(FALLBACK)
 }
 
 /// Load a straight-alpha `R,G,B,A` icon (`ICON_W`×`ICON_H`) from the VFS into
@@ -1742,25 +1768,30 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     back.resize(bw * bh, theme.desktop);
 
     // Desktop wallpaper: loaded + pre-scaled once (XRGB8888, framebuffer-sized).
-    // Absent/invalid file → gradient backdrop fallback below.
-    let wallpaper: Option<Vec<u32>> = load_wallpaper(bw, bh);
+    // Path comes from `[desktop] wallpaper`; absent/invalid → gradient fallback.
+    let mut wallpaper: Option<Vec<u32>> = load_wallpaper(cfg.desktop.wallpaper.as_str(), bw, bh);
     if wallpaper.is_some() {
-        libdunit::println("gui_server: wallpaper loaded (/assets/wallpapers/wallpaper.bmp)");
+        libdunit::println("gui_server: wallpaper loaded (config [desktop] wallpaper)");
     } else {
         libdunit::println("gui_server: wallpaper absent — gradient backdrop");
     }
 
-    // Breeze-Chameleon launcher icons, one slot per LAUNCH_APPS entry. Loaded
-    // once into packed ARGB; a missing/mis-sized asset leaves its slot `None`
-    // and that dock cell falls back to the app initial (W/C/S/F/T).
+    // Breeze-Chameleon launcher icons, one slot per LAUNCH_APPS entry. The theme
+    // directory (`/assets/icons/<icon_theme>/`) is a config knob. Loaded once
+    // into packed ARGB; a missing/mis-sized asset leaves its slot `None` and that
+    // dock cell falls back to the app initial (W/C/S/F/T).
     let mut app_icons: Vec<Option<Vec<u32>>> = Vec::with_capacity(LAUNCH_APPS.len());
     let mut icon_count = 0usize;
-    for (_, app) in LAUNCH_APPS.iter() {
-        let icon = load_app_icon(app);
-        if icon.is_some() {
-            icon_count += 1;
+    {
+        let mut dbuf = [0u8; 160];
+        let dir = icon_dir(cfg.desktop.icon_theme.as_str(), &mut dbuf);
+        for (_, app) in LAUNCH_APPS.iter() {
+            let icon = load_app_icon(app, dir);
+            if icon.is_some() {
+                icon_count += 1;
+            }
+            app_icons.push(icon);
         }
-        app_icons.push(icon);
     }
     if icon_count > 0 {
         libdunit::println("gui_server: launcher icons loaded (Breeze-Chameleon)");
@@ -1881,9 +1912,9 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
 
         // Live settings reload (GUI<->TOML round-trip): a gui_settings client
         // rewrote the config and pinged us. Re-read it and re-seed everything
-        // derived from theme/layout/effects. Wallpaper is not part of the TOML
-        // dialect yet, so it is left as-is. Never fatal — load() falls back to
-        // the baseline on a bad file.
+        // derived from theme/layout/effects — plus the asset paths in [desktop]
+        // (wallpaper + icon theme), so a config change swaps them live too. Never
+        // fatal — load() falls back to the baseline on a bad file.
         if reload_requested {
             reload_requested = false;
             let ncfg = settings::load();
@@ -1908,6 +1939,13 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             if blur_a.len() < need {
                 blur_a.resize(need, 0);
                 blur_b.resize(need, 0);
+            }
+            // Re-seed the config-driven asset paths (wallpaper + icon theme).
+            wallpaper = load_wallpaper(ncfg.desktop.wallpaper.as_str(), bw, bh);
+            let mut dbuf = [0u8; 160];
+            let dir = icon_dir(ncfg.desktop.icon_theme.as_str(), &mut dbuf);
+            for (slot, (_, app)) in app_icons.iter_mut().zip(LAUNCH_APPS.iter()) {
+                *slot = load_app_icon(app, dir);
             }
             libdunit::println("gui_server: settings reloaded (config changed)");
         }

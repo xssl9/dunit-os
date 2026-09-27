@@ -73,6 +73,18 @@ const SEL_BG: Color = Color::rgba(0x2f, 0x8f, 0x5a, 0x50);
 /// The font, embedded in the ELF (M4 still ships assets in-image).
 static FONT_BYTES: &[u8] = include_bytes!("../../../../assets/fonts/DejaVuSans.ttf");
 
+/// Load the configured TTF (`[desktop] font`) from the VFS, falling back to the
+/// embedded `FONT_BYTES` on any error — the desktop font is a live config knob.
+fn load_font() -> Result<Font, ()> {
+    let cfg = dwm_settings::load();
+    if let Some(bytes) = libdunit::read_binary(cfg.desktop.font.as_str(), 4 * 1024 * 1024) {
+        if let Ok(f) = Font::parse(bytes) {
+            return Ok(f);
+        }
+    }
+    Font::parse(FONT_BYTES.to_vec()).map_err(|_| ())
+}
+
 #[panic_handler]
 fn panic(_: &PanicInfo) -> ! {
     libdunit::println("gui_files: PANIC");
@@ -205,15 +217,45 @@ fn read_icon(path: &str) -> Option<Vec<u8>> {
     }
 }
 
+/// Build `/assets/icons/<theme>/<name>.rgba` on the stack and load it. An empty
+/// theme name falls back to `breeze` so a bad config still shows icons. Keeps the
+/// icon theme a shared config knob (same `[desktop] icon_theme` the compositor
+/// uses for the dock/launcher).
+fn read_theme_icon(theme: &str, name: &str) -> Option<Vec<u8>> {
+    const PRE: &[u8] = b"/assets/icons/";
+    const SUF: &[u8] = b".rgba";
+    let theme = if theme.is_empty() { "breeze" } else { theme };
+    let n = PRE.len() + theme.len() + 1 + name.len() + SUF.len();
+    let mut buf = [0u8; 192];
+    if n > buf.len() {
+        return None;
+    }
+    let mut o = 0;
+    buf[o..o + PRE.len()].copy_from_slice(PRE);
+    o += PRE.len();
+    buf[o..o + theme.len()].copy_from_slice(theme.as_bytes());
+    o += theme.len();
+    buf[o] = b'/';
+    o += 1;
+    buf[o..o + name.len()].copy_from_slice(name.as_bytes());
+    o += name.len();
+    buf[o..o + SUF.len()].copy_from_slice(SUF);
+    o += SUF.len();
+    let path = core::str::from_utf8(&buf[..o]).ok()?;
+    read_icon(path)
+}
+
 impl Icons {
     fn load() -> Icons {
+        let cfg = dwm_settings::load();
+        let theme = cfg.desktop.icon_theme.as_str();
         Icons {
-            folder: read_icon("/assets/icons/breeze/mime_folder.rgba"),
-            text: read_icon("/assets/icons/breeze/mime_text.rgba"),
-            exec: read_icon("/assets/icons/breeze/mime_exec.rgba"),
-            image: read_icon("/assets/icons/breeze/mime_image.rgba"),
-            archive: read_icon("/assets/icons/breeze/mime_archive.rgba"),
-            unknown: read_icon("/assets/icons/breeze/mime_unknown.rgba"),
+            folder: read_theme_icon(theme, "mime_folder"),
+            text: read_theme_icon(theme, "mime_text"),
+            exec: read_theme_icon(theme, "mime_exec"),
+            image: read_theme_icon(theme, "mime_image"),
+            archive: read_theme_icon(theme, "mime_archive"),
+            unknown: read_theme_icon(theme, "mime_unknown"),
         }
     }
 
@@ -710,7 +752,7 @@ pub extern "C" fn _start() -> ! {
         libdunit::exit(3);
     }
     let px = mapped as usize as *mut u8;
-    let font = match Font::parse(FONT_BYTES.to_vec()) {
+    let font = match load_font() {
         Ok(f) => f,
         Err(_) => {
             libdunit::println("gui_files: FAIL font parse");
