@@ -80,6 +80,10 @@ anim_ms          = 140
 wallpaper        = "/assets/wallpapers/wallpaper.bmp"
 icon_theme       = "breeze"
 font             = "/assets/fonts/DejaVuSans.ttf"
+# App-menu wordmark logo: a 32x32 straight-alpha RGBA with a circular mask baked
+# in. Blitted left of the "Dunit" wordmark on the panel (absent/mis-sized → the
+# wordmark draws its flat accent mark instead).
+logo             = "/assets/images/logo.rgba"
 
 # ============================================================================
 # Application registry + desktop composition (data-driven; concept: no app

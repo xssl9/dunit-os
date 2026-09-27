@@ -305,6 +305,10 @@ pub struct Desktop {
     /// TrueType font every GUI app loads for text (falls back to the embedded
     /// copy when the path is missing or unparseable).
     pub font: ConfigStr,
+    /// Brand logo blitted into the app-menu wordmark, a 32x32 straight-alpha
+    /// `R,G,B,A` raster (circular mask baked into the alpha). Absent/mis-sized →
+    /// the compositor draws its flat accent mark instead.
+    pub logo: ConfigStr,
 }
 
 impl Desktop {
@@ -314,6 +318,7 @@ impl Desktop {
             wallpaper: ConfigStr::new("/assets/wallpapers/wallpaper.bmp"),
             icon_theme: ConfigStr::new("breeze"),
             font: ConfigStr::new("/assets/fonts/DejaVuSans.ttf"),
+            logo: ConfigStr::new("/assets/images/logo.rgba"),
         }
     }
 
@@ -324,6 +329,7 @@ impl Desktop {
             "wallpaper" => self.wallpaper.set(value),
             "icon_theme" => self.icon_theme.set(value),
             "font" => self.font.set(value),
+            "logo" => self.logo.set(value),
             _ => {}
         }
     }
@@ -939,6 +945,7 @@ pub fn to_toml(s: &Settings) -> String {
     push_string(&mut out, "wallpaper", s.desktop.wallpaper.as_str());
     push_string(&mut out, "icon_theme", s.desktop.icon_theme.as_str());
     push_string(&mut out, "font", s.desktop.font.as_str());
+    push_string(&mut out, "logo", s.desktop.logo.as_str());
 
     out
 }

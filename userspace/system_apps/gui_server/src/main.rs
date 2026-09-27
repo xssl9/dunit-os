@@ -1635,8 +1635,8 @@ fn pump_clients(server: &mut Server, clients: &mut Vec<ClientState>, reload: &mu
 // loop). A missing/garbage file yields `None` and the gradient fallback stays.
 // The path is no longer hardcoded here: it comes from `[desktop] wallpaper` in
 // the config (baseline `/assets/wallpapers/wallpaper.bmp`).
-const WALLPAPER_WIDTH: usize = 1600;
-const WALLPAPER_HEIGHT: usize = 900;
+const WALLPAPER_WIDTH: usize = 1920;
+const WALLPAPER_HEIGHT: usize = 1080;
 const WALLPAPER_OFFSET: usize = 54;
 const WALLPAPER_STRIDE: usize = WALLPAPER_WIDTH * 3;
 
@@ -1906,6 +1906,16 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         libdunit::println("gui_server: launcher icons absent — initials fallback");
     }
 
+    // Brand logo for the app-menu wordmark: a 32x32 straight-alpha RGBA with a
+    // circular mask baked in (path from `[desktop] logo`). `None` when the asset
+    // is missing/mis-sized → the wordmark draws its flat accent mark instead.
+    let mut logo: Option<Vec<u32>> = load_icon_rgba(cfg.settings.desktop.logo.as_str());
+    if logo.is_some() {
+        libdunit::println("gui_server: wordmark logo loaded (circular)");
+    } else {
+        libdunit::println("gui_server: wordmark logo absent — accent mark fallback");
+    }
+
     // Crisp TTF for the shell's reference-facing text (window titles, centered
     // focused title, right-side tray). `None` only if even the embedded font is
     // unparsable — then those texts are skipped and the 3x5 labels remain.
@@ -2068,6 +2078,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 // Re-seed the config-driven assets (wallpaper + icon theme) and the
                 // registry-derived state (icons per entry, dock hover slots).
                 wallpaper = load_wallpaper(ncfg.settings.desktop.wallpaper.as_str(), bw, bh);
+                logo = load_icon_rgba(ncfg.settings.desktop.logo.as_str());
                 let mut dbuf = [0u8; 160];
                 let dir = icon_dir(ncfg.settings.desktop.icon_theme.as_str(), &mut dbuf);
                 app_icons.clear();
@@ -2459,11 +2470,16 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         // against `launcher_w`). Falls back to the old hamburger bars when the
         // shell font is unavailable.
         {
-            let logo = (ly.panel_h - 12).clamp(8, 20);
-            let ly0 = (ly.panel_h - logo) / 2;
-            fill_rrect(&mut back, bw, bh, 8, ly0, logo, logo, logo / 2, RR_ALL, 0xFF00_0000 | (theme.launcher & 0x00FF_FFFF));
-            fill_rrect(&mut back, bw, bh, 8 + logo / 3, ly0 + logo / 3, logo / 3, logo / 3, logo / 6, RR_ALL, 0xFF00_0000 | (theme.panel & 0x00FF_FFFF));
-            let text_x = 8 + logo + 6;
+            let logo_sz = (ly.panel_h - 8).clamp(8, 22);
+            let ly0 = (ly.panel_h - logo_sz) / 2;
+            // Brand logo (circular RGBA) when present; else the flat accent mark.
+            if let Some(lg) = logo.as_ref() {
+                blit_icon(&mut back, bw, bh, lg, ICON_W, ICON_H, 8, ly0, logo_sz, logo_sz);
+            } else {
+                fill_rrect(&mut back, bw, bh, 8, ly0, logo_sz, logo_sz, logo_sz / 2, RR_ALL, 0xFF00_0000 | (theme.launcher & 0x00FF_FFFF));
+                fill_rrect(&mut back, bw, bh, 8 + logo_sz / 3, ly0 + logo_sz / 3, logo_sz / 3, logo_sz / 3, logo_sz / 6, RR_ALL, 0xFF00_0000 | (theme.panel & 0x00FF_FFFF));
+            }
+            let text_x = 8 + logo_sz + 6;
             if let Some(f) = font.as_ref() {
                 let px = ly.panel_font_px as f32;
                 let baseline = ly.panel_h / 2 + 5;
