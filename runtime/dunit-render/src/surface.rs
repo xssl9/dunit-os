@@ -112,6 +112,33 @@ impl<'a> Surface<'a> {
         }
     }
 
+    /// Blit a straight-alpha RGBA image over the surface, its top-left at pixel
+    /// `(ox, oy)`, alpha-blended (src-over) per pixel. `rgba` is row-major,
+    /// 4 bytes/pixel in `R, G, B, A` byte order — the raw `.rgba` asset format
+    /// the compositor already loads. Out-of-bounds pixels are skipped; a slice
+    /// shorter than `w * h * 4` clips the trailing rows rather than panicking.
+    pub fn blit_image(&mut self, ox: i32, oy: i32, rgba: &[u8], w: usize, h: usize) {
+        for iy in 0..h {
+            let py = oy + iy as i32;
+            for ix in 0..w {
+                let o = (iy * w + ix) * 4;
+                if o + 4 > rgba.len() {
+                    return; // ran off the end of the data: nothing more to draw.
+                }
+                let px = ox + ix as i32;
+                if px < 0 || py < 0 || px as usize >= self.width || py as usize >= self.height {
+                    continue;
+                }
+                let a = rgba[o + 3];
+                if a == 0 {
+                    continue;
+                }
+                let color = Color::rgba(rgba[o], rgba[o + 1], rgba[o + 2], a);
+                self.blend(px as usize, py as usize, color, 255);
+            }
+        }
+    }
+
     /// Round `(x, y, w, h)` to integer pixels and clip to the surface.
     fn clip_rect(&self, x: f32, y: f32, w: f32, h: f32) -> (usize, usize, usize, usize) {
         let x0 = clamp_usize(round_i32(x), self.width);
