@@ -26,8 +26,20 @@ use dunit_text::Font;
 // Control-message magics shared with the compositor.
 const CTRL_MAGIC: u32 = 0x3150_4143; // "CAP1" — capability announce
 const INPUT_MAGIC: u32 = 0x3150_4E49; // "INP1" — pointer input
+#[allow(dead_code)] // reserved for the intra-window drag slice (E5)
+const IN_MOVE: u8 = 1;
 const IN_DOWN: u8 = 2;
+#[allow(dead_code)] // reserved for the intra-window drag slice (E5)
+const IN_UP: u8 = 3;
+const IN_KEY: u8 = 5;
 const IN_QUIT: u8 = 9;
+
+// Cooked key bytes the compositor forwards in the IN_KEY `button` field.
+const KEY_BACKSPACE: u8 = 0x08;
+const KEY_DEL: u8 = 0x7f;
+const KEY_ENTER_LF: u8 = 0x0a;
+const KEY_ENTER_CR: u8 = 0x0d;
+const KEY_ESC: u8 = 0x1b;
 
 const SURFACE: u64 = 1;
 const BUFFER: u64 = 2;
@@ -238,11 +250,13 @@ struct Files {
     selected: Option<usize>,
     /// Full entry count before the on-screen cap, for the status bar.
     total: usize,
+    /// Copy/cut clipboard: (absolute source path, `true` if cut).
+    clip: Option<(String, bool)>,
 }
 
 impl Files {
     fn new() -> Files {
-        let mut f = Files { path: String::from("/"), items: Vec::new(), selected: None, total: 0 };
+        let mut f = Files { path: String::from("/"), items: Vec::new(), selected: None, total: 0, clip: None };
         f.reload();
         f
     }
@@ -313,6 +327,112 @@ impl Files {
         self.path.push_str(&name);
         self.reload();
     }
+
+    /// Absolute path of a child `name` in the current directory.
+    fn child_path(&self, name: &str) -> String {
+        let mut p = self.path.clone();
+        if p != "/" {
+            p.push('/');
+        }
+        p.push_str(name);
+        p
+    }
+
+    /// Absolute path of the selected entry, if any.
+    fn selected_path(&self) -> Option<String> {
+        self.selected.map(|i| self.child_path(&self.items[i].name))
+    }
+
+    /// Create a directory `name` in the current directory, then reload.
+    fn make_dir(&mut self, name: &str) {
+        if !name.is_empty() {
+            libdunit::mkdir(&self.child_path(name));
+            self.reload();
+        }
+    }
+
+    /// Rename the selected entry to `new`, then reload.
+    fn rename_selected(&mut self, new: &str) {
+        if new.is_empty() {
+            return;
+        }
+        if let Some(i) = self.selected {
+            let old = self.child_path(&self.items[i].name);
+            libdunit::rename(&old, &self.child_path(new));
+            self.reload();
+        }
+    }
+
+    /// Delete the selected entry (files only — the kernel refuses directories),
+    /// then reload.
+    fn delete_selected(&mut self) {
+        if let Some(p) = self.selected_path() {
+            libdunit::unlink(&p);
+            self.reload();
+        }
+    }
+
+    /// Put the selected entry on the clipboard (`cut` marks a move).
+    fn clip_selected(&mut self, cut: bool) {
+        if let Some(p) = self.selected_path() {
+            self.clip = Some((p, cut));
+        }
+    }
+
+    /// Paste the clipboard entry into the current directory. A cut is a rename
+    /// (move); a copy duplicates the file's bytes. Reloads afterwards.
+    fn paste(&mut self) {
+        let (src, cut) = match self.clip.clone() {
+            Some(c) => c,
+            None => return,
+        };
+        let base = basename(&src);
+        let dst = self.child_path(base);
+        if src == dst {
+            return;
+        }
+        if cut {
+            libdunit::rename(&src, &dst);
+            self.clip = None;
+        } else {
+            copy_file(&src, &dst);
+        }
+        self.reload();
+    }
+}
+
+/// The final path component of `path` (after the last '/').
+fn basename(path: &str) -> &str {
+    match path.rfind('/') {
+        Some(i) => &path[i + 1..],
+        None => path,
+    }
+}
+
+/// Copy the file at `src` to `dst` byte-for-byte (best-effort; directories and
+/// read/create failures are silently skipped — the caller reloads regardless).
+fn copy_file(src: &str, dst: &str) {
+    let rf = libdunit::open(src, libdunit::OPEN_READ);
+    if rf < 0 {
+        return;
+    }
+    let rf = rf as usize;
+    let wf = libdunit::open(dst, libdunit::OPEN_CREATE | libdunit::OPEN_WRITE | libdunit::OPEN_TRUNC);
+    if wf < 0 {
+        libdunit::close(rf);
+        return;
+    }
+    let wf = wf as usize;
+    let mut chunk = [0u8; 512];
+    loop {
+        let n = libdunit::read(rf, &mut chunk);
+        if n <= 0 {
+            break;
+        }
+        libdunit::write(wf, &chunk[..n as usize]);
+    }
+    libdunit::close(rf);
+    libdunit::close(wf);
 }
 
 
@@ -334,8 +454,9 @@ fn push_u32(d: &mut String, mut v: u32) {
     }
 }
 
-/// Paint the whole window: header breadcrumb, icon grid, status bar.
-fn render(px: *mut u8, font: &Font, files: &Files, icons: &Icons) {
+/// Paint the whole window: header breadcrumb, icon grid, status bar, and any
+/// active overlay (context menu / text-entry / delete-confirm).
+fn render(px: *mut u8, font: &Font, files: &Files, icons: &Icons, mode: &Mode) {
     let pixels = unsafe { core::slice::from_raw_parts_mut(px as *mut u32, (W * H) as usize) };
     let mut s = Surface::new(pixels, W as usize, H as usize);
 
@@ -402,6 +523,14 @@ fn render(px: *mut u8, font: &Font, files: &Files, icons: &Icons) {
     }
     let sb = fit_label(font, &status, 12.0, (W as i32 - 2 * PAD) as f32);
     draw_text(&mut s, font, PAD, H as i32 - 7, 12.0, &sb, MUTED);
+
+    // Overlays on top of the base view.
+    match mode {
+        Mode::Browse => {}
+        Mode::Menu { mx, my } => draw_menu(&mut s, font, files, *mx, *my),
+        Mode::Text { rename, buf } => draw_text_box(&mut s, font, *rename, buf),
+        Mode::Confirm => draw_confirm(&mut s, font, files),
+    }
 }
 
 
@@ -430,6 +559,130 @@ fn hit_cell(files: &Files, lx: i32, ly: i32) -> Option<Hit> {
         return Some(Hit::Parent);
     }
     Some(Hit::Item(ci - has_parent as usize))
+}
+
+
+/// The interaction mode: plain browsing, a context menu at `(mx, my)`, a
+/// text-entry overlay (for New Folder / Rename), or a delete confirmation.
+enum Mode {
+    Browse,
+    Menu { mx: i32, my: i32 },
+    Text { rename: bool, buf: String },
+    Confirm,
+}
+
+/// A context-menu command.
+#[derive(Clone, Copy)]
+enum Action {
+    NewFolder,
+    Rename,
+    Delete,
+    Copy,
+    Cut,
+    Paste,
+}
+
+/// The fixed context-menu rows, in display order.
+const MENU_ACTIONS: [(Action, &str); 6] = [
+    (Action::NewFolder, "New Folder"),
+    (Action::Rename, "Rename"),
+    (Action::Delete, "Delete"),
+    (Action::Copy, "Copy"),
+    (Action::Cut, "Cut"),
+    (Action::Paste, "Paste"),
+];
+
+// --- Overlay geometry ---
+const MENU_W: i32 = 140;
+const MENU_ROW_H: i32 = 24;
+const MENU_H: i32 = MENU_ROW_H * MENU_ACTIONS.len() as i32;
+const DLG_W: i32 = 320;
+const DLG_H: i32 = 96;
+
+/// Whether `a` is applicable given the current selection / clipboard state.
+fn action_enabled(a: Action, files: &Files) -> bool {
+    match a {
+        Action::NewFolder => true,
+        Action::Rename | Action::Delete | Action::Copy | Action::Cut => files.selected.is_some(),
+        Action::Paste => files.clip.is_some(),
+    }
+}
+
+/// Clamp a menu opened at `(mx, my)` so it stays fully inside the window.
+fn menu_origin(mx: i32, my: i32) -> (i32, i32) {
+    let ox = mx.min(W as i32 - MENU_W - 2).max(2);
+    let oy = my.min(H as i32 - MENU_H - 2).max(2);
+    (ox, oy)
+}
+
+/// The menu row a client-local pointer `(lx, ly)` landed on, if inside the menu.
+fn menu_hit(mx: i32, my: i32, lx: i32, ly: i32) -> Option<usize> {
+    let (ox, oy) = menu_origin(mx, my);
+    if lx < ox || lx >= ox + MENU_W || ly < oy || ly >= oy + MENU_H {
+        return None;
+    }
+    let row = ((ly - oy) / MENU_ROW_H) as usize;
+    if row < MENU_ACTIONS.len() {
+        Some(row)
+    } else {
+        None
+    }
+}
+
+/// Draw the context menu at its clamped origin.
+fn draw_menu(s: &mut Surface, font: &Font, files: &Files, mx: i32, my: i32) {
+    let (ox, oy) = menu_origin(mx, my);
+    s.fill_rect(ox as f32, oy as f32, MENU_W as f32, MENU_H as f32, HEADER_BG);
+    s.stroke_rect(ox as f32, oy as f32, MENU_W as f32, MENU_H as f32, 1.0, ACCENT);
+    for (i, (action, label)) in MENU_ACTIONS.iter().enumerate() {
+        let ry = oy + i as i32 * MENU_ROW_H;
+        let color = if action_enabled(*action, files) { LABEL } else { MUTED };
+        draw_text(s, font, ox + 10, ry + MENU_ROW_H - 8, 13.0, label, color);
+    }
+}
+
+/// Draw a centered dialog box (bg + accent border) and return its origin.
+fn draw_dialog(s: &mut Surface) -> (i32, i32) {
+    let ox = (W as i32 - DLG_W) / 2;
+    let oy = (H as i32 - DLG_H) / 2;
+    s.fill_rect(0.0, 0.0, W as f32, H as f32, Color::rgba(0, 0, 0, 0x70)); // scrim
+    s.fill_rect(ox as f32, oy as f32, DLG_W as f32, DLG_H as f32, HEADER_BG);
+    s.stroke_rect(ox as f32, oy as f32, DLG_W as f32, DLG_H as f32, 1.0, ACCENT);
+    (ox, oy)
+}
+
+/// Draw the text-entry overlay (New Folder / Rename) with the current buffer.
+fn draw_text_box(s: &mut Surface, font: &Font, rename: bool, buf: &str) {
+    let (ox, oy) = draw_dialog(s);
+    let title = if rename { "Rename to:" } else { "New folder name:" };
+    draw_text(s, font, ox + 14, oy + 26, 14.0, title, ACCENT);
+    // Input field.
+    let fx = ox + 14;
+    let fy = oy + 38;
+    let fw = DLG_W - 28;
+    s.fill_rect(fx as f32, fy as f32, fw as f32, 22.0, BG);
+    s.stroke_rect(fx as f32, fy as f32, fw as f32, 22.0, 1.0, MUTED);
+    let shown = fit_label(font, buf, 13.0, (fw - 12) as f32);
+    draw_text(s, font, fx + 6, fy + 16, 13.0, &shown, LABEL);
+    // Caret after the text.
+    let cw = text_width(font, &shown, 13.0);
+    let cx = fx + 6 + round_i32(cw);
+    s.fill_rect(cx as f32, (fy + 4) as f32, 1.0, 14.0, LABEL);
+    draw_text(s, font, ox + 14, oy + DLG_H - 10, 11.0, "[Enter] ok   [Esc] cancel", MUTED);
+}
+
+/// Draw the delete-confirmation overlay for the selected entry.
+fn draw_confirm(s: &mut Surface, font: &Font, files: &Files) {
+    let (ox, oy) = draw_dialog(s);
+    draw_text(s, font, ox + 14, oy + 26, 14.0, "Delete this file?", ACCENT);
+    let name = files
+        .selected
+        .and_then(|i| files.items.get(i))
+        .map(|it| it.name.as_str())
+        .unwrap_or("");
+    let shown = fit_label(font, name, 13.0, (DLG_W - 28) as f32);
+    draw_text(s, font, ox + 14, oy + 50, 13.0, &shown, LABEL);
+    draw_text(s, font, ox + 14, oy + DLG_H - 10, 11.0, "[Enter] delete   [Esc] cancel", MUTED);
 }
 
 
@@ -466,7 +719,8 @@ pub extern "C" fn _start() -> ! {
     };
     let icons = Icons::load();
     let mut files = Files::new();
-    render(px, &font, &files, &icons);
+    let mut mode = Mode::Browse;
+    render(px, &font, &files, &icons, &mode);
 
     let mut rx = [0u8; 256];
 
@@ -543,9 +797,11 @@ pub extern "C" fn _start() -> ! {
         libdunit::exit(6);
     }
 
-    // 9) Interactive loop: pointer-down selects a cell; the ".." cell navigates
-    //    up, and a second click on a selected directory enters it. Clicking
-    //    empty space clears the selection. Any change repaints the buffer.
+    // 9) Interactive loop. Left-click selects / opens; the ".." cell navigates
+    //    up. Right-click (button=1) opens a context menu whose rows drive the
+    //    file operations (New Folder / Rename / Delete / Copy / Cut / Paste).
+    //    Text-entry and delete-confirm overlays consume IN_KEY. Any state change
+    //    repaints the buffer.
     loop {
         let n = libdunit::ipc_recv_blocking(&mut rx, 0);
         if n < 8 || u32::from_le_bytes([rx[0], rx[1], rx[2], rx[3]]) != INPUT_MAGIC {
@@ -555,33 +811,172 @@ pub extern "C" fn _start() -> ! {
         if kind == IN_QUIT {
             break;
         }
+        let lx = i32::from_le_bytes([rx[8], rx[9], rx[10], rx[11]]);
+        let ly = i32::from_le_bytes([rx[12], rx[13], rx[14], rx[15]]);
+        let button = i32::from_le_bytes([rx[16], rx[17], rx[18], rx[19]]);
+        let mut dirty = false;
+
         if kind == IN_DOWN {
-            let lx = i32::from_le_bytes([rx[8], rx[9], rx[10], rx[11]]);
-            let ly = i32::from_le_bytes([rx[12], rx[13], rx[14], rx[15]]);
-            let mut dirty = false;
-            match hit_cell(&files, lx, ly) {
-                Some(Hit::Parent) => {
-                    files.go_parent();
-                    dirty = true;
-                }
-                Some(Hit::Item(ii)) => {
-                    if files.selected == Some(ii) && files.items[ii].is_dir() {
-                        files.open(ii);
+            // Snapshot the mode kind so we can freely reassign `mode` below.
+            enum Mk {
+                Browse,
+                Menu(i32, i32),
+                Text,
+                Confirm,
+            }
+            let mk = match &mode {
+                Mode::Browse => Mk::Browse,
+                Mode::Menu { mx, my } => Mk::Menu(*mx, *my),
+                Mode::Text { .. } => Mk::Text,
+                Mode::Confirm => Mk::Confirm,
+            };
+            match mk {
+                Mk::Browse => {
+                    if button == 1 {
+                        // Right-click: select the cell under the cursor (if any)
+                        // so item-specific actions target it, then open the menu.
+                        if let Some(Hit::Item(ii)) = hit_cell(&files, lx, ly) {
+                            files.selected = Some(ii);
+                        }
+                        mode = Mode::Menu { mx: lx, my: ly };
+                        dirty = true;
                     } else {
-                        files.selected = Some(ii);
+                        match hit_cell(&files, lx, ly) {
+                            Some(Hit::Parent) => {
+                                files.go_parent();
+                                dirty = true;
+                            }
+                            Some(Hit::Item(ii)) => {
+                                if files.selected == Some(ii) && files.items[ii].is_dir() {
+                                    files.open(ii);
+                                } else {
+                                    files.selected = Some(ii);
+                                }
+                                dirty = true;
+                            }
+                            None => {
+                                if files.selected.is_some() {
+                                    files.selected = None;
+                                    dirty = true;
+                                }
+                            }
+                        }
                     }
+                }
+                Mk::Menu(mx, my) => {
+                    match menu_hit(mx, my, lx, ly) {
+                        Some(row) => {
+                            let (action, _) = MENU_ACTIONS[row];
+                            if action_enabled(action, &files) {
+                                match action {
+                                    Action::NewFolder => {
+                                        mode = Mode::Text { rename: false, buf: String::new() };
+                                    }
+                                    Action::Rename => {
+                                        let cur = files
+                                            .selected
+                                            .map(|i| files.items[i].name.clone())
+                                            .unwrap_or_default();
+                                        mode = Mode::Text { rename: true, buf: cur };
+                                    }
+                                    Action::Delete => mode = Mode::Confirm,
+                                    Action::Copy => {
+                                        files.clip_selected(false);
+                                        mode = Mode::Browse;
+                                    }
+                                    Action::Cut => {
+                                        files.clip_selected(true);
+                                        mode = Mode::Browse;
+                                    }
+                                    Action::Paste => {
+                                        files.paste();
+                                        mode = Mode::Browse;
+                                    }
+                                }
+                            } else {
+                                mode = Mode::Browse;
+                            }
+                            dirty = true;
+                        }
+                        None => {
+                            // Click outside the menu dismisses it.
+                            mode = Mode::Browse;
+                            dirty = true;
+                        }
+                    }
+                }
+                Mk::Text => {
+                    // A click outside the text field cancels the entry.
+                    mode = Mode::Browse;
                     dirty = true;
                 }
-                None => {
-                    if files.selected.is_some() {
+                Mk::Confirm => {}
+            }
+        } else if kind == IN_KEY {
+            let ascii = rx[16];
+            let mut transition: Option<Mode> = None;
+            let mut do_mkdir: Option<String> = None;
+            let mut do_rename: Option<String> = None;
+            let mut do_delete = false;
+            match &mut mode {
+                Mode::Text { rename, buf } => {
+                    if ascii == KEY_ESC {
+                        transition = Some(Mode::Browse);
+                    } else if ascii == KEY_ENTER_LF || ascii == KEY_ENTER_CR {
+                        if *rename {
+                            do_rename = Some(buf.clone());
+                        } else {
+                            do_mkdir = Some(buf.clone());
+                        }
+                        transition = Some(Mode::Browse);
+                    } else if ascii == KEY_BACKSPACE || ascii == KEY_DEL {
+                        buf.pop();
+                        dirty = true;
+                    } else if (0x20..0x7f).contains(&ascii) {
+                        buf.push(ascii as char);
+                        dirty = true;
+                    }
+                }
+                Mode::Confirm => {
+                    if ascii == KEY_ENTER_LF || ascii == KEY_ENTER_CR {
+                        do_delete = true;
+                        transition = Some(Mode::Browse);
+                    } else if ascii == KEY_ESC {
+                        transition = Some(Mode::Browse);
+                    }
+                }
+                Mode::Menu { .. } => {
+                    if ascii == KEY_ESC {
+                        transition = Some(Mode::Browse);
+                    }
+                }
+                Mode::Browse => {
+                    if ascii == KEY_ESC && files.selected.is_some() {
                         files.selected = None;
                         dirty = true;
                     }
                 }
             }
-            if dirty {
-                render(px, &font, &files, &icons);
+            if let Some(name) = do_mkdir {
+                files.make_dir(&name);
+                dirty = true;
             }
+            if let Some(name) = do_rename {
+                files.rename_selected(&name);
+                dirty = true;
+            }
+            if do_delete {
+                files.delete_selected();
+                dirty = true;
+            }
+            if let Some(m) = transition {
+                mode = m;
+                dirty = true;
+            }
+        }
+
+        if dirty {
+            render(px, &font, &files, &icons, &mode);
         }
     }
 

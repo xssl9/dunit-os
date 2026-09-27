@@ -1809,6 +1809,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     // injection lands in the terminal (topmost) rather than a static client.
     let initial_wins = wins.len();
     let mut prev_left = false;
+    let mut prev_right = false;
     let mut drag: Option<(usize, i32, i32)> = None; // (win index, off_x, off_y)
     let mut pressed_win: Option<usize> = None; // window that captured the press
     let mut input_focus: Option<usize> = None; // window under the pointer
@@ -1940,6 +1941,25 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         let left = m.left();
         let press = left && !prev_left;
         let release = !left && prev_left;
+        let right = m.right();
+        let rpress = right && !prev_right;
+
+        // --- Right-button press: forward to the content window under the cursor
+        // as IN_DOWN with button=1 (context-menu trigger). Panel/dock/title are
+        // shell-owned and ignore the right button; a right-click there is a no-op.
+        if rpress && !menu_open && my >= ly.panel_h && mx >= ly.dock_w {
+            let mut zi = z.len();
+            while zi > 0 {
+                zi -= 1;
+                let wi = z[zi];
+                if wins[wi].alive && wins[wi].ws == current_ws && wins[wi].in_content(mx, my) {
+                    z.retain(|&i| i != wi);
+                    z.push(wi);
+                    send_input(wins[wi].pid, IN_DOWN, mx - wins[wi].cx, my - wins[wi].cy, 1);
+                    break;
+                }
+            }
+        }
 
         // --- Button press edge: menu first, then panel, then windows ---
         if press && menu_open {
@@ -2107,6 +2127,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             pressed_win = None;
         }
         prev_left = left;
+        prev_right = right;
 
         // Stop if every window was closed.
         if !wins.iter().any(|w| w.alive) {
