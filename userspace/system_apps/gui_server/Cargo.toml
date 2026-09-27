@@ -13,6 +13,7 @@ edition = "2021"
 libdunit = { path = "../../libdunit" }
 gui_protocol_v1 = { path = "../../../protocols/gui-v1" }
 dwm_settings = { path = "../../dwm_settings" }
+dunit_text = { path = "../../../runtime/dunit-text" }
 
 [[bin]]
 name = "gui_server"

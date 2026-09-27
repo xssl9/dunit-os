@@ -26,6 +26,8 @@ use gui_protocol_v1::Opcode;
 use dwm_settings as settings;
 use settings::{Layout, Theme};
 
+use dunit_text::Font;
+
 #[panic_handler]
 fn panic(_: &PanicInfo) -> ! {
     // No unwinding in userspace: report and exit non-zero.
@@ -1458,6 +1460,89 @@ fn two_digits(out: &mut [u8], off: usize, v: u64) {
     out[off + 1] = b'0' + (v % 10) as u8;
 }
 
+// --- Crisp TTF text for the shell (panel titles, window titles, tray) --------
+// The 3x5 bitmap font above stays for tiny numeric labels (ws pips, taskbar
+// numbers, dock initials); everything reference-facing now renders in the real
+// desktop font so it reads like the mockup.
+
+/// The desktop font, embedded in the ELF as a last-known-good fallback. The
+/// live font path is a config knob (`[desktop] font`); see `load_font`.
+static FONT_BYTES: &[u8] = include_bytes!("../../../../assets/fonts/DejaVuSans.ttf");
+
+/// Load the configured TTF from the VFS, falling back to `FONT_BYTES`. `None`
+/// only if even the embedded font fails to parse — then the shell silently
+/// keeps its 3x5 labels and skips the new crisp text.
+fn load_font() -> Option<Font> {
+    let cfg = settings::load();
+    if let Some(bytes) = libdunit::read_binary(cfg.desktop.font.as_str(), 4 * 1024 * 1024) {
+        if let Ok(f) = Font::parse(bytes) {
+            return Some(f);
+        }
+    }
+    Font::parse(FONT_BYTES.to_vec()).ok()
+}
+
+fn round_i32(v: f32) -> i32 {
+    if v <= 0.0 {
+        0
+    } else {
+        (v + 0.5) as i32
+    }
+}
+
+/// Total advance width of `text` at `px`, rounded to whole pixels.
+fn text_width_ttf(font: &Font, text: &str, px: f32) -> i32 {
+    round_i32(font.layout_line(text, px).1)
+}
+
+/// Draw one line of TTF `text` into the back buffer with its left edge at `x`
+/// and baseline at `baseline`, blending each glyph's 8-bit coverage as alpha
+/// over `color` (0x00RRGGBB). Returns the x just past the last glyph.
+fn draw_text_ttf(
+    back: &mut [u32],
+    bw: usize,
+    bh: usize,
+    font: &Font,
+    x: i32,
+    baseline: i32,
+    px: f32,
+    text: &str,
+    color: u32,
+) -> i32 {
+    let rgb = color & 0x00FF_FFFF;
+    let (glyphs, adv) = font.layout_line(text, px);
+    for g in glyphs {
+        if let Some(bmp) = font.rasterize(g.glyph, px) {
+            let ox = x + round_i32(g.x) + bmp.left;
+            let oy = baseline - bmp.top;
+            for row in 0..bmp.height {
+                for col in 0..bmp.width {
+                    let cov = bmp.coverage[row * bmp.width + col] as u32;
+                    if cov == 0 {
+                        continue;
+                    }
+                    blend_pixel(back, bw, bh, ox + col as i32, oy + row as i32, (cov << 24) | rgb);
+                }
+            }
+        }
+    }
+    x + round_i32(adv)
+}
+
+/// Human-readable window title keyed by the app's `LAUNCH_APPS` index (`Win.app`).
+fn app_title(app: u8) -> &'static str {
+    match app {
+        0 => "Window",
+        1 => "Calculator",
+        2 => "System Monitor",
+        3 => "Files",
+        4 => "Terminal",
+        5 => "Settings",
+        _ => "Window",
+    }
+}
+
+
 /// Per-window compositor state, derived from a `ClientState` but with a live
 /// content origin the user can drag around.
 struct Win {
@@ -1798,6 +1883,16 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         libdunit::println("gui_server: launcher icons loaded (Breeze-Chameleon)");
     } else {
         libdunit::println("gui_server: launcher icons absent — initials fallback");
+    }
+
+    // Crisp TTF for the shell's reference-facing text (window titles, centered
+    // focused title, right-side tray). `None` only if even the embedded font is
+    // unparsable — then those texts are skipped and the 3x5 labels remain.
+    let font = load_font();
+    if font.is_some() {
+        libdunit::println("gui_server: shell font loaded (TTF)");
+    } else {
+        libdunit::println("gui_server: shell font unavailable — 3x5 labels only");
     }
 
     // Build the window model from presented clients, tiling them if their slot
@@ -2283,6 +2378,17 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             // Close box: a small rounded chip in the danger color.
             let sz = w.title_h - 12;
             fill_rrect(&mut back, bw, bh, w.cx + w.sw - sz - 6, w.cy - w.title_h + 6, sz, sz, fx.corner_radius.min(sz / 2), RR_ALL, ((a as u32) << 24) | (theme.close & 0x00FF_FFFF));
+            // Window title text (TTF), left-aligned in the title bar, clear of the
+            // close chip. Drawn only once the card is nearly solid so it appears
+            // with the surface rather than through the grow-in blend.
+            if a >= 224 {
+                if let Some(f) = font.as_ref() {
+                    let px = 14.0;
+                    let baseline = w.cy - w.title_h / 2 + 5;
+                    let txtcol = if is_focused { 0x00EA_F2EC } else { 0x00A8_B4AC };
+                    draw_text_ttf(&mut back, bw, bh, f, w.cx + 12, baseline, px, app_title(w.app), txtcol);
+                }
+            }
             // Client surface (opaque). Held back until the frame is nearly solid
             // so the grow-in shows a clean card, not a half-blended image.
             if a >= 224 {
@@ -2344,34 +2450,53 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                     theme.taskbtn
                 };
                 fill_rrect_grad(&mut back, bw, bh, bx, by, bw2, bh2, 6, RR_ALL, shade(base, 18), shade(base, -10), 255);
-                let mut label = [0u8; 2];
-                two_digits(&mut label, 0, (wi as u64) + 1);
-                draw_text_3x5(&mut back, bw, bh, bx + 8, by + 5, 2, theme.panel_text, &label);
+                // Label the button with the app's name (TTF) so the panel reads
+                // like the reference; fall back to the 1-based window number when
+                // the shell font is unavailable.
+                if let Some(f) = font.as_ref() {
+                    let px = 13.0;
+                    let baseline = by + bh2 / 2 + 4;
+                    let tcol = if focused == Some(wi) { 0x00EA_F2EC } else { theme.panel_text };
+                    draw_text_ttf(&mut back, bw, bh, f, bx + 10, baseline, px, app_title(wins[wi].app), tcol);
+                } else {
+                    let mut label = [0u8; 2];
+                    two_digits(&mut label, 0, (wi as u64) + 1);
+                    draw_text_3x5(&mut back, bw, bh, bx + 8, by + 5, 2, theme.panel_text, &label);
+                }
                 slot += 1;
             }
         }
-        // Uptime clock (MM:SS) on the right.
+        // Right-side system tray: live RAM usage, running-process count and the
+        // uptime clock (MM:SS), right-aligned. TTF when the shell font is loaded;
+        // otherwise just the 3x5 clock (last-known-good).
         {
             let mut stats = libdunit::SystemStats::default();
-            let secs = if libdunit::get_system_stats(&mut stats) >= 0 {
-                stats.uptime_ticks / 100
+            let have = libdunit::get_system_stats(&mut stats) >= 0;
+            let secs = if have { stats.uptime_ticks / 100 } else { 0 };
+            if let Some(f) = font.as_ref() {
+                let ram_pct = if have && stats.pmm_total_bytes > 0 {
+                    (stats.pmm_used_bytes * 100 / stats.pmm_total_bytes) as u32
+                } else {
+                    0
+                };
+                let tray = alloc::format!(
+                    "RAM {}%   {} proc   {:02}:{:02}",
+                    ram_pct,
+                    stats.process_running,
+                    (secs / 60) % 100,
+                    secs % 60
+                );
+                let px = 14.0;
+                let tw = text_width_ttf(f, &tray, px);
+                let baseline = ly.panel_h / 2 + 5;
+                draw_text_ttf(&mut back, bw, bh, f, bw as i32 - tw - 14, baseline, px, &tray, theme.panel_text);
             } else {
-                0
-            };
-            let mut clk = *b"00:00";
-            two_digits(&mut clk, 0, (secs / 60) % 100);
-            two_digits(&mut clk, 3, secs % 60);
-            let clk_w = clk.len() as i32 * (GLYPH_W + 1) * 3;
-            draw_text_3x5(
-                &mut back,
-                bw,
-                bh,
-                bw as i32 - clk_w - 12,
-                6,
-                3,
-                theme.panel_text,
-                &clk,
-            );
+                let mut clk = *b"00:00";
+                two_digits(&mut clk, 0, (secs / 60) % 100);
+                two_digits(&mut clk, 3, secs % 60);
+                let clk_w = clk.len() as i32 * (GLYPH_W + 1) * 3;
+                draw_text_3x5(&mut back, bw, bh, bw as i32 - clk_w - 12, 6, 3, theme.panel_text, &clk);
+            }
         }
 
         // --- DWM dock: acrylic strip of pinned launchers down the left edge ---

@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "dunit_text"
+version = "0.1.0"
+
+[[package]]
 name = "dwm_settings"
 version = "0.1.0"
 dependencies = [
@@ -17,6 +21,7 @@ version = "0.1.0"
 name = "gui_server"
 version = "0.1.0"
 dependencies = [
+ "dunit_text",
  "dwm_settings",
  "gui_protocol_v1",
  "libdunit",
