@@ -34,6 +34,11 @@ pub struct Theme {
     pub taskbtn_focused: u32,
     pub menu: u32,
     pub menu_hover: u32,
+    /// Title-bar text on a focused window (the label the compositor draws over
+    /// the title bar). Was a hardcoded 0x00EAF2EC in the compositor.
+    pub title_text_focused: u32,
+    /// Title-bar / taskbar text on an unfocused window. Was 0x00A8B4AC.
+    pub title_text_unfocused: u32,
 }
 
 impl Theme {
@@ -53,6 +58,8 @@ impl Theme {
             taskbtn_focused: 0xFF45475A,
             menu: 0xFF11111B,
             menu_hover: 0xFF45475A,
+            title_text_focused: 0xFFEAF2EC,
+            title_text_unfocused: 0xFFA8B4AC,
         }
     }
 
@@ -76,6 +83,8 @@ impl Theme {
             "taskbtn_focused" => &mut self.taskbtn_focused,
             "menu" => &mut self.menu,
             "menu_hover" => &mut self.menu_hover,
+            "title_text_focused" => &mut self.title_text_focused,
+            "title_text_unfocused" => &mut self.title_text_unfocused,
             _ => return,
         };
         *slot = color;
@@ -97,6 +106,10 @@ pub struct Layout {
     pub dock_w: i32,
     pub ws_w: i32,
     pub max_windows: usize,
+    /// Point size of the TTF window/tray title text. Was a hardcoded 14.0.
+    pub title_font_px: i32,
+    /// Point size of the TTF taskbar-button text. Was a hardcoded 13.0.
+    pub panel_font_px: i32,
 }
 
 impl Layout {
@@ -114,6 +127,8 @@ impl Layout {
             dock_w: 48,
             ws_w: 22,
             max_windows: 8,
+            title_font_px: 14,
+            panel_font_px: 13,
         }
     }
 
@@ -137,6 +152,8 @@ impl Layout {
             "dock_w" => self.dock_w = n as i32,
             "ws_w" => self.ws_w = n as i32,
             "max_windows" => self.max_windows = (n as usize).clamp(1, 32),
+            "title_font_px" => self.title_font_px = (n as i32).clamp(6, 64),
+            "panel_font_px" => self.panel_font_px = (n as i32).clamp(6, 64),
             _ => {}
         }
     }
@@ -334,14 +351,150 @@ impl Settings {
 
 const CONFIG_PATH: &str = "/system/share/dwm/default.toml";
 
+/// Upper bound on registered applications (safety cap, not a pixel count): a
+/// malformed config cannot make the compositor allocate an unbounded registry.
+pub const MAX_APPS: usize = 32;
+/// Upper bound on virtual workspaces the switcher will lay out.
+pub const MAX_WS: usize = 9;
+
+/// One registered application — an `[application.<id>]` TOML table. This is the
+/// data that replaces the compositor's old hardcoded `LAUNCH_APPS`/`app_title`:
+/// adding an app is adding a table here, never editing gui_server. `exec`/`icon`/
+/// `label` default to derivations of `id` so a minimal entry is just an `id`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AppEntry {
+    /// Registry key from `[application.<id>]`; also the default exec/icon stem.
+    pub id: String,
+    /// Human-readable window/taskbar title.
+    pub name: String,
+    /// ELF to spawn (resolved by `libdunit::spawn` against /app). Defaults to `id`.
+    pub exec: String,
+    /// Icon: a stem resolved as `<icon_theme>/<icon>.rgba`, or an absolute VFS
+    /// path if it contains a '/'. Defaults to `id`.
+    pub icon: String,
+    /// 1-4 char dock/menu initials fallback when no icon renders. Derived from
+    /// `name` (uppercased) when omitted.
+    pub label: String,
+}
+
+/// The data-driven desktop application model: the registry plus the ordered
+/// dock / launcher / autostart lists (indices into `apps`) and the workspace
+/// count. Built from `[application.*]`, `[dock]`, `[launcher]`, `[startup]` and
+/// `[workspaces]`. Replaces the compositor's hardcoded `LAUNCH_APPS`/`WS_COUNT`.
+#[derive(Clone)]
+pub struct Applications {
+    pub apps: Vec<AppEntry>,
+    /// Dock icons, in order, as indices into `apps`.
+    pub dock: Vec<usize>,
+    /// Launcher-menu entries, in order, as indices into `apps`.
+    pub launcher: Vec<usize>,
+    /// Autostart spawn list, in order, as indices into `apps` (may repeat).
+    pub startup: Vec<usize>,
+    /// Number of virtual workspaces.
+    pub workspaces: usize,
+}
+
+impl AppEntry {
+    /// Build a registry entry; `exec`/`icon` default to `id`, `label` to `label`.
+    fn new(id: &str, name: &str, label: &str) -> AppEntry {
+        AppEntry {
+            id: String::from(id),
+            name: String::from(name),
+            exec: String::from(id),
+            icon: String::from(id),
+            label: String::from(label),
+        }
+    }
+}
+
+impl Applications {
+    /// The built-in baseline: the exact set the compositor used to hardcode in
+    /// `LAUNCH_APPS`/`app_title`/`WS_COUNT` (the last-known-good default).
+    pub fn baseline() -> Applications {
+        let apps = alloc::vec![
+            AppEntry::new("gui_client", "Window", "WIN"),
+            AppEntry::new("gui_calc", "Calculator", "CALC"),
+            AppEntry::new("gui_stat", "System Monitor", "STAT"),
+            AppEntry::new("gui_files", "Files", "FILE"),
+            AppEntry::new("gui_terminal", "Terminal", "TERM"),
+            AppEntry::new("gui_settings", "Settings", "SET"),
+        ];
+        Applications {
+            dock: alloc::vec![0, 1, 2, 3, 4, 5],
+            launcher: alloc::vec![0, 1, 2, 3, 4, 5],
+            startup: alloc::vec![0, 0, 4], // gui_client, gui_client, gui_terminal
+            workspaces: 5,
+            apps,
+        }
+    }
+}
+
+/// The whole resolved desktop configuration: scalar `settings` (theme/layout/
+/// effects/desktop) plus the `apps` model, and a `valid` flag for last-known-good
+/// handling. A live reload keeps its previous `Config` when a candidate is
+/// `!valid` (garbage/empty file), so a bad edit never wipes a working desktop.
+#[derive(Clone)]
+pub struct Config {
+    pub settings: Settings,
+    pub apps: Applications,
+    pub valid: bool,
+}
+
+impl Config {
+    /// The pure built-in default (no config file): baselines, marked valid.
+    pub fn defaults() -> Config {
+        Config {
+            settings: Settings::defaults(),
+            apps: Applications::baseline(),
+            valid: true,
+        }
+    }
+}
+
 /// Serialize `settings` to the TOML dialect and write it back to `CONFIG_PATH`
 /// (slice C: the write half of the GUI<->TOML round-trip). Returns whether the
 /// write succeeded. The file is an `Owned` MemFS node so this persists for the
 /// session (RAM only until DunitFS v2). The caller then signals the compositor
 /// to reload. Never panics: a write error just returns `false`.
 pub fn save(settings: &Settings) -> bool {
-    let text = to_toml(settings);
+    let mut text = to_toml(settings);
+    // Preserve everything the settings app does not own — the `[application.*]`,
+    // `[dock]`, `[launcher]`, `[startup]` and `[workspaces]` tables live only in
+    // the file, so a settings-only rewrite must carry them over verbatim or a
+    // save would silently wipe the app registry. `to_toml` re-emits the core
+    // theme/layout/effects/desktop tables; we append the rest as-is.
+    if let Some(existing) = read_file(CONFIG_PATH) {
+        let extra = extra_sections(&existing);
+        if !extra.is_empty() {
+            if !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push('\n');
+            text.push_str(&extra);
+        }
+    }
     libdunit::write_string(CONFIG_PATH, &text).is_ok()
+}
+
+/// Collect the raw text of every top-level table that `to_toml` does NOT emit
+/// (anything whose header's first segment is not theme/layout/effects/desktop),
+/// so `save` can round-trip user-authored `[application.*]`/`[dock]`/etc. tables
+/// it has no typed knowledge of. Preamble before the first `[header]` is dropped.
+fn extra_sections(text: &str) -> String {
+    let mut out = String::new();
+    let mut keep = false;
+    for raw in text.lines() {
+        let trimmed = strip_comment(raw).trim();
+        if let Some(name) = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            let base = name.trim().split('.').next().unwrap_or("").trim();
+            keep = !matches!(base, "theme" | "layout" | "effects" | "desktop");
+        }
+        if keep {
+            out.push_str(raw);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 /// Read + parse the system DWM config, overlaying it on the baseline. Never
@@ -390,7 +543,177 @@ pub fn parse_into(text: &str, settings: &mut Settings) {
     }
 }
 
+/// Read + parse the whole desktop config — scalar `settings` *and* the
+/// application model — with last-known-good semantics. Never fails: an absent
+/// file yields the pure baseline (marked `valid`); a present-but-garbage file
+/// yields `valid == false`, so a live reload can keep the previous good `Config`
+/// instead of applying junk. This is the authoritative desktop-config entry
+/// point; `load()` remains for callers that only need the scalar `Settings`.
+pub fn load_config() -> Config {
+    let mut settings = Settings::defaults();
+    let Some(text) = read_file(CONFIG_PATH) else {
+        return Config::defaults();
+    };
+    settings.from_file = true;
+    parse_into(&text, &mut settings);
+
+    let (apps, saw_apps) = parse_apps(&text);
+
+    // A file counts as a usable config when it changed *something* — either a
+    // recognised scalar key or an `[application.*]` table. A file that parsed to
+    // nothing (empty/garbage) is `!valid`, and the reload path keeps last-good.
+    let valid = apps.workspaces >= 1
+        && apps.workspaces <= MAX_WS
+        && !apps.apps.is_empty()
+        && apps.apps.len() <= MAX_APPS
+        && (settings.applied > 0 || saw_apps);
+
+    Config { settings, apps, valid }
+}
+
+/// Build the `Applications` model from a config document. Returns the model and
+/// whether any `[application.<id>]` table was present. With none, the built-in
+/// baseline registry is returned (an old theme-only config still yields the
+/// standard desktop) and the caller judges validity from the scalar `applied`.
+///
+/// Two passes over the tiny-TOML lines: the first registers every
+/// `[application.<id>]` (first-seen order) and applies its `name`/`exec`/`icon`/
+/// `label` keys plus the raw `[dock]`/`[launcher]`/`[startup]` `entries` arrays
+/// and `[workspaces].count`; the second resolves those id-lists into indices
+/// (unknown ids dropped). Absent `[dock]`/`[launcher]` default to the whole
+/// registry in order; absent `[startup]` autostarts nothing.
+fn parse_apps(text: &str) -> (Applications, bool) {
+    let mut apps: Vec<AppEntry> = Vec::new();
+    let mut dock_ids: Vec<String> = Vec::new();
+    let mut launcher_ids: Vec<String> = Vec::new();
+    let mut startup_ids: Vec<String> = Vec::new();
+    let (mut have_dock, mut have_launcher, mut have_startup) = (false, false, false);
+    let mut workspaces: usize = 1;
+
+    let mut section = String::new(); // full header, e.g. "application.gui_files"
+    for raw in text.lines() {
+        let line = strip_comment(raw).trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(name) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            section.clear();
+            section.push_str(name.trim());
+            // Register the id eagerly so even an empty `[application.x]` counts.
+            if let Some(id) = section.strip_prefix("application.") {
+                let id = id.trim();
+                if !id.is_empty() && apps.len() < MAX_APPS && !apps.iter().any(|a| a.id == id) {
+                    apps.push(AppEntry::new(id, id, ""));
+                }
+            }
+            continue;
+        }
+        let Some(eq) = line.find('=') else {
+            continue;
+        };
+        let key = line[..eq].trim();
+        let rhs = line[eq + 1..].trim();
+
+        if let Some(id) = section.strip_prefix("application.") {
+            let id = id.trim();
+            let value = unquote(rhs);
+            if let Some(app) = apps.iter_mut().find(|a| a.id == id) {
+                match key {
+                    "name" => app.name = String::from(value),
+                    "exec" => app.exec = String::from(value),
+                    "icon" => app.icon = String::from(value),
+                    "label" => app.label = String::from(value),
+                    _ => {}
+                }
+            }
+        } else if section == "dock" && key == "entries" {
+            dock_ids = parse_str_array(rhs);
+            have_dock = true;
+        } else if section == "launcher" && key == "entries" {
+            launcher_ids = parse_str_array(rhs);
+            have_launcher = true;
+        } else if section == "startup" && key == "entries" {
+            startup_ids = parse_str_array(rhs);
+            have_startup = true;
+        } else if section == "workspaces" && (key == "count" || key == "n") {
+            if let Some(n) = parse_uint(rhs) {
+                workspaces = (n as usize).clamp(1, MAX_WS);
+            }
+        }
+    }
+
+    if apps.is_empty() {
+        // No registry in the file — fall back to the built-in desktop.
+        return (Applications::baseline(), false);
+    }
+
+    // Fill any label left empty from the (possibly overridden) name.
+    for app in apps.iter_mut() {
+        if app.label.is_empty() {
+            app.label = default_label(&app.name);
+        }
+    }
+
+    let resolve = |ids: &[String], apps: &[AppEntry]| -> Vec<usize> {
+        let mut out = Vec::new();
+        for id in ids {
+            if let Some(i) = apps.iter().position(|a| &a.id == id) {
+                out.push(i);
+            }
+        }
+        out
+    };
+    let all: Vec<usize> = (0..apps.len()).collect();
+    let dock = if have_dock { resolve(&dock_ids, &apps) } else { all.clone() };
+    let launcher = if have_launcher { resolve(&launcher_ids, &apps) } else { all.clone() };
+    let startup = if have_startup { resolve(&startup_ids, &apps) } else { Vec::new() };
+
+    (Applications { apps, dock, launcher, startup, workspaces }, true)
+}
+
+/// Parse a single-line TOML string array (`["a", "b"]`) into its elements.
+/// Tolerant: absent brackets are ignored, blank/empty elements are dropped.
+fn parse_str_array(value: &str) -> Vec<String> {
+    let t = value.trim();
+    let t = t.strip_prefix('[').unwrap_or(t);
+    let t = t.strip_suffix(']').unwrap_or(t);
+    let mut out = Vec::new();
+    for part in t.split(',') {
+        let s = unquote(part.trim());
+        if !s.is_empty() {
+            out.push(String::from(s));
+        }
+    }
+    out
+}
+
+/// Derive a 1-4 char uppercase dock/menu label from a display name (fallback for
+/// an `[application.*]` table with no explicit `label`). Takes leading
+/// alphanumerics of the first word; `?` when the name has none.
+fn default_label(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            for u in c.to_uppercase() {
+                if out.len() < 4 {
+                    out.push(u);
+                }
+            }
+        } else if !out.is_empty() {
+            break;
+        }
+        if out.len() >= 4 {
+            break;
+        }
+    }
+    if out.is_empty() {
+        out.push('?');
+    }
+    out
+}
+
 /// Drop a trailing `#`/`//` comment, but only outside a quoted string so a `#`
+
 /// inside a color literal survives.
 fn strip_comment(line: &str) -> &str {
     let bytes = line.as_bytes();
@@ -572,6 +895,8 @@ pub fn to_toml(s: &Settings) -> String {
     push_color(&mut out, "taskbtn_focused", s.theme.taskbtn_focused);
     push_color(&mut out, "menu", s.theme.menu);
     push_color(&mut out, "menu_hover", s.theme.menu_hover);
+    push_color(&mut out, "title_text_focused", s.theme.title_text_focused);
+    push_color(&mut out, "title_text_unfocused", s.theme.title_text_unfocused);
     out.push('\n');
 
     out.push_str("[layout]\n");
@@ -586,6 +911,8 @@ pub fn to_toml(s: &Settings) -> String {
     push_int(&mut out, "dock_w", s.layout.dock_w as i64);
     push_int(&mut out, "ws_w", s.layout.ws_w as i64);
     push_int(&mut out, "max_windows", s.layout.max_windows as i64);
+    push_int(&mut out, "title_font_px", s.layout.title_font_px as i64);
+    push_int(&mut out, "panel_font_px", s.layout.panel_font_px as i64);
     out.push('\n');
 
     out.push_str("[effects]\n");

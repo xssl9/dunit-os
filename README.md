@@ -60,7 +60,7 @@ Current system apps in `/app`:
 - `runtime_stress` - canonical runtime regression app.
 - `image_demo` - framebuffer drawing demo.
 - `bmp_viewer` - BMP renderer; defaults to `/assets/images/logo.bmp`.
-- `gui_file_manager` - GUI File Manager MVP with real `readdir`/`stat`.
+- `gui_files` - GUI File Manager (gui-v1 userspace client) with real `readdir`/`stat`.
 - `fault_pf` - recoverable page fault test.
 - `fault_ud` - recoverable invalid opcode test.
 

@@ -1212,14 +1212,12 @@ pub enum FdTarget {
 pub enum ProcessOutputSink {
     SerialOnly = 0,
     Terminal = 1,
-    GuiTerminal = 2,
 }
 
 impl ProcessOutputSink {
     fn from_u64(value: u64) -> Self {
         match value {
             1 => Self::Terminal,
-            2 => Self::GuiTerminal,
             _ => Self::SerialOnly,
         }
     }

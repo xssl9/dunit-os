@@ -1,12 +1,12 @@
 # GUI Server, UI Runtime и Dunit DWM
 
-**Status:** PLANNED REWRITE
+**Status:** IN PROGRESS — legacy in-kernel GUI removed (2026-09-27); userspace `gui_server` is the sole desktop
 **Roadmap:** [[../../ROADMAP|ROADMAP]]
 **Depends on:** [[../InProgress/Kernel-Runtime-Prerequisites|Kernel Runtime Prerequisites]] · [[Installed-System|Installed System]]
 
 ## Почему нужен rewrite
 
-Текущий GUI функционален, включая GUI-терминал, но desktop/compositor/window policy/layout/widgets сосредоточены в `kernel/src/ui_loop.rs` и `kernel/src/window_manager.rs`. Геометрия, цвета, приложения и wallpaper dimensions частично hardcoded; raw drawing/input paths слишком широки. Это нельзя стабилизировать как долгосрочный application ABI.
+Исторически desktop/compositor/window policy/layout/widgets были сосредоточены в `kernel/src/ui_loop.rs` и `kernel/src/window_manager.rs`, с частично hardcoded геометрией, цветами, приложениями и wallpaper dimensions и слишком широкими raw drawing/input paths — это нельзя было стабилизировать как долгосрочный application ABI. Этот in-kernel GUI удалён: вся desktop policy теперь в userspace `gui_server` + `dwm_settings`/TOML, а ядро предоставляет только механизм (framebuffer, display/input master, shared buffers, IPC, handles, drivers).
 
 ## Целевая граница
 
@@ -59,7 +59,7 @@ UI Runtime предоставляет retained tree, stable IDs, Row/Column/Grid
 - [ ] M4: DUI/DSS/TOML runtime and DWM feature parity.
 - [ ] Перенести GUI terminal command execution в userspace shell/session/PTY path.
 - [ ] Сохранить panel/dock/theme/window/session settings на user volume.
-- [ ] Удалить legacy GUI из normal boot после parity; оставить узкий recovery path при необходимости.
+- [x] Удалить legacy GUI из normal boot после parity. Legacy in-kernel GUI (`ui_loop.rs`, `window_manager.rs`, `gui/`), фича `legacy_gui`, протокол GUI1 в `libdunit` и 5 legacy-клиентов удалены полностью (2026-09-27); recovery остаётся через terminal-режим (`mode=terminal`).
 
 ## Acceptance
 

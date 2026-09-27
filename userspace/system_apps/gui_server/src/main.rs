@@ -24,7 +24,7 @@ use gui_protocol_v1::wire::Request;
 use gui_protocol_v1::Opcode;
 
 use dwm_settings as settings;
-use settings::{Layout, Theme};
+use settings::{Applications, Layout, Theme};
 
 use dunit_text::Font;
 
@@ -614,8 +614,9 @@ struct ClientState {
     // so it is safe to blit; `win_created` once it owns a Win in the model.
     ready: bool,
     win_created: bool,
-    /// Index into `LAUNCH_APPS` of the app this client runs (0xFF = unknown),
-    /// used to draw a "running" indicator on the matching dock icon.
+    /// Index into the live application registry (`settings::Applications.apps`)
+    /// of the app this client runs (0xFF = unknown/not registered), used to draw
+    /// a "running" indicator on the matching dock icon.
     app: u8,
     /// Workspace (0-based) this client's window lives on, captured from the
     /// active workspace at spawn time. Startup clients default to workspace 0.
@@ -697,20 +698,23 @@ fn handle_client_payload(server: &mut Server, c: &mut ClientState, payload: &[u8
         libdunit::ipc_send(c.pid, reply);
     }
 }
-/// Bring one `gui_client` online: reserve a protocol connection, spawn the ELF,
+/// Bring one client online: reserve a protocol connection, spawn the `exec` ELF,
 /// and hand it the `[our_pid][client_id]` handshake it blocks on at startup. The
 /// returned `ClientState` is *pending* — its buffer is mapped and it becomes
 /// `ready` only once its protocol handshake is pumped (see `pump_clients`). The
 /// `id` is a tint hint only; routing uses the kernel-authenticated sender pid.
+/// `app_idx` is the caller-resolved registry index (0xFF = not in the registry),
+/// stored so the dock can draw a "running" marker on the matching icon.
 fn spawn_client(
     server: &mut Server,
     id: u32,
     slot_x: u32,
     slot_y: u32,
-    app: &str,
+    app_idx: u8,
+    exec: &str,
 ) -> Option<ClientState> {
     let conn = server.connect()?;
-    let pid = libdunit::spawn(app);
+    let pid = libdunit::spawn(exec);
     if pid <= 0 {
         return None;
     }
@@ -719,7 +723,7 @@ fn spawn_client(
     c.conn = conn;
     c.slot_x = slot_x;
     c.slot_y = slot_y;
-    c.app = app_index(app);
+    c.app = app_idx;
     let mut hs = [0u8; 8];
     hs[0..4].copy_from_slice(&libdunit::get_pid().to_le_bytes());
     hs[4..8].copy_from_slice(&id.to_le_bytes());
@@ -727,33 +731,57 @@ fn spawn_client(
     Some(c)
 }
 
-/// Composite two untrusted client ELFs to the screen at the same time. Spawns
-/// both `gui_client` processes, hands each an 8-byte `[our_pid][client_id]`
-/// handshake (the id is only a tint hint for the client), and runs one event
-/// loop. Inbound messages are routed to a per-client `Server` connection by the
-/// KERNEL-AUTHENTICATED sender pid (`ipc_recv_from`), NOT by any client-supplied
-/// field — so one client cannot inject into another's protocol connection. On
-/// every `composite()` we match each FRAME_DONE to its connection and blit that
-/// client's buffer to its own slot. Returns true iff both surfaces present.
+/// Bring up the desktop: autostart the configured `[startup]` apps, prove the
+/// M3 cross-process isolation invariant (≥2 untrusted clients composited
+/// concurrently, routed by KERNEL-AUTHENTICATED sender pid so one cannot inject
+/// into another's connection), then hand off to the interactive session. What
+/// launches at boot is data (`settings::Applications::startup`), so changing the
+/// startup set needs no gui_server edit. Returns true iff the isolation smoke saw
+/// two clients present at once (the baseline config autostarts three).
 fn serve_two_clients() -> bool {
+    let cfg = settings::load_config();
     let mut server = Server::new();
     let mut clients: Vec<ClientState> = Vec::new();
-    let slots = [(300u32, 100u32), (400u32, 220u32)];
-    for i in 0..2 {
-        match spawn_client(&mut server, (i as u32) + 1, slots[i].0, slots[i].1, "gui_client") {
-            Some(c) => clients.push(c),
-            None => return false,
+
+    // Autostart the configured startup apps. Each entry is a registry index; a
+    // stale/out-of-range index is skipped rather than trusted. Initial slots
+    // cascade — the desktop session re-tiles them under the panel/dock anyway.
+    let mut next_id = 1u32;
+    for (k, &ri) in cfg.apps.startup.iter().enumerate() {
+        let Some(entry) = cfg.apps.apps.get(ri) else {
+            continue;
+        };
+        let sx = 300 + (k as u32) * 70;
+        let sy = 100 + (k as u32) * 90;
+        if let Some(c) = spawn_client(&mut server, next_id, sx, sy, ri as u8, entry.exec.as_str()) {
+            clients.push(c);
+            next_id += 1;
         }
     }
+    if clients.is_empty() {
+        // No startup apps (or none spawnable): still raise the shell so the
+        // panel/dock/launcher are usable and can spawn apps on demand.
+        libdunit::println("gui_server: no startup apps to autostart");
+        run_desktop_session(&mut server, &mut clients);
+        return false;
+    }
 
-    // MARKER2
+    // Pump until the isolation invariant is proven: at least two untrusted
+    // clients presented concurrently (or, with a single startup app, that one).
+    // We break the INSTANT the target count is reached — inside the composite —
+    // so any slower startup app (e.g. the terminal, which sets up a pty first)
+    // stays UNpresented here and becomes a runtime-pumped window in the desktop
+    // loop. That is what later fires "gui_server: desktop input ready", so the
+    // keyboard-ready gate keeps working regardless of client presentation order.
+    let target = clients.len().min(2);
     let mut rx = [0u8; 256];
-    for _ in 0..128 {
-        if clients[0].presented && clients[1].presented {
+    let mut presented_total = clients.iter().filter(|c| c.presented).count();
+    'pump: for _ in 0..128 {
+        if presented_total >= target {
             break;
         }
         // Route by the kernel-authenticated sender pid; a client cannot spoof
-        // another's identity, so the two protocol connections stay isolated.
+        // another's identity, so the protocol connections stay isolated.
         let mut sender: u32 = 0;
         let n = libdunit::ipc_recv_blocking_from(&mut rx, &mut sender, 3000);
         if n <= 0 {
@@ -793,6 +821,12 @@ fn serve_two_clients() -> bool {
                             unsafe { core::slice::from_raw_parts(c.buf_ptr, want as usize) };
                         if libdunit::fb_present(data, c.surf_w, c.surf_h, c.slot_x, c.slot_y) == 0 {
                             c.presented = true;
+                            presented_total += 1;
+                            // Stop the instant the invariant holds, leaving the
+                            // rest of the startup set for the runtime pump.
+                            if presented_total >= target {
+                                break 'pump;
+                            }
                         }
                     }
                 }
@@ -800,27 +834,19 @@ fn serve_two_clients() -> bool {
         }
     }
 
-    let both = clients[0].presented && clients[1].presented;
+    let both = presented_total >= 2;
 
-    // Both untrusted windows have presented at least one frame. Hand off to the
-    // interactive desktop session: a persistent compositor loop that owns a
-    // full-screen back buffer, decorates each client surface with a draggable
-    // title bar, routes the real mouse (syscall 60) into focus/raise/drag, and
-    // re-presents every tick. This is the M4 userspace DWM taking over from the
-    // linear M3 smoke.
+    // Hand off to the interactive desktop session: a persistent compositor loop
+    // that owns a full-screen back buffer, decorates each client surface with a
+    // draggable title bar, routes the real mouse (syscall 60) into focus/raise/
+    // drag, and re-presents every tick. This is the M4 userspace DWM taking over
+    // from the linear M3 smoke.
     if both {
-        // Emit the success marker BEFORE the session loop so automated smokes
+        // Emit the isolation marker BEFORE the session loop so automated smokes
         // observe it immediately (headless runs are force-quit after capture).
         libdunit::println("gui_server: served two untrusted clients OK");
-        // Bring up the Stack B terminal as a runtime-pumped startup window so the
-        // desktop has an interactive shell out of the box and the full keyboard
-        // path (compositor -> IN_KEY -> gui_terminal -> pty -> dsh) is exercised
-        // end to end. Best-effort: if it fails to spawn the desktop still runs.
-        if let Some(term) = spawn_client(&mut server, 3, 360, 340, "gui_terminal") {
-            clients.push(term);
-        }
-        run_desktop_session(&mut server, &mut clients);
     }
+    run_desktop_session(&mut server, &mut clients);
 
     for c in clients.iter() {
         if c.mapped_handle != 0 {
@@ -1324,26 +1350,11 @@ fn draw_cursor(buf: &mut [u32], bw: usize, bh: usize, px: i32, py: i32) {
 // from the `[layout]` TOML table); `max_windows` there also caps launcher spawns
 // so a stuck loop cannot fork the machine to death.
 
-/// Launcher menu: label shown in the dropdown paired with the ELF to spawn.
-const LAUNCH_APPS: [(&[u8], &str); 6] = [
-    (b"WIN", "gui_client"),
-    (b"CALC", "gui_calc"),
-    (b"STAT", "gui_stat"),
-    (b"FILE", "gui_files"),
-    (b"TERM", "gui_terminal"),
-    (b"SET", "gui_settings"),
-];
-
-/// Index of `path` in `LAUNCH_APPS`, or 0xFF if it is not a launchable app.
-/// Lets a spawned client be tied back to its dock icon for the running marker.
-fn app_index(path: &str) -> u8 {
-    for (i, (_, p)) in LAUNCH_APPS.iter().enumerate() {
-        if *p == path {
-            return i as u8;
-        }
-    }
-    0xFF
-}
+// The application registry (ids, names, exec paths, icons, labels) and the
+// dock / launcher / autostart lists are no longer hardcoded here: they live in
+// `settings::Applications`, built from the `[application.*]` / `[dock]` /
+// `[launcher]` / `[startup]` TOML tables (baseline in `Applications::baseline`).
+// A window's `app` field is an index into that live registry (0xFF = unknown).
 
 /// Rect of the i-th dock icon (0-based). The dock is a vertical strip down the
 /// left edge, below the top panel; icons are square cells laid out top-down.
@@ -1361,18 +1372,14 @@ fn menu_item_rect(ly: &Layout, i: i32) -> (i32, i32, i32, i32) {
 }
 
 /// Rect of the i-th taskbar button (0-based), laid out left-to-right after the
-/// launcher glyph and the workspace switcher. Independent of window state so
-/// hit-testing and drawing agree.
-fn taskbtn_rect(ly: &Layout, i: i32) -> (i32, i32, i32, i32) {
-    let base = ly.launcher_w + WS_COUNT as i32 * ly.ws_w;
+/// launcher glyph and the workspace switcher. `ws_count` is the live workspace
+/// count (config `[workspaces] count`), so hit-testing and drawing agree.
+fn taskbtn_rect(ly: &Layout, ws_count: usize, i: i32) -> (i32, i32, i32, i32) {
+    let base = ly.launcher_w + ws_count as i32 * ly.ws_w;
     let x = base + ly.taskbtn_gap + i * (ly.taskbtn_w + ly.taskbtn_gap);
     let y = 3;
     (x, y, ly.taskbtn_w, ly.panel_h - 6)
 }
-
-/// Number of virtual workspaces (concept §11). Windows carry a 0-based workspace
-/// index; only the active workspace's windows are composited and take input.
-const WS_COUNT: usize = 5;
 
 /// Rect of the i-th workspace pip (0-based) in the panel switcher, laid out
 /// left-to-right immediately after the launcher glyph. Clicking a pip activates
@@ -1529,17 +1536,11 @@ fn draw_text_ttf(
     x + round_i32(adv)
 }
 
-/// Human-readable window title keyed by the app's `LAUNCH_APPS` index (`Win.app`).
-fn app_title(app: u8) -> &'static str {
-    match app {
-        0 => "Window",
-        1 => "Calculator",
-        2 => "System Monitor",
-        3 => "Files",
-        4 => "Terminal",
-        5 => "Settings",
-        _ => "Window",
-    }
+/// Human-readable window title for a window's registry index (`Win.app`), looked
+/// up in the live application registry. An unknown index (0xFF, e.g. a client
+/// spawned for an app not in the registry) falls back to a generic "Window".
+fn win_title<'a>(apps: &'a Applications, app: u8) -> &'a str {
+    apps.apps.get(app as usize).map(|a| a.name.as_str()).unwrap_or("Window")
 }
 
 
@@ -1558,7 +1559,8 @@ struct Win {
     /// window's hit-tests and framing stay self-contained.
     title_h: i32,
     border: i32,
-    /// Index into `LAUNCH_APPS` (0xFF = unknown) — drives the dock running marker.
+    /// Index into the live application registry (0xFF = unknown) — drives the
+    /// dock running marker and the window title (see `win_title`).
     app: u8,
     /// Workspace (0-based) this window belongs to; only the active workspace's
     /// windows are drawn and receive input.
@@ -1723,19 +1725,13 @@ fn load_wallpaper(path: &str, bw: usize, bh: usize) -> Option<Vec<u32>> {
 const ICON_W: usize = 32;
 const ICON_H: usize = 32;
 
-/// Load the Breeze launcher icon for a `LAUNCH_APPS` binary *by convention* —
-/// `/assets/icons/breeze/<app>.rgba` — into packed ARGB, or `None` when no such
-/// asset ships (the dock then falls back to the app initial). No per-app table:
-/// adding an app to `LAUNCH_APPS` picks up its icon automatically if the file
-/// exists, and a genuinely icon-less app simply fails the load. The path is
+/// Load a launcher icon *by convention* — `<dir><app>.rgba` — into packed ARGB,
+/// or `None` when no such asset ships (the dock then falls back to the app
+/// initial). `dir` is the configured icon-theme directory (e.g.
+/// `/assets/icons/breeze/`, ending in `/`), so the theme is a config knob, not a
+/// constant. `app` is the registry entry's icon stem; adding an app to the config
+/// registry picks up its icon automatically if the file exists. The path is
 /// assembled on the stack to keep the compositor's no-heap-`String` style.
-/// Load the Breeze launcher icon for a `LAUNCH_APPS` binary *by convention* —
-/// `<dir><app>.rgba` — into packed ARGB, or `None` when no such asset ships (the
-/// dock then falls back to the app initial). `dir` is the configured icon-theme
-/// directory (e.g. `/assets/icons/breeze/`, ending in `/`), so the theme is a
-/// config knob, not a constant. No per-app table: adding an app to `LAUNCH_APPS`
-/// picks up its icon automatically if the file exists. The path is assembled on
-/// the stack to keep the compositor's no-heap-`String` style.
 fn load_app_icon(app: &str, dir: &str) -> Option<Vec<u32>> {
     const SUFFIX: &[u8] = b".rgba";
     let prefix = dir.as_bytes();
@@ -1749,6 +1745,22 @@ fn load_app_icon(app: &str, dir: &str) -> Option<Vec<u32>> {
     buf[prefix.len() + app.len()..n].copy_from_slice(SUFFIX);
     let path = core::str::from_utf8(&buf[..n]).ok()?;
     load_icon_rgba(path)
+}
+
+/// Resolve one registry entry's icon spec to packed ARGB. A spec containing '/'
+/// is an absolute VFS path loaded verbatim (`load_icon_rgba`); otherwise it is a
+/// stem resolved against the active icon-theme directory as `<dir><stem>.rgba`
+/// (`load_app_icon`). An empty spec, or a missing/mis-sized asset, yields `None`
+/// so the dock/menu cell falls back to the app's label initial.
+fn resolve_app_icon(icon: &str, dir: &str) -> Option<Vec<u32>> {
+    if icon.is_empty() {
+        return None;
+    }
+    if icon.as_bytes().contains(&b'/') {
+        load_icon_rgba(icon)
+    } else {
+        load_app_icon(icon, dir)
+    }
 }
 
 /// Build the icon-theme directory path `/assets/icons/<theme>/` into `buf` and
@@ -1841,38 +1853,57 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     // Green Tea baseline; a missing/garbage file keeps the baseline (last-known-good).
     // Slice C: `theme`/`ly`/`fx` are `mut` because a gui_settings "reload" signal
     // re-reads the config live and re-seeds them (see the reload block in `loop`).
-    let cfg = settings::load();
-    let mut theme: Theme = cfg.theme;
-    let mut ly: Layout = cfg.layout;
-    if cfg.from_file {
+    let cfg = settings::load_config();
+    let mut theme: Theme = cfg.settings.theme;
+    let mut ly: Layout = cfg.settings.layout;
+    // The application registry (id/name/exec/icon/label), the dock/launcher/
+    // startup pin-lists and the workspace count are DATA, owned here so the dock,
+    // launcher menu, taskbar, workspace switcher and window titles all render off
+    // one live model. A malformed config never lands: `load_config` keeps the
+    // last-known-good baseline (an invalid file yields the baseline registry).
+    let mut apps: Applications = cfg.apps;
+    if cfg.settings.from_file {
         libdunit::println("gui_server: settings loaded from /system/share/dwm/default.toml");
     } else {
         libdunit::println("gui_server: settings default (no config file)");
     }
+    // Serial diagnostic: the RESOLVED registry sizes, so a config→behavior change
+    // is observable headless without a screenshot. Flip a count in the TOML and
+    // this line moves — proof the desktop is config-driven, not baked into Rust.
+    libdunit::println(&alloc::format!(
+        "gui_server: config apps={} dock={} launcher={} startup={} ws={}",
+        apps.apps.len(),
+        apps.dock.len(),
+        apps.launcher.len(),
+        apps.startup.len(),
+        apps.workspaces
+    ));
 
     let mut back: Vec<u32> = Vec::new();
     back.resize(bw * bh, theme.desktop);
 
     // Desktop wallpaper: loaded + pre-scaled once (XRGB8888, framebuffer-sized).
     // Path comes from `[desktop] wallpaper`; absent/invalid → gradient fallback.
-    let mut wallpaper: Option<Vec<u32>> = load_wallpaper(cfg.desktop.wallpaper.as_str(), bw, bh);
+    let mut wallpaper: Option<Vec<u32>> = load_wallpaper(cfg.settings.desktop.wallpaper.as_str(), bw, bh);
     if wallpaper.is_some() {
         libdunit::println("gui_server: wallpaper loaded (config [desktop] wallpaper)");
     } else {
         libdunit::println("gui_server: wallpaper absent — gradient backdrop");
     }
 
-    // Breeze-Chameleon launcher icons, one slot per LAUNCH_APPS entry. The theme
-    // directory (`/assets/icons/<icon_theme>/`) is a config knob. Loaded once
-    // into packed ARGB; a missing/mis-sized asset leaves its slot `None` and that
-    // dock cell falls back to the app initial (W/C/S/F/T).
-    let mut app_icons: Vec<Option<Vec<u32>>> = Vec::with_capacity(LAUNCH_APPS.len());
+    // Launcher icons, one slot per REGISTRY entry (indexed by app id → the same
+    // index the dock/launcher pin-lists resolve to). The theme directory
+    // (`/assets/icons/<icon_theme>/`) is a config knob; each entry's `icon` spec
+    // is a stem resolved against it, or an absolute VFS path when it contains
+    // '/'. A missing/mis-sized asset leaves the slot `None` and that cell falls
+    // back to the app's label initial.
+    let mut app_icons: Vec<Option<Vec<u32>>> = Vec::with_capacity(apps.apps.len());
     let mut icon_count = 0usize;
     {
         let mut dbuf = [0u8; 160];
-        let dir = icon_dir(cfg.desktop.icon_theme.as_str(), &mut dbuf);
-        for (_, app) in LAUNCH_APPS.iter() {
-            let icon = load_app_icon(app, dir);
+        let dir = icon_dir(cfg.settings.desktop.icon_theme.as_str(), &mut dbuf);
+        for entry in apps.apps.iter() {
+            let icon = resolve_app_icon(entry.icon.as_str(), dir);
             if icon.is_some() {
                 icon_count += 1;
             }
@@ -1973,7 +2004,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     // headless tests know the compositor is ready to accept injected keystrokes.
     let mut input_ready_announced = false;
     // --- Visual-effects state (concept §5) -------------------------------
-    let mut fx = cfg.effects;
+    let mut fx = cfg.settings.effects;
     // Animation length in frames (~16ms/frame); 0 when animations are off, so
     // every ramp/reveal collapses to instant (the flat look).
     let mut anim_frames = if fx.anim { (fx.anim_ms / 16).max(1) as u32 } else { 0 };
@@ -1983,13 +2014,14 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     // Launcher-menu drop-in: stamped when the dropdown opens.
     let mut menu_anim_tick = 0u32;
     let mut menu_was_open = false;
-    // Per-dock-icon hover progress (0..255), eased toward hovered/idle each frame.
-    let mut dock_hover = [0u8; LAUNCH_APPS.len()];
+    // Per-dock-icon hover progress (0..255), eased toward hovered/idle each
+    // frame. Sized to the live dock pin-count (config `[dock] entries`).
+    let mut dock_hover: Vec<u8> = alloc::vec![0u8; apps.dock.len()];
     // Ping-pong scratch for the backdrop blur, sized for the largest blurred
     // region (panel / dock strip / menu) and allocated once.
     let panel_area = bw * ly.panel_h.max(0) as usize;
     let dock_area = ly.dock_w.max(0) as usize * (bh as i32 - ly.panel_h).max(0) as usize;
-    let menu_area = ly.menu_w.max(0) as usize * (LAUNCH_APPS.len() * ly.menu_item_h.max(0) as usize);
+    let menu_area = ly.menu_w.max(0) as usize * (apps.launcher.len() * ly.menu_item_h.max(0) as usize);
     let scratch_len = panel_area.max(dock_area).max(menu_area).max(1);
     let mut blur_a: Vec<u32> = alloc::vec![0u32; scratch_len];
     let mut blur_b: Vec<u32> = alloc::vec![0u32; scratch_len];
@@ -2013,37 +2045,51 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         // fatal — load() falls back to the baseline on a bad file.
         if reload_requested {
             reload_requested = false;
-            let ncfg = settings::load();
-            theme = ncfg.theme;
-            ly = ncfg.layout;
-            fx = ncfg.effects;
-            anim_frames = if fx.anim { (fx.anim_ms / 16).max(1) as u32 } else { 0 };
-            // Every Win caches its own title_h/border (used by outer/contains):
-            // re-seed them so existing windows adopt the new geometry.
-            for w in wins.iter_mut() {
-                w.title_h = ly.title_h;
-                w.border = ly.border;
+            let ncfg = settings::load_config();
+            if !ncfg.valid {
+                // Malformed/incoherent config: keep the running (last-known-good)
+                // state WHOLESALE. Never partially apply a bad file — a broken
+                // reload must not blank the dock or drop the registry.
+                libdunit::println("gui_server: settings reload rejected (invalid config) — keeping last good");
+            } else {
+                theme = ncfg.settings.theme;
+                ly = ncfg.settings.layout;
+                fx = ncfg.settings.effects;
+                apps = ncfg.apps;
+                anim_frames = if fx.anim { (fx.anim_ms / 16).max(1) as u32 } else { 0 };
+                // Every Win caches its own title_h/border (used by outer/contains):
+                // re-seed them so existing windows adopt the new geometry.
+                for w in wins.iter_mut() {
+                    w.title_h = ly.title_h;
+                    w.border = ly.border;
+                }
+                // The blur scratch is sized for the largest blurred region; a larger
+                // panel/dock/menu after reload needs a bigger buffer (never shrink —
+                // a smaller region simply uses a prefix of the existing allocation).
+                let panel_area = bw * ly.panel_h.max(0) as usize;
+                let dock_area = ly.dock_w.max(0) as usize * (bh as i32 - ly.panel_h).max(0) as usize;
+                let menu_area =
+                    ly.menu_w.max(0) as usize * (apps.launcher.len() * ly.menu_item_h.max(0) as usize);
+                let need = panel_area.max(dock_area).max(menu_area).max(1);
+                if blur_a.len() < need {
+                    blur_a.resize(need, 0);
+                    blur_b.resize(need, 0);
+                }
+                // Re-seed the config-driven assets (wallpaper + icon theme) and the
+                // registry-derived state (icons per entry, dock hover slots).
+                wallpaper = load_wallpaper(ncfg.settings.desktop.wallpaper.as_str(), bw, bh);
+                let mut dbuf = [0u8; 160];
+                let dir = icon_dir(ncfg.settings.desktop.icon_theme.as_str(), &mut dbuf);
+                app_icons.clear();
+                for entry in apps.apps.iter() {
+                    app_icons.push(resolve_app_icon(entry.icon.as_str(), dir));
+                }
+                dock_hover = alloc::vec![0u8; apps.dock.len()];
+                if current_ws >= apps.workspaces {
+                    current_ws = apps.workspaces.saturating_sub(1);
+                }
+                libdunit::println("gui_server: settings reloaded (config changed)");
             }
-            // The blur scratch is sized for the largest blurred region; a larger
-            // panel/dock/menu after reload needs a bigger buffer (never shrink —
-            // a smaller region simply uses a prefix of the existing allocation).
-            let panel_area = bw * ly.panel_h.max(0) as usize;
-            let dock_area = ly.dock_w.max(0) as usize * (bh as i32 - ly.panel_h).max(0) as usize;
-            let menu_area =
-                ly.menu_w.max(0) as usize * (LAUNCH_APPS.len() * ly.menu_item_h.max(0) as usize);
-            let need = panel_area.max(dock_area).max(menu_area).max(1);
-            if blur_a.len() < need {
-                blur_a.resize(need, 0);
-                blur_b.resize(need, 0);
-            }
-            // Re-seed the config-driven asset paths (wallpaper + icon theme).
-            wallpaper = load_wallpaper(ncfg.desktop.wallpaper.as_str(), bw, bh);
-            let mut dbuf = [0u8; 160];
-            let dir = icon_dir(ncfg.desktop.icon_theme.as_str(), &mut dbuf);
-            for (slot, (_, app)) in app_icons.iter_mut().zip(LAUNCH_APPS.iter()) {
-                *slot = load_app_icon(app, dir);
-            }
-            libdunit::println("gui_server: settings reloaded (config changed)");
         }
 
         for i in 0..clients.len() {
@@ -2116,7 +2162,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             // other click just dismisses the menu. Either way the menu closes
             // and the click is consumed (never reaches a window).
             let mut chosen: Option<usize> = None;
-            for i in 0..LAUNCH_APPS.len() {
+            for i in 0..apps.launcher.len() {
                 let (ix, iy, iw, ih) = menu_item_rect(&ly, i as i32);
                 if mx >= ix && mx < ix + iw && my >= iy && my < iy + ih {
                     chosen = Some(i);
@@ -2126,10 +2172,13 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             menu_open = false;
             if let Some(i) = chosen {
                 if clients.len() < ly.max_windows {
-                    if let Some(mut c) = spawn_client(server, next_id, 0, 0, LAUNCH_APPS[i].1) {
-                        c.ws = current_ws;
-                        clients.push(c);
-                        next_id += 1;
+                    if let Some(ri) = apps.launcher.get(i).copied() {
+                        let exec = apps.apps[ri].exec.as_str();
+                        if let Some(mut c) = spawn_client(server, next_id, 0, 0, ri as u8, exec) {
+                            c.ws = current_ws;
+                            clients.push(c);
+                            next_id += 1;
+                        }
                     }
                 }
             }
@@ -2140,10 +2189,10 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             // owns the panel band.
             if mx < ly.launcher_w {
                 menu_open = true;
-            } else if mx < ly.launcher_w + WS_COUNT as i32 * ly.ws_w {
+            } else if mx < ly.launcher_w + apps.workspaces as i32 * ly.ws_w {
                 // Workspace switcher: activate the clicked pip's workspace. A
                 // click in the gap between pips is consumed but changes nothing.
-                for i in 0..WS_COUNT {
+                for i in 0..apps.workspaces {
                     let (px, _, pw, _) = ws_pip_rect(&ly, i as i32);
                     if mx >= px && mx < px + pw {
                         if current_ws != i {
@@ -2159,7 +2208,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                     if !wins[wi].alive || wins[wi].ws != current_ws {
                         continue;
                     }
-                    let (bx, by, bw2, bh2) = taskbtn_rect(&ly, slot);
+                    let (bx, by, bw2, bh2) = taskbtn_rect(&ly, apps.workspaces, slot);
                     if mx >= bx && mx < bx + bw2 && my >= by && my < by + bh2 {
                         z.retain(|&i| i != wi);
                         z.push(wi);
@@ -2173,7 +2222,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             // spawns that app; any other click is consumed. The dock owns its
             // band — clicks never reach a client.
             let mut chosen: Option<usize> = None;
-            for i in 0..LAUNCH_APPS.len() {
+            for i in 0..apps.dock.len() {
                 let (ix, iy, iw, ih) = dock_icon_rect(&ly, i as i32);
                 if mx >= ix && mx < ix + iw && my >= iy && my < iy + ih {
                     chosen = Some(i);
@@ -2182,10 +2231,13 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             }
             if let Some(i) = chosen {
                 if clients.len() < ly.max_windows {
-                    if let Some(mut c) = spawn_client(server, next_id, 0, 0, LAUNCH_APPS[i].1) {
-                        c.ws = current_ws;
-                        clients.push(c);
-                        next_id += 1;
+                    if let Some(ri) = apps.dock.get(i).copied() {
+                        let exec = apps.apps[ri].exec.as_str();
+                        if let Some(mut c) = spawn_client(server, next_id, 0, 0, ri as u8, exec) {
+                            c.ws = current_ws;
+                            clients.push(c);
+                            next_id += 1;
+                        }
                     }
                 }
             }
@@ -2383,10 +2435,14 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             // with the surface rather than through the grow-in blend.
             if a >= 224 {
                 if let Some(f) = font.as_ref() {
-                    let px = 14.0;
+                    let px = ly.title_font_px as f32;
                     let baseline = w.cy - w.title_h / 2 + 5;
-                    let txtcol = if is_focused { 0x00EA_F2EC } else { 0x00A8_B4AC };
-                    draw_text_ttf(&mut back, bw, bh, f, w.cx + 12, baseline, px, app_title(w.app), txtcol);
+                    let txtcol = if is_focused {
+                        theme.title_text_focused & 0x00FF_FFFF
+                    } else {
+                        theme.title_text_unfocused & 0x00FF_FFFF
+                    };
+                    draw_text_ttf(&mut back, bw, bh, f, w.cx + 12, baseline, px, win_title(&apps, w.app), txtcol);
                 }
             }
             // Client surface (opaque). Held back until the frame is nearly solid
@@ -2413,10 +2469,10 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         for r in 0..3 {
             fill_rect(&mut back, bw, bh, 10, 8 + r * 5, 20, 2, theme.launcher);
         }
-        // Workspace switcher: pips 1..=WS_COUNT after the launcher glyph. The
+        // Workspace switcher: pips 1..=ws_count after the launcher glyph. The
         // active workspace is highlighted; any workspace holding a live window
         // gets an accent underline so occupancy is visible at a glance.
-        for i in 0..WS_COUNT {
+        for i in 0..apps.workspaces {
             let (px, py, pw, ph) = ws_pip_rect(&ly, i as i32);
             let base = if i == current_ws {
                 theme.taskbtn_focused
@@ -2440,7 +2496,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 if !wins[wi].alive || wins[wi].ws != current_ws {
                     continue;
                 }
-                let (bx, by, bw2, bh2) = taskbtn_rect(&ly, slot);
+                let (bx, by, bw2, bh2) = taskbtn_rect(&ly, apps.workspaces, slot);
                 if bx + bw2 > bw as i32 {
                     break;
                 }
@@ -2454,10 +2510,14 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 // like the reference; fall back to the 1-based window number when
                 // the shell font is unavailable.
                 if let Some(f) = font.as_ref() {
-                    let px = 13.0;
+                    let px = ly.panel_font_px as f32;
                     let baseline = by + bh2 / 2 + 4;
-                    let tcol = if focused == Some(wi) { 0x00EA_F2EC } else { theme.panel_text };
-                    draw_text_ttf(&mut back, bw, bh, f, bx + 10, baseline, px, app_title(wins[wi].app), tcol);
+                    let tcol = if focused == Some(wi) {
+                        theme.title_text_focused & 0x00FF_FFFF
+                    } else {
+                        theme.panel_text
+                    };
+                    draw_text_ttf(&mut back, bw, bh, f, bx + 10, baseline, px, win_title(&apps, wins[wi].app), tcol);
                 } else {
                     let mut label = [0u8; 2];
                     two_digits(&mut label, 0, (wi as u64) + 1);
@@ -2486,7 +2546,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                     (secs / 60) % 100,
                     secs % 60
                 );
-                let px = 14.0;
+                let px = ly.title_font_px as f32;
                 let tw = text_width_ttf(f, &tray, px);
                 let baseline = ly.panel_h / 2 + 5;
                 draw_text_ttf(&mut back, bw, bh, f, bw as i32 - tw - 14, baseline, px, &tray, theme.panel_text);
@@ -2510,7 +2570,8 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         }
         // Hover easing step per frame (instant when animations are off).
         let hover_step = if anim_frames == 0 { 255u8 } else { (255 / anim_frames).max(28) as u8 };
-        for i in 0..LAUNCH_APPS.len() {
+        for i in 0..apps.dock.len() {
+            let ri = apps.dock[i];
             let (ix, iy, iw, ih) = dock_icon_rect(&ly, i as i32);
             if iy + ih > bh as i32 {
                 break;
@@ -2526,9 +2587,9 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             let (cx0, cy0, cw, ch) = (ix - grow, iy - grow, iw + 2 * grow, ih + 2 * grow);
             let base = lerp_color(theme.taskbtn, theme.taskbtn_focused, hp as u32);
             fill_rrect_grad(&mut back, bw, bh, cx0, cy0, cw, ch, 7, RR_ALL, shade(base, 20), shade(base, -10), 255);
-            // Breeze icon centered in the cell (grows with the hover zoom); if the
-            // asset is missing, fall back to the app initial (W/C/S/F/T).
-            if let Some(icon) = app_icons[i].as_ref() {
+            // Icon for the pinned registry entry (grows with the hover zoom); if
+            // the asset is missing, fall back to the app's label initial.
+            if let Some(icon) = app_icons.get(ri).and_then(|s| s.as_ref()) {
                 let pad = 4;
                 let dw = (cw - 2 * pad).max(1);
                 let dh = (ch - 2 * pad).max(1);
@@ -2536,10 +2597,15 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             } else {
                 let tx = cx0 + (cw - GLYPH_W * 3) / 2;
                 let ty = cy0 + (ch - 5 * 3) / 2;
-                draw_text_3x5(&mut back, bw, bh, tx, ty, 3, theme.panel_text, &LAUNCH_APPS[i].0[..1]);
+                let ch0 = apps
+                    .apps
+                    .get(ri)
+                    .and_then(|a| a.label.as_bytes().first().copied())
+                    .unwrap_or(b'?');
+                draw_text_3x5(&mut back, bw, bh, tx, ty, 3, theme.panel_text, &[ch0]);
             }
             // Running marker: accent bar on the icon's left edge for a live app.
-            if wins.iter().any(|w| w.alive && w.app == i as u8) {
+            if wins.iter().any(|w| w.alive && w.app == ri as u8) {
                 fill_rrect(&mut back, bw, bh, cx0 - 3, cy0 + ch / 4, 3, ch / 2, 1, RR_ALL, 0xFF00_0000 | (theme.launcher & 0x00FF_FFFF));
             }
         }
@@ -2552,7 +2618,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         if menu_open {
             let mprog = ramp(ticks, menu_anim_tick, anim_frames) as i32; // 0..255
             let (mx0, my0, mw0, _) = menu_item_rect(&ly, 0);
-            let full_h = LAUNCH_APPS.len() as i32 * ly.menu_item_h;
+            let full_h = apps.launcher.len() as i32 * ly.menu_item_h;
             let reveal_h = full_h * mprog / 255; // grow the card downward
             if reveal_h > 0 {
                 if fx.blur {
@@ -2560,7 +2626,8 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 }
                 fill_rrect_grad(&mut back, bw, bh, mx0, my0, mw0, reveal_h, fx.corner_radius, RR_ALL, shade(theme.menu, 14), theme.menu, fx.menu_alpha);
             }
-            for i in 0..LAUNCH_APPS.len() {
+            for i in 0..apps.launcher.len() {
+                let ri = apps.launcher[i];
                 let (ix, iy, iw, ih) = menu_item_rect(&ly, i as i32);
                 if iy + ih > my0 + reveal_h {
                     break; // below the revealed edge — not shown yet
@@ -2569,15 +2636,16 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 if hover {
                     fill_rrect(&mut back, bw, bh, ix + 3, iy + 2, iw - 6, ih - 4, 5, RR_ALL, 0xC000_0000 | (theme.menu_hover & 0x00FF_FFFF));
                 }
-                // Breeze icon at the row's left, then the app label after it.
+                // Registry icon at the row's left, then the app label after it.
                 let mut text_x = ix + 8;
-                if let Some(icon) = app_icons[i].as_ref() {
+                if let Some(icon) = app_icons.get(ri).and_then(|s| s.as_ref()) {
                     let isz = (ih - 8).clamp(8, 22);
                     let icy = iy + (ih - isz) / 2;
                     blit_icon(&mut back, bw, bh, icon, ICON_W, ICON_H, ix + 6, icy, isz, isz);
                     text_x = ix + 6 + isz + 6;
                 }
-                draw_text_3x5(&mut back, bw, bh, text_x, iy + (ih - 5 * 3) / 2, 3, theme.panel_text, LAUNCH_APPS[i].0);
+                let label = apps.apps.get(ri).map(|a| a.label.as_str()).unwrap_or("");
+                draw_text_3x5(&mut back, bw, bh, text_x, iy + (ih - 5 * 3) / 2, 3, theme.panel_text, label.as_bytes());
             }
         }
 

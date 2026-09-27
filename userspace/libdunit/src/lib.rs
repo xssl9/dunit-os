@@ -313,22 +313,6 @@ static mut RUNTIME_ARGC: usize = 0;
 static mut RUNTIME_ARGV: RawArgv = core::ptr::null();
 static mut RUNTIME_ENVP: RawEnvp = core::ptr::null();
 
-pub const GUI_SHELL_PID: u32 = 1;
-pub const GUI_MSG_MAGIC: u32 = 0x3149_5547; // GUI1
-pub const GUI_MSG_VERSION: u16 = 1;
-pub const GUI_MSG_CREATE_WINDOW: u16 = 1;
-pub const GUI_MSG_DRAW_TEXT: u16 = 2;
-pub const GUI_MSG_SET_STATUS: u16 = 3;
-pub const GUI_MSG_EXIT: u16 = 4;
-pub const GUI_MSG_COMMAND: u16 = 5;
-pub const GUI_MSG_CLEAR: u16 = 6;
-pub const GUI_MSG_SET_TITLE: u16 = 7;
-pub const GUI_MSG_DRAW_RECT: u16 = 8;
-pub const GUI_MSG_KEY_EVENT: u16 = 101;
-pub const GUI_MSG_CLOSE_EVENT: u16 = 102;
-pub const GUI_MSG_POINTER_EVENT: u16 = 103;
-pub const GUI_MSG_DATA_CAP: usize = 160;
-
 pub const OPEN_READ: usize = 1 << 0;
 pub const OPEN_WRITE: usize = 1 << 1;
 pub const OPEN_CREATE: usize = 1 << 2;
@@ -349,20 +333,6 @@ pub fn init_runtime(argc: usize, argv: RawArgv, envp: RawEnvp) {
         RUNTIME_ARGV = argv;
         RUNTIME_ENVP = envp;
     }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct GuiMessage {
-    pub magic: u32,
-    pub version: u16,
-    pub kind: u16,
-    pub window_id: u32,
-    pub a: i32,
-    pub b: i32,
-    pub c: u32,
-    pub len: u32,
-    pub data: [u8; GUI_MSG_DATA_CAP],
 }
 
 #[repr(C)]
@@ -426,47 +396,6 @@ impl DirEntry {
 pub struct FileStat {
     pub file_type: u32,
     pub size: usize,
-}
-
-impl GuiMessage {
-    pub const fn new(kind: u16) -> Self {
-        Self {
-            magic: GUI_MSG_MAGIC,
-            version: GUI_MSG_VERSION,
-            kind,
-            window_id: 0,
-            a: 0,
-            b: 0,
-            c: 0,
-            len: 0,
-            data: [0; GUI_MSG_DATA_CAP],
-        }
-    }
-
-    pub fn set_data(&mut self, data: &[u8]) {
-        let len = if data.len() > GUI_MSG_DATA_CAP {
-            GUI_MSG_DATA_CAP
-        } else {
-            data.len()
-        };
-        let mut index = 0usize;
-        while index < len {
-            self.data[index] = data[index];
-            index += 1;
-        }
-        self.len = len as u32;
-    }
-
-    pub fn data(&self) -> &[u8] {
-        let len = (self.len as usize).min(GUI_MSG_DATA_CAP);
-        &self.data[..len]
-    }
-
-    pub fn valid(&self) -> bool {
-        self.magic == GUI_MSG_MAGIC
-            && self.version == GUI_MSG_VERSION
-            && (self.len as usize) <= GUI_MSG_DATA_CAP
-    }
 }
 
 #[repr(C)]
@@ -1431,107 +1360,6 @@ pub fn ipc_recv_blocking_from(buf: &mut [u8], sender: &mut u32, timeout_ms: u64)
         let waited = wait_ipc_event(timeout_ms);
         if waited < 0 { return waited; }
         if timeout_ms != 0 { return ipc_recv_from(buf, sender); }
-    }
-}
-
-pub fn gui_send(message: &GuiMessage) -> isize {
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            message as *const GuiMessage as *const u8,
-            core::mem::size_of::<GuiMessage>(),
-        )
-    };
-    ipc_send(GUI_SHELL_PID, bytes)
-}
-
-pub fn gui_create_window(window_id: u32, title: &str, width: u32, height: u32) -> isize {
-    let mut message = GuiMessage::new(GUI_MSG_CREATE_WINDOW);
-    message.window_id = window_id;
-    message.a = width as i32;
-    message.b = height as i32;
-    message.set_data(title.as_bytes());
-    gui_send(&message)
-}
-
-pub fn gui_draw_text(window_id: u32, x: i32, y: i32, text: &str) -> isize {
-    let mut message = GuiMessage::new(GUI_MSG_DRAW_TEXT);
-    message.window_id = window_id;
-    message.a = x;
-    message.b = y;
-    message.set_data(text.as_bytes());
-    gui_send(&message)
-}
-
-pub fn gui_draw_rect(window_id: u32, x: i32, y: i32, width: u32, height: u32, color: u32) -> isize {
-    let mut message = GuiMessage::new(GUI_MSG_DRAW_RECT);
-    message.window_id = window_id;
-    message.a = x;
-    message.b = y;
-    message.c = color;
-    message.len = 8;
-    let width_bytes = width.to_le_bytes();
-    let height_bytes = height.to_le_bytes();
-    message.data[0] = width_bytes[0];
-    message.data[1] = width_bytes[1];
-    message.data[2] = width_bytes[2];
-    message.data[3] = width_bytes[3];
-    message.data[4] = height_bytes[0];
-    message.data[5] = height_bytes[1];
-    message.data[6] = height_bytes[2];
-    message.data[7] = height_bytes[3];
-    gui_send(&message)
-}
-
-pub fn gui_set_status(text: &str) -> isize {
-    let mut message = GuiMessage::new(GUI_MSG_SET_STATUS);
-    message.set_data(text.as_bytes());
-    gui_send(&message)
-}
-
-pub fn gui_clear(window_id: u32) -> isize {
-    let mut message = GuiMessage::new(GUI_MSG_CLEAR);
-    message.window_id = window_id;
-    gui_send(&message)
-}
-
-pub fn gui_set_title(window_id: u32, title: &str) -> isize {
-    let mut message = GuiMessage::new(GUI_MSG_SET_TITLE);
-    message.window_id = window_id;
-    message.set_data(title.as_bytes());
-    gui_send(&message)
-}
-
-pub fn gui_recv_event(message: &mut GuiMessage) -> isize {
-    let bytes = unsafe {
-        core::slice::from_raw_parts_mut(
-            message as *mut GuiMessage as *mut u8,
-            core::mem::size_of::<GuiMessage>(),
-        )
-    };
-    let received = ipc_recv(bytes);
-    if received == core::mem::size_of::<GuiMessage>() as isize && message.valid() {
-        received
-    } else if received < 0 {
-        received
-    } else {
-        EAGAIN
-    }
-}
-
-pub fn gui_recv_event_wait(message: &mut GuiMessage, timeout_ms: u64) -> isize {
-    let bytes = unsafe {
-        core::slice::from_raw_parts_mut(
-            message as *mut GuiMessage as *mut u8,
-            core::mem::size_of::<GuiMessage>(),
-        )
-    };
-    let received = ipc_recv_blocking(bytes, timeout_ms);
-    if received == core::mem::size_of::<GuiMessage>() as isize && message.valid() {
-        received
-    } else if received < 0 {
-        received
-    } else {
-        EAGAIN
     }
 }
 

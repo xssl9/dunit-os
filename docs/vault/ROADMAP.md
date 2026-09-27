@@ -53,8 +53,8 @@ M7: E1000 -> netd -> IPv4/UDP/TCP/DHCP/DNS -> native sockets
 - [x] Shared client surfaces, software compositor, damage/focus/input routing.
 - [~] Независимый Dunit DWM поверх GUI Server. Есть интерактивный компоситор (draggable окна, focus/raise/drag/close, роутинг pointer+keyboard в фокус) + верхняя панель/таскбар + часы + launcher-меню со спавном произвольных приложений; все legacy-приложения перенесены на Stack B как untrusted gui-v1 клиенты (`gui_calc`, `gui_stat`, `gui_files`, `gui_terminal`+`dsh` поверх PTY). Осталось: dock, quick settings, notifications, workspaces, switcher.
 - [~] DUI markup, DSS styles/motion, TOML settings. DUI/DSS/motion/widgets/render/text готовы (крейты `runtime/`, работают в `gui_client`/`gui_stat`/`gui_files`/`gui_terminal`); TOML settings ещё нет (слайс 9).
-- [~] Убрать hardcoded desktop geometry/colors/apps из kernel. Boot с `--no-default-features` (`limine_dwm.conf`) автозапускает userspace `gui_server` как десктоп; legacy kernel-GUI ещё под feature-гейтом, не удалён.
-- [ ] После feature parity удалить legacy `ui_loop`/kernel WM из normal GUI boot.
+- [x] Убрать hardcoded desktop geometry/colors/apps из kernel. Boot по `limine_dwm.conf` автозапускает userspace `gui_server` как десктоп; вся desktop policy (тема/layout/эффекты/приложения/dock/launcher/startup/workspaces/wallpaper/шрифт) вынесена в `dwm_settings` + TOML (`/system/share/dwm/default.toml`), config-driven без пересборки `gui_server`.
+- [x] Удалить legacy `ui_loop`/kernel WM из GUI boot. Legacy in-kernel GUI (`kernel/src/ui_loop.rs`, `window_manager.rs`, `gui/`), фича `legacy_gui`, протокол GUI1 в `libdunit` и 5 legacy-клиентов удалены полностью; в ядре остался только механизм (framebuffer/display+input master/shared buffers/IPC/handles/drivers).
 
 ## M5 — normal installed system
 

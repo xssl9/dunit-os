@@ -15,8 +15,6 @@ pub mod dpkg;
 pub mod drivers;
 pub mod elf;
 pub mod fs;
-#[cfg(feature = "legacy_gui")]
-pub mod gui;
 pub mod hal;
 pub mod handle;
 pub mod initrd;
@@ -33,10 +31,6 @@ pub mod storage;
 pub mod sync;
 pub mod syscall;
 pub mod terminal;
-#[cfg(feature = "legacy_gui")]
-pub mod ui_loop;
-#[cfg(feature = "legacy_gui")]
-pub mod window_manager;
 
 #[cfg(not(test))]
 use core::cell::UnsafeCell;
@@ -758,15 +752,6 @@ pub extern "C" fn kernel_main(
         screen_log("[ OK ] PS/2: Keyboard detected on port 1", false);
         screen_log("[ OK ] PS/2: Mouse detected on port 2", false);
         screen_log("[ OK ] Input drivers loaded", false);
-
-        screen_log("[ .. ] Starting window manager", false);
-        #[cfg(feature = "legacy_gui")]
-        {
-            serial_write("[WM] Calling window_manager::init()...\r\n");
-            window_manager::init();
-            serial_write("[WM] window_manager::init() returned\r\n");
-        }
-        screen_log("[ OK ] Window manager ready", false);
     } else {
         screen_log("[ .. ] Terminal mode: Minimal initialization", false);
 
@@ -1209,17 +1194,13 @@ pub extern "C" fn kernel_main(
 
         screen_log("[ OK ] Starting built-in GUI shell", false);
         serial_write("[GUI] Starting built-in desktop loop\r\n");
-        #[cfg(feature = "legacy_gui")]
-        ui_loop::run_ui_loop(fb_addr, width, height, pitch);
-        #[cfg(not(feature = "legacy_gui"))]
         {
             let _ = (fb_addr, width, height, pitch);
             // Userspace desktop: launch /app/gui_server as the compositor. It owns
             // the display/input master, spawns its clients, and runs the desktop
             // session forever. run_foreground_exec drives the scheduler (its
             // enter_user_process loop) so gui_server and every child it spawns get
-            // CPU via PIT preemption — this is the M4 userspace DWM as the desktop,
-            // replacing the in-kernel legacy_gui loop.
+            // CPU via PIT preemption — this is the M4 userspace DWM as the desktop.
             serial_write("[GUI] launching userspace gui_server desktop\r\n");
             let mut input = command::NoExecInput;
             match command::run_foreground_exec(

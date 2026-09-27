@@ -27,12 +27,6 @@ static INPUT_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/input_
 static FILE_API_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/file_api_test");
 static ENV_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/env_test");
 static CALC_BYTES: &[u8] = include_bytes!("../../../build/userspace/calc");
-static GUI_PING_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_ping");
-static GUI_TERMINAL_STUB_BYTES: &[u8] =
-    include_bytes!("../../../build/userspace/gui_terminal_stub");
-static GUI_CALCULATOR_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_calculator");
-static GUI_STATS_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_stats");
-static GUI_FILE_MANAGER_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_file_manager");
 static STDIN_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/stdin_test");
 static DTOP_BYTES: &[u8] = include_bytes!("../../../build/userspace/dtop");
 static FAULT_PF_BYTES: &[u8] = include_bytes!("../../../build/userspace/fault_pf");
@@ -650,26 +644,6 @@ pub fn init() -> Result<()> {
         let mut calc = Vec::new();
         calc.extend_from_slice(CALC_BYTES);
         (*ROOT_MEMFS.0.get()).add_file("/app/calc", calc);
-
-        let mut gui_ping = Vec::new();
-        gui_ping.extend_from_slice(GUI_PING_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/gui_ping", gui_ping);
-
-        let mut gui_terminal_stub = Vec::new();
-        gui_terminal_stub.extend_from_slice(GUI_TERMINAL_STUB_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/gui_terminal_stub", gui_terminal_stub);
-
-        let mut gui_calculator = Vec::new();
-        gui_calculator.extend_from_slice(GUI_CALCULATOR_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/gui_calculator", gui_calculator);
-
-        let mut gui_stats = Vec::new();
-        gui_stats.extend_from_slice(GUI_STATS_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/gui_stats", gui_stats);
-
-        let mut gui_file_manager = Vec::new();
-        gui_file_manager.extend_from_slice(GUI_FILE_MANAGER_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/gui_file_manager", gui_file_manager);
 
         let mut stdin_test = Vec::new();
         stdin_test.extend_from_slice(STDIN_TEST_BYTES);

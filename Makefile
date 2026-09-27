@@ -28,8 +28,8 @@ USERSPACE_BUILD_DIR = $(BUILD_DIR)/userspace
 USERSPACE_APPS = \
 	elf_demo fs_test exit_test args_test cwd_test path_test image_demo bmp_viewer color_test \
 	scheduler_test spawn_ready_test yield_child yield_test resumable_child resumable_test \
-	ipc_child ipc_parent runtime_stress input_test file_api_test env_test calc gui_ping \
-	gui_terminal_stub gui_calculator gui_stats gui_file_manager stdin_test fault_pf fault_ud dtop \
+	ipc_child ipc_parent runtime_stress input_test file_api_test env_test calc \
+	stdin_test fault_pf fault_ud dtop \
 	preempt_child preempt_test kill_target thread_test wait_test vm_test vm_peer vm_guard_fault vm_protect_fault tls_test futex_test handle_test gui_server gui_shbuf_peer gui_client gui_calc gui_stat gui_files pty_echo pty_test dsh gui_terminal gui_settings
 USERSPACE_CARGO_FLAGS = --release --target ../../../userspace/x86_64-unknown-none.json \
 	-Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem -Z json-target-spec
@@ -38,11 +38,9 @@ KERNEL_FEATURES =
 ifneq ($(filter limine_test_terminal.conf limine_test_gui.conf,$(notdir $(LIMINE_CONFIG))),)
 KERNEL_FEATURES = --features boot-smoke-tests
 endif
-# The userspace-DWM config boots straight into /app/gui_server as the desktop,
-# so build the kernel with the in-kernel legacy_gui desktop excluded.
-ifeq ($(notdir $(LIMINE_CONFIG)),limine_dwm.conf)
-KERNEL_FEATURES = --no-default-features
-endif
+# The userspace-DWM config boots straight into /app/gui_server as the desktop.
+# The in-kernel legacy GUI has been removed entirely, so no special kernel
+# features are needed here — the default build is the userspace-DWM kernel.
 
 HAL_OBJS = $(BUILD_DIR)/boot.o $(BUILD_DIR)/boot_main.o $(BUILD_DIR)/limine.o $(BUILD_DIR)/hal.o $(BUILD_DIR)/ports.o \
            $(BUILD_DIR)/gdt.o $(BUILD_DIR)/gdt_asm.o \
