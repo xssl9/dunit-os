@@ -1602,6 +1602,79 @@ fn load_wallpaper(bw: usize, bh: usize) -> Option<Vec<u32>> {
     Some(out)
 }
 
+/// Launcher-icon side length (px) of the embedded Breeze-Chameleon RGBA assets.
+/// Every `*.rgba` under `/assets/icons/breeze/` is `ICON_W`×`ICON_H`, straight
+/// alpha, `R,G,B,A` byte order (see `assets/icons/breeze/NOTICE.md`).
+const ICON_W: usize = 32;
+const ICON_H: usize = 32;
+
+/// VFS path of the Breeze launcher icon for a `LAUNCH_APPS` binary name, or
+/// `None` when that app ships no icon (the dock then falls back to its initial).
+fn app_icon_path(app: &str) -> Option<&'static str> {
+    match app {
+        "gui_client" => Some("/assets/icons/breeze/gui_client.rgba"),
+        "gui_calc" => Some("/assets/icons/breeze/gui_calc.rgba"),
+        "gui_stat" => Some("/assets/icons/breeze/gui_stat.rgba"),
+        "gui_files" => Some("/assets/icons/breeze/gui_files.rgba"),
+        "gui_terminal" => Some("/assets/icons/breeze/gui_terminal.rgba"),
+        _ => None,
+    }
+}
+
+/// Load a straight-alpha `R,G,B,A` icon (`ICON_W`×`ICON_H`) from the VFS into
+/// packed ARGB8888, ready for `blend`. `None` if the file is absent or shorter
+/// than one full icon — a mis-sized asset falls back to the dock initial.
+fn load_icon_rgba(path: &str) -> Option<Vec<u32>> {
+    let need = ICON_W * ICON_H * 4;
+    let data = read_binary(path, need + 16)?;
+    if data.len() < need {
+        return None;
+    }
+    let mut out: Vec<u32> = Vec::with_capacity(ICON_W * ICON_H);
+    let mut i = 0;
+    while i + 3 < need {
+        let r = data[i] as u32;
+        let g = data[i + 1] as u32;
+        let b = data[i + 2] as u32;
+        let a = data[i + 3] as u32;
+        out.push((a << 24) | (r << 16) | (g << 8) | b);
+        i += 4;
+    }
+    Some(out)
+}
+
+/// Alpha-blend a packed-ARGB icon (`src`, `sw`×`sh`) into the back buffer,
+/// nearest-neighbor scaled to `dw`×`dh` at `(dx,dy)`. Fully transparent source
+/// pixels are skipped so non-square silhouettes composite cleanly over the
+/// dock buttons / menu rows.
+fn blit_icon(
+    buf: &mut [u32],
+    bw: usize,
+    bh: usize,
+    src: &[u32],
+    sw: usize,
+    sh: usize,
+    dx: i32,
+    dy: i32,
+    dw: i32,
+    dh: i32,
+) {
+    if dw <= 0 || dh <= 0 || sw == 0 || sh == 0 || src.len() < sw * sh {
+        return;
+    }
+    for ry in 0..dh {
+        let sy = ((ry as usize * sh) / dh as usize).min(sh - 1);
+        for rx in 0..dw {
+            let sx = ((rx as usize * sw) / dw as usize).min(sw - 1);
+            let px = src[sy * sw + sx];
+            if (px >> 24) & 0xFF == 0 {
+                continue;
+            }
+            blend_pixel(buf, bw, bh, dx + rx, dy + ry, px);
+        }
+    }
+}
+
 fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     let mut fb = libdunit::FbInfo {
         addr: 0,
@@ -1637,6 +1710,24 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         libdunit::println("gui_server: wallpaper loaded (/assets/wallpapers/wallpaper.bmp)");
     } else {
         libdunit::println("gui_server: wallpaper absent — gradient backdrop");
+    }
+
+    // Breeze-Chameleon launcher icons, one slot per LAUNCH_APPS entry. Loaded
+    // once into packed ARGB; a missing/mis-sized asset leaves its slot `None`
+    // and that dock cell falls back to the app initial (W/C/S/F/T).
+    let mut app_icons: Vec<Option<Vec<u32>>> = Vec::with_capacity(LAUNCH_APPS.len());
+    let mut icon_count = 0usize;
+    for (_, app) in LAUNCH_APPS.iter() {
+        let icon = app_icon_path(app).and_then(load_icon_rgba);
+        if icon.is_some() {
+            icon_count += 1;
+        }
+        app_icons.push(icon);
+    }
+    if icon_count > 0 {
+        libdunit::println("gui_server: launcher icons loaded (Breeze-Chameleon)");
+    } else {
+        libdunit::println("gui_server: launcher icons absent — initials fallback");
     }
 
     // Build the window model from presented clients, tiling them if their slot
@@ -2158,10 +2249,18 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             let (cx0, cy0, cw, ch) = (ix - grow, iy - grow, iw + 2 * grow, ih + 2 * grow);
             let base = lerp_color(theme.taskbtn, theme.taskbtn_focused, hp as u32);
             fill_rrect_grad(&mut back, bw, bh, cx0, cy0, cw, ch, 7, RR_ALL, shade(base, 20), shade(base, -10), 255);
-            // App initial (W/C/S/F/T), centered in the icon cell.
-            let tx = cx0 + (cw - GLYPH_W * 3) / 2;
-            let ty = cy0 + (ch - 5 * 3) / 2;
-            draw_text_3x5(&mut back, bw, bh, tx, ty, 3, theme.panel_text, &LAUNCH_APPS[i].0[..1]);
+            // Breeze icon centered in the cell (grows with the hover zoom); if the
+            // asset is missing, fall back to the app initial (W/C/S/F/T).
+            if let Some(icon) = app_icons[i].as_ref() {
+                let pad = 4;
+                let dw = (cw - 2 * pad).max(1);
+                let dh = (ch - 2 * pad).max(1);
+                blit_icon(&mut back, bw, bh, icon, ICON_W, ICON_H, cx0 + pad, cy0 + pad, dw, dh);
+            } else {
+                let tx = cx0 + (cw - GLYPH_W * 3) / 2;
+                let ty = cy0 + (ch - 5 * 3) / 2;
+                draw_text_3x5(&mut back, bw, bh, tx, ty, 3, theme.panel_text, &LAUNCH_APPS[i].0[..1]);
+            }
             // Running marker: accent bar on the icon's left edge for a live app.
             if wins.iter().any(|w| w.alive && w.app == i as u8) {
                 fill_rrect(&mut back, bw, bh, cx0 - 3, cy0 + ch / 4, 3, ch / 2, 1, RR_ALL, 0xFF00_0000 | (theme.launcher & 0x00FF_FFFF));
@@ -2193,7 +2292,15 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 if hover {
                     fill_rrect(&mut back, bw, bh, ix + 3, iy + 2, iw - 6, ih - 4, 5, RR_ALL, 0xC000_0000 | (theme.menu_hover & 0x00FF_FFFF));
                 }
-                draw_text_3x5(&mut back, bw, bh, ix + 10, iy + (ih - 5 * 3) / 2, 3, theme.panel_text, LAUNCH_APPS[i].0);
+                // Breeze icon at the row's left, then the app label after it.
+                let mut text_x = ix + 8;
+                if let Some(icon) = app_icons[i].as_ref() {
+                    let isz = (ih - 8).clamp(8, 22);
+                    let icy = iy + (ih - isz) / 2;
+                    blit_icon(&mut back, bw, bh, icon, ICON_W, ICON_H, ix + 6, icy, isz, isz);
+                    text_x = ix + 6 + isz + 6;
+                }
+                draw_text_3x5(&mut back, bw, bh, text_x, iy + (ih - 5 * 3) / 2, 3, theme.panel_text, LAUNCH_APPS[i].0);
             }
         }
 
