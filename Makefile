@@ -12,8 +12,11 @@ QEMU_DISPLAY ?= sdl
 QEMU_USB_INPUT ?= -device qemu-xhci -device usb-mouse
 # Hardware acceleration: q35 machine + KVM (CPU virtualization) + host CPU passthrough.
 QEMU_ACCEL ?= -enable-kvm -cpu host -machine q35,accel=kvm
-# std VGA with 32 MiB VRAM, plenty for the Limine linear framebuffer.
-QEMU_VGA ?= -vga std -global VGA.vgamem_mb=32
+# std VGA with 32 MiB VRAM. `edid=on,xres=1920,yres=1080` advertises 1920x1080 as
+# the preferred EDID mode so the Limine GOP path under UEFI/OVMF actually offers
+# it (plain `-vga std` GOP tops out ~1280x800 and Limine silently falls back to a
+# smaller mode). BIOS/VBE already offered 1920x1080 and ignores the EDID hint.
+QEMU_VGA ?= -device VGA,vgamem_mb=32,edid=on,xres=1920,yres=1080
 QEMU_EXTRA ?= -no-reboot
 QEMU_MEM ?= 512M
 LIMINE_CONFIG ?= limine.conf
