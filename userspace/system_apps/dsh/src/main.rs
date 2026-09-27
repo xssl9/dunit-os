@@ -9,8 +9,10 @@
 //! Delete, cursor movement (←/→, Home/End) and history (↑/↓) via the xterm ESC
 //! sequences `gui_terminal::encode_key` emits, plus the control codes Ctrl-C
 //! (abort line), Ctrl-D (EOF on an empty line) and Ctrl-L (clear). On Enter it
-//! runs one of a small set of builtins and writes the result to stdout, which
-//! the gui_terminal client interprets into its on-screen scrollback.
+//! runs one of a small set of builtins, or — for any other name — spawns
+//! `/app/<name>` as a child on a private inner pty and bridges its stdio to the
+//! terminal until it exits (see `spawn_external`). Output is written to stdout,
+//! which the gui_terminal client interprets into its on-screen scrollback.
 
 use core::panic::PanicInfo;
 
@@ -58,6 +60,59 @@ fn cmd_ls(path: &str) {
     }
 }
 
+/// Launch an external program as a child on a private (inner) pty and bridge it
+/// to our own stdio for the duration, so a non-builtin command behaves like a
+/// real shell exec. `dsh` is itself the pty *slave* of `gui_terminal` (fd 0/1 are
+/// the outer rings); here we flip roles and become the *master* of a fresh inner
+/// pty whose slave is the child. The bridge then pumps two directions until the
+/// child exits: child stdout (inner master read) → our stdout (fd 1 → terminal),
+/// and terminal keystrokes (our stdin, fd 0) → child stdin (inner master write).
+/// Ctrl-C on the way through kills the child. Returns false if `cmd` could not be
+/// spawned (unknown path / not an ELF), so the caller can report "not found".
+fn spawn_external(cmd: &str) -> bool {
+    let inner = libdunit::pty_create();
+    if inner <= 0 {
+        return false;
+    }
+    let inner = inner as u32;
+    // `pty_spawn` resolves a bare name against /app (see resolve_exec_path); a
+    // negative return means the program does not exist or is not a valid ELF.
+    let child = libdunit::pty_spawn(cmd, inner);
+    if child <= 0 {
+        libdunit::pty_close(inner);
+        return false;
+    }
+    let child = child as u32;
+
+    let mut obuf = [0u8; 256];
+    let mut ibuf = [0u8; 128];
+    loop {
+        // 1) Drain everything the child has produced, fast, before touching input.
+        let r = libdunit::pty_read(inner, &mut obuf);
+        if r > 0 {
+            libdunit::write(1, &obuf[..r as usize]);
+            continue;
+        }
+        if r == libdunit::EPIPE {
+            break; // child exited and its output is fully drained
+        }
+        // 2) Forward any terminal input to the child. Ctrl-C interrupts it.
+        let k = libdunit::read(0, &mut ibuf);
+        if k > 0 {
+            let bytes = &ibuf[..k as usize];
+            if bytes.contains(&0x03) {
+                libdunit::kill(child);
+            }
+            libdunit::pty_write(inner, bytes);
+            continue;
+        }
+        // 3) Nothing either way: yield on a short timer (see the main loop note).
+        libdunit::sleep_ms(5);
+    }
+    libdunit::pty_close(inner);
+    true
+}
+
 /// Execute one entered command line.
 fn run(line: &str) {
     let line = line.trim();
@@ -69,7 +124,7 @@ fn run(line: &str) {
         None => (line, ""),
     };
     match cmd {
-        "help" => out("builtins: help echo pwd ls cd clear uname exit\n"),
+        "help" => out("builtins: help echo pwd ls cd clear uname exit — other names run /app/<name>\n"),
         "echo" => {
             out(rest);
             out("\n");
@@ -96,8 +151,11 @@ fn run(line: &str) {
             libdunit::exit(0);
         }
         _ => {
-            out(cmd);
-            out(": command not found\n");
+            // Not a builtin: try to run it as an external program from /app.
+            if !spawn_external(cmd) {
+                out(cmd);
+                out(": command not found\n");
+            }
         }
     }
 }
