@@ -2346,9 +2346,15 @@ fn load_icon_rgba(path: &str) -> Option<Vec<u32>> {
 }
 
 /// Alpha-blend a packed-ARGB icon (`src`, `sw`×`sh`) into the back buffer,
-/// nearest-neighbor scaled to `dw`×`dh` at `(dx,dy)`. Fully transparent source
-/// pixels are skipped so non-square silhouettes composite cleanly over the
-/// dock buttons / menu rows.
+/// resampled to `dw`×`dh` at `(dx,dy)`. The Breeze source assets are 32×32; dock
+/// buttons grow them (~46 px on hover) and launcher-menu rows shrink them (~22 px),
+/// so a nearest-neighbor pick visibly aliases. Instead we resample with alpha in
+/// mind: bilinear when enlarging (both axes ≥ source), box-average when shrinking.
+/// Both paths interpolate in PREMULTIPLIED alpha — RGB is weighted by each texel's
+/// alpha before averaging and un-premultiplied at the end — so the black of the
+/// fully-transparent texels around a non-square silhouette never bleeds a dark
+/// fringe into the edges. A resolved alpha of 0 is skipped, so silhouettes still
+/// composite cleanly over the dock buttons / menu rows.
 fn blit_icon(
     buf: &mut [u32],
     bw: usize,
@@ -2364,17 +2370,100 @@ fn blit_icon(
     if dw <= 0 || dh <= 0 || sw == 0 || sh == 0 || src.len() < sw * sh {
         return;
     }
+    let (dw, dh) = (dw as usize, dh as usize);
+    // Enlarging (or 1:1) on both axes → bilinear; otherwise → area/box average.
+    let upscale = dw >= sw && dh >= sh;
     for ry in 0..dh {
-        let sy = ((ry as usize * sh) / dh as usize).min(sh - 1);
         for rx in 0..dw {
-            let sx = ((rx as usize * sw) / dw as usize).min(sw - 1);
-            let px = src[sy * sw + sx];
+            let px = if upscale {
+                sample_bilinear(src, sw, sh, rx, ry, dw, dh)
+            } else {
+                sample_area(src, sw, sh, rx, ry, dw, dh)
+            };
             if (px >> 24) & 0xFF == 0 {
                 continue;
             }
-            blend_pixel(buf, bw, bh, dx + rx, dy + ry, px);
+            blend_pixel(buf, bw, bh, dx + rx as i32, dy + ry as i32, px);
         }
     }
+}
+
+/// Un-premultiply an accumulated (Σα, Σr·α, Σg·α, Σb·α) into a straight-alpha ARGB
+/// pixel. `weight` is the total filter weight (Σ of the per-texel weights) used to
+/// normalise alpha; RGB is normalised by `asum` (the alpha-weighted mass) so the
+/// colour of transparent texels contributes nothing. `weight == 0` yields fully
+/// transparent. Integer-only (no soft-float in the no_std ELF).
+#[inline]
+fn unpremul(asum: u64, rsum: u64, gsum: u64, bsum: u64, weight: u64) -> u32 {
+    if weight == 0 {
+        return 0;
+    }
+    let a = (asum / weight).min(255) as u32;
+    if asum == 0 {
+        return 0; // every covered texel was transparent
+    }
+    let r = (rsum / asum).min(255) as u32;
+    let g = (gsum / asum).min(255) as u32;
+    let b = (bsum / asum).min(255) as u32;
+    (a << 24) | (r << 16) | (g << 8) | b
+}
+
+/// Bilinear sample of the four texels around the source point that maps to dest
+/// `(rx,ry)`, using centre-aligned mapping so a 1:1 scale reproduces the source
+/// exactly. Fixed-point (1/256) weights, premultiplied by alpha.
+#[inline]
+fn sample_bilinear(src: &[u32], sw: usize, sh: usize, rx: usize, ry: usize, dw: usize, dh: usize) -> u32 {
+    // fx = (rx + 0.5) * sw/dw - 0.5, in 1/256 units, clamped to ≥ 0.
+    let fx = (((2 * rx + 1) * sw * 128) / dw).saturating_sub(128);
+    let fy = (((2 * ry + 1) * sh * 128) / dh).saturating_sub(128);
+    let x0 = (fx >> 8).min(sw - 1);
+    let y0 = (fy >> 8).min(sh - 1);
+    let x1 = (x0 + 1).min(sw - 1);
+    let y1 = (y0 + 1).min(sh - 1);
+    let tx = (fx & 0xFF) as u64; // 0..255 fractional weight toward x1
+    let ty = (fy & 0xFF) as u64;
+    let wx0 = 256 - tx;
+    let wy0 = 256 - ty;
+    let w = [wx0 * wy0, tx * wy0, wx0 * ty, tx * ty]; // 00,10,01,11 — Σ = 65536
+    let p = [
+        src[y0 * sw + x0],
+        src[y0 * sw + x1],
+        src[y1 * sw + x0],
+        src[y1 * sw + x1],
+    ];
+    let (mut asum, mut rsum, mut gsum, mut bsum) = (0u64, 0u64, 0u64, 0u64);
+    for i in 0..4 {
+        let a = ((p[i] >> 24) & 0xFF) as u64;
+        let aw = a * w[i];
+        asum += aw;
+        rsum += ((p[i] >> 16) & 0xFF) as u64 * aw;
+        gsum += ((p[i] >> 8) & 0xFF) as u64 * aw;
+        bsum += (p[i] & 0xFF) as u64 * aw;
+    }
+    unpremul(asum, rsum, gsum, bsum, 65536)
+}
+
+/// Box/area sample: average every source texel covered by dest `(rx,ry)` (at least
+/// one), premultiplied by alpha. Correct downscale filter for shrinking 32×32 icons.
+#[inline]
+fn sample_area(src: &[u32], sw: usize, sh: usize, rx: usize, ry: usize, dw: usize, dh: usize) -> u32 {
+    let sx0 = (rx * sw) / dw;
+    let sy0 = (ry * sh) / dh;
+    let sx1 = (((rx + 1) * sw + dw - 1) / dw).max(sx0 + 1).min(sw);
+    let sy1 = (((ry + 1) * sh + dh - 1) / dh).max(sy0 + 1).min(sh);
+    let (mut asum, mut rsum, mut gsum, mut bsum, mut count) = (0u64, 0u64, 0u64, 0u64, 0u64);
+    for sy in sy0..sy1 {
+        for sx in sx0..sx1 {
+            let px = src[sy * sw + sx];
+            let a = ((px >> 24) & 0xFF) as u64;
+            asum += a;
+            rsum += ((px >> 16) & 0xFF) as u64 * a;
+            gsum += ((px >> 8) & 0xFF) as u64 * a;
+            bsum += (px & 0xFF) as u64 * a;
+            count += 1;
+        }
+    }
+    unpremul(asum, rsum, gsum, bsum, count)
 }
 
 fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
