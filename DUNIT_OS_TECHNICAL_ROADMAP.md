@@ -209,9 +209,9 @@ root@dunit:~#
 ## 7. Незавершённые компоненты
 
 - [x] Default-on preemption, userspace threads и blocking timer/IPC wait queues (M1 QEMU smokes).
-- [ ] TLS и futex-like синхронизация для pthread subset.
-- [ ] Safe shared-memory objects and capability-based IPC handles.
-- [ ] Userspace GUI Server/compositor/DWM and declarative UI Runtime.
+- [~] TLS и futex-like синхронизация для pthread subset. **Готово:** TLS ABI (`FS.base`, Variant II, `PT_TLS`; `[TLS-TEST] OK`) и Dunit-native `wait_on_word/wake` (futex 41/42, `futex_test: OK`) — оба на M1. **Осталось:** сам pthread subset (musl, M6).
+- [x] Safe shared-memory objects and capability-based IPC handles. Shared VM object с guard pages/W^X/teardown (`[VM-TEST] OK`) и per-process handle table с rights (`READ/WRITE/MAP/SIGNAL/TRANSFER/DISPLAY_MASTER`, права только сужаются; `handle_test: OK`) — на M1; активно используются gui-v1 (shared framebuffers + capability-передача буфера компоситору).
+- [~] Userspace GUI Server/compositor/DWM and declarative UI Runtime. **Готово:** userspace `gui_server` (software compositor, damage, focus/input routing), config-driven DWM (панель/dock/launcher/workspaces/widgets) и declarative UI Runtime (крейты `runtime/`, `gui_client` рисует DUI+DSS). **Осталось:** остаток DWM parity — quick settings, notifications, Alt/Super switcher.
 - [ ] Disk-backed system root, first boot, user profiles, recovery-capable DunitFS.
 - [ ] Dunit musl fork, native C toolchain and static userspace baseline.
 - [ ] Packet networking, audio, complete USB, ACPI/power and package/application platform.
@@ -385,10 +385,10 @@ Dunit DWM — отдельный policy shell поверх GUI Server:
 ### M4 — UI Runtime и Dunit DWM parity (must-have)
 
 - [x] Реализовать DUI parser/tree, layout, base widgets, DSS theme и motion engine. Крейты `runtime/` (no_std+alloc, `#![forbid(unsafe_code)]`): `dunit-text` (TTF-растеризатор), `dunit-ui` (DUI parser + retained tree + two-pass content-measured layout), `dunit-style` (DSS каскад с CSS-specificity, `$`-переменные, compound-селекторы, motion), `dunit-widgets` (Widget из тегов, intrinsic size, event-модель), `dunit-render` (CPU-художник Surface + paint). Подключены к боту через `gui_client`, который красит реальное DUI+DSS-окно через весь runtime.
-- [ ] Реализовать schema-versioned TOML settings и last-known-good reload.
-- [~] Собрать DWM: desktop, panel, dock, launcher, quick settings, notifications, workspaces, Alt/Super switcher. **Готово:** интерактивный userspace-компоситор `gui_server` (полноэкранный back buffer, mouse через syscall 60, draggable title bars, focus/raise/drag/close, роутинг ввода в фокусное окно как INPUT_MAGIC-сообщения) + верхняя DWM-панель (launcher-глиф, таскбар с кнопкой на окно = raise+focus, часы аптайма MM:SS). **Осталось:** launcher реально спавнит произвольные приложения (сейчас хардкод ровно двух `gui_client`); dock, quick settings, notifications, workspaces, Alt/Super switcher.
-- [ ] Перенести terminal, calculator, file manager, stats на client API.
-- [ ] Перенести GUI terminal command execution в userspace shell/session; добавить PTY-like endpoint.
+- [~] Реализовать schema-versioned TOML settings и last-known-good reload. **Готово:** last-known-good reload — при отсутствии/повреждении конфига крейт `dwm_settings` откатывается на встроенный baseline (Green Tea), а живой reload через RELOAD_MAGIC валидирует весь конфиг перед применением (повреждённый config не рушит десктоп). **Осталось:** явное schema-версионирование TOML (поле версии + миграции).
+- [~] Собрать DWM: desktop, panel, dock, launcher, quick settings, notifications, workspaces, Alt/Super switcher. **Готово:** интерактивный userspace-компоситор `gui_server` (полноэкранный back buffer, mouse через syscall 60, draggable title bars, focus/raise/drag/close, роутинг ввода в фокусное окно); DWM-панель + dock (config-driven pin-list, task-switcher, свёртывание/восстановление окон); launcher спавнит произвольные приложения из реестра `[application.*]` (прежний хардкод двух `gui_client` убран); workspaces (переключение по пипсам + crossfade, count из конфига); config-driven край панели и трея (top/bottom/left/right); слоистый конфиг (per-app `apps/*.toml` + per-widget `widgets/*.toml`); protocol resize/maximize (Configure/AckConfigure); пер-пиксельная ARGB-прозрачность; anti-pixelation иконок Breeze; удаление виджетов через конфиг; чистая безоконная загрузка в интерактивный десктоп. **Осталось:** quick settings, notifications, Alt/Super switcher.
+- [x] Перенести terminal, calculator, file manager, stats на client API. `gui_terminal`, `gui_calc`, `gui_files`, `gui_stat` — независимые userspace-ELF, рисующие через gui-v1 client API (CreateSurface/ImportBuffer/Commit по IPC + shared buffers), зарегистрированы в реестре `[application.*]`; in-kernel версии удалены на M3.
+- [x] Перенести GUI terminal command execution в userspace shell/session; добавить PTY-like endpoint. PTY-endpoint в ядре (`kernel/src/pty/`, `SYSCALL_PTY_SPAWN=62`, ring master↔slave); `gui_terminal` спавнит userspace-шелл `dsh` как pty-slave (`libdunit::pty_spawn_env`) и мостит ввод/вывод — исполнение команд полностью в userspace.
 - [ ] Сохранить/восстановить window/session settings в user config.
 
 **Цель/причина:** полный отказ от hardcoded desktop. **Подсистемы:** ui-runtime, DWM, apps, VFS. **Зависимости:** M3 и writable installed user config. **Результат:** внешний вид меняется без kernel rebuild. **Готовность:** все перечисленные функции parity; испорченный config не мешает login. **Тесты:** golden layout at 1024×768/1600×900/HiDPI, keyboard-only navigation, reload, malformed config, animation timing. **Риски:** scope explosion; accessibility/text shaping оставить отдельными incremental milestones, но API учесть.
@@ -957,11 +957,11 @@ M0 baseline
 ## 25. Technical debt register
 
 - [ ] Разбить `kernel/src/lib.rs`, `syscall/mod.rs`, `process/mod.rs`, `ui_loop.rs` по ответственностям.
-- [ ] Устранить `static mut` references и compiler warnings.
+- [x] Устранить `static mut` references и compiler warnings. Все `static mut` ядра убраны на M1 (write-once → `OnceCell`/`UnsafeCell`-newtype, IRQ-shared → `IrqSafeSpinLock`, флаги → атомики; остались лишь 2 `extern "C"` HAL-символа, читаемые через `read_volatile`); compiler warnings и QEMU markers — часть CI budget (M0).
 - [ ] Заменить raw VFS trait pointers/global path buffer безопасной ownership/locking model.
 - [ ] Удалить пустой initrd либо реализовать archive loading и честные logs.
-- [ ] Унифицировать Terminal и GUI shell через userspace session/PTY, а kernel оставить recovery console.
-- [ ] Версионировать Dunit ABI, filesystem, GUI protocol, app manifest и config schemas.
+- [~] Унифицировать Terminal и GUI shell через userspace session/PTY, а kernel оставить recovery console. **Готово:** GUI-терминал исполняет команды через userspace-шелл `dsh` поверх kernel PTY-endpoint. **Осталось:** свести kernel terminal-mode строго к recovery-консоли (сейчас отдельный boot-путь в ядре).
+- [~] Версионировать Dunit ABI, filesystem, GUI protocol, app manifest и config schemas. **Готово:** Dunit ABI v1 (M0) и GUI protocol v1 (M2, `protocols/gui-v1`). **Осталось:** версионирование filesystem, app manifest и config schemas.
 - [ ] Удалить dead `display_server`/`video_driver` paths после переноса полезных тестов.
 - [ ] Добавить structured log levels и bounded persistent logs.
 
