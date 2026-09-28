@@ -86,6 +86,12 @@ const BUFFER: u64 = 2;
 const W: u32 = 560;
 const H: u32 = 360;
 const FMT_XRGB8888: u32 = 1;
+/// ARGB8888: the buffer carries a straight-alpha channel. Selected instead of
+/// XRGB when `[terminal] bg_alpha < 255`, so the compositor blends the terminal's
+/// translucent background over the desktop. Must match the protocol's
+/// `FORMAT_ARGB8888`; the compositor validates the imported buffer's format
+/// against the CreateSurface format on every commit.
+const FMT_ARGB8888: u32 = 2;
 
 /// Total scrollback cap. The number of visible rows is derived from the live
 /// surface height at runtime (see `visible_rows_for`), since the compositor can
@@ -364,10 +370,15 @@ fn draw_text(surf: &mut Surface, font: &Font, x: i32, y_top: i32, color: Color, 
 /// in-progress line) as sequences of colored spans, advancing the pen per span.
 /// `w`/`h` are the surface's CURRENT size — the compositor can resize us via a
 /// server-pushed CONFIGURE, so paint against the live geometry, not the consts.
-fn render(px: *mut u8, font: &Font, term: &Term, w: u32, h: u32) {
+/// `bg` is the config-resolved background as `0xAARRGGBB`: its alpha (from
+/// `[terminal] bg_alpha`) is written straight into every background pixel via
+/// `clear` — NOT `fill_rect`, which would blend over the previous frame and drift
+/// the alpha toward opaque. Glyphs draw opaque on top, so text stays crisp while
+/// the background lets the desktop show through when `bg_alpha < 255`.
+fn render(px: *mut u8, font: &Font, term: &Term, w: u32, h: u32, bg: u32) {
     let pixels = unsafe { core::slice::from_raw_parts_mut(px as *mut u32, (w * h) as usize) };
     let mut surf = Surface::new(pixels, w as usize, h as usize);
-    surf.fill_rect(0.0, 0.0, w as f32, h as f32, col(BG));
+    surf.clear(col(bg));
 
     // The document is `lines` (completed rows) followed by the in-progress
     // `cur` row at index `lines.len()`. `scroll` counts how many rows the view
@@ -415,6 +426,8 @@ fn resize_surface(
     obj: u64,
     token: u64,
     serial: &mut u64,
+    bg: u32,
+    fmt: u32,
 ) -> Option<(u32, *mut u8)> {
     let bytes = (new_w * new_h * 4) as usize;
     let nb = libdunit::handle_create_shared(bytes);
@@ -428,7 +441,7 @@ fn resize_surface(
         return None;
     }
     let npx = mapped as usize as *mut u8;
-    render(npx, font, term, new_w, new_h);
+    render(npx, font, term, new_w, new_h, bg);
 
     // ACK the new configure token so the compositor accepts our next COMMIT.
     let ack = Request::AckConfigure { configure: token }.encode(SURFACE, *serial);
@@ -461,7 +474,7 @@ fn resize_surface(
         width: new_w,
         height: new_h,
         stride: new_w * 4,
-        format: FMT_XRGB8888,
+        format: fmt,
         offset: 0,
     }
     .encode(obj, *serial);
@@ -493,6 +506,20 @@ pub extern "C" fn _start() -> ! {
         tcfg.bg,
         tcfg.bg_alpha,
         if tcfg.font.as_str().is_empty() { "<desktop>" } else { tcfg.font.as_str() },
+    ));
+    // Resolve the presentation format from the configured background opacity.
+    // `bg_alpha == 255` keeps the opaque XRGB fast path (compositor straight-copy);
+    // anything less presents ARGB so the compositor blends our background over the
+    // desktop. `bg` folds that alpha into the background RGB and is written into
+    // every background pixel each frame via `Surface::clear`. NOTE: Phase 4 wires
+    // only the transparency; the full palette (bg/fg/ansi RGB, prompt) lands in
+    // Phase 6 — for now the background RGB stays the built-in `BG`, tinted by alpha.
+    let bg = (tcfg.bg_alpha << 24) | (BG & 0x00FF_FFFF);
+    let fmt = if tcfg.bg_alpha < 255 { FMT_ARGB8888 } else { FMT_XRGB8888 };
+    libdunit::println(&alloc::format!(
+        "gui_terminal: argb bg_alpha={} fmt={}",
+        tcfg.bg_alpha,
+        if fmt == FMT_ARGB8888 { "argb8888" } else { "xrgb8888" },
     ));
 
     // 1) Handshake: compositor pid + our client id (id is a tint hint only).
@@ -531,7 +558,7 @@ pub extern "C" fn _start() -> ! {
     let mut cur_w = W;
     let mut cur_h = H;
     let mut visible_rows = visible_rows_for(H);
-    render(px, &font, &term, cur_w, cur_h);
+    render(px, &font, &term, cur_w, cur_h, bg);
 
     let mut rx = [0u8; 256];
 
@@ -551,7 +578,7 @@ pub extern "C" fn _start() -> ! {
 
     // 4) CREATE_SURFACE -> RESULT + CONFIGURE (capture the configure token).
     let create =
-        Request::CreateSurface { role: 1, width: W, height: H, format: FMT_XRGB8888 }.encode(SURFACE, 2);
+        Request::CreateSurface { role: 1, width: W, height: H, format: fmt }.encode(SURFACE, 2);
     libdunit::ipc_send(compositor, &create);
     libdunit::ipc_recv_blocking(&mut rx, 0); // RESULT
     let n = libdunit::ipc_recv_blocking(&mut rx, 0); // CONFIGURE
@@ -585,7 +612,7 @@ pub extern "C" fn _start() -> ! {
 
     // 7) IMPORT / ATTACH / COMMIT (each -> RESULT).
     let import =
-        Request::ImportBuffer { width: W, height: H, stride: W * 4, format: FMT_XRGB8888, offset: 0 }
+        Request::ImportBuffer { width: W, height: H, stride: W * 4, format: fmt, offset: 0 }
             .encode(BUFFER, 4);
     libdunit::ipc_send(compositor, &import);
     libdunit::ipc_recv_blocking(&mut rx, 0);
@@ -648,7 +675,7 @@ pub extern "C" fn _start() -> ! {
                 serial += 1;
                 libdunit::ipc_send(compositor, &ack);
             } else if let Some((nb, npx)) =
-                resize_surface(compositor, cur_buf, &font, &term, nw, nh, next_obj, tok, &mut serial)
+                resize_surface(compositor, cur_buf, &font, &term, nw, nh, next_obj, tok, &mut serial, bg, fmt)
             {
                 cur_buf = nb;
                 px = npx;
@@ -705,7 +732,7 @@ pub extern "C" fn _start() -> ! {
             }
         }
         if term.dirty {
-            render(px, &font, &term, cur_w, cur_h);
+            render(px, &font, &term, cur_w, cur_h, bg);
             term.dirty = false;
         }
     }

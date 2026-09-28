@@ -17,7 +17,7 @@ fg          = "#A6E3A1"
 bg          = "#0B0F14"
 # Background opacity 0-255. 255 keeps the opaque XRGB fast path; a lower value
 # requests a translucent ARGB backdrop (wallpaper shows through, text stays crisp).
-bg_alpha    = 255
+bg_alpha    = 210
 # The 8 ANSI colors (SGR 30-37) and their bright variants (SGR 90-97).
 ansi        = ["#45475A", "#F38BA8", "#A6E3A1", "#F9E2AF", "#89B4FA", "#CBA6F7", "#94E2D5", "#CDD6F4"]
 ansi_bright = ["#585B70", "#EBA0AC", "#A6E3A1", "#FAB387", "#89DCEB", "#F5C2E7", "#94E2D5", "#FFFFFF"]

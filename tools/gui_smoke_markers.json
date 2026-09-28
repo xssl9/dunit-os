@@ -9,7 +9,9 @@
     { "marker": "acked (self-test)", "claim": "compositor pushed a server-initiated CONFIGURE to a runtime window via set_window_state (maximize)", "source": "userspace/system_apps/gui_server/src/main.rs" },
     { "marker": "restored (self-test)", "claim": "compositor pushed the reverse CONFIGURE to un-maximize the window back to its floating geometry (the user-visible restore, same path the chip and drag-to-restore drive)", "source": "userspace/system_apps/gui_server/src/main.rs" },
     { "marker": "gui_terminal: reconfigured OK", "claim": "the terminal re-imported a work-area-sized buffer in response to CONFIGURE (protocol resize across a process boundary)", "source": "userspace/system_apps/gui_terminal/src/main.rs" },
-    { "marker": "gui_files: reconfigured OK", "claim": "the file manager re-imported a work-area-sized buffer in response to CONFIGURE (protocol resize across a process boundary)", "source": "userspace/system_apps/gui_files/src/main.rs" }
+    { "marker": "gui_files: reconfigured OK", "claim": "the file manager re-imported a work-area-sized buffer in response to CONFIGURE (protocol resize across a process boundary)", "source": "userspace/system_apps/gui_files/src/main.rs" },
+    { "marker": "gui_terminal: argb bg_alpha=210 fmt=argb8888", "claim": "the terminal resolved [terminal] bg_alpha=210 from apps/gui_terminal.toml and chose the ARGB8888 presentation format (translucent background, config-driven)", "source": "userspace/system_apps/gui_terminal/src/main.rs" },
+    { "marker": "gui_server: argb blit", "claim": "the compositor performed a per-pixel src-over composite of a translucent (ARGB8888) client instead of an opaque copy", "source": "userspace/system_apps/gui_server/src/main.rs" }
   ],
   "forbidden": [
     { "marker": "[PANIC]", "why": "kernel panic during desktop bring-up or resize re-negotiation", "source": "kernel/src/lib.rs" },

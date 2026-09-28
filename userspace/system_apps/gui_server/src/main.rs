@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 
 use gui_protocol_v1::server::Server;
 use gui_protocol_v1::wire::Request;
-use gui_protocol_v1::wire::FORMAT_XRGB8888;
+use gui_protocol_v1::wire::{FORMAT_ARGB8888, FORMAT_XRGB8888};
 use gui_protocol_v1::Opcode;
 
 use dwm_settings as settings;
@@ -1571,7 +1571,28 @@ fn blur_region(buf: &mut [u32], bw: usize, bh: usize, rx: i32, ry: i32, rw: i32,
     }
 }
 
-/// Blit a client's XRGB8888 surface into the back buffer at (x, y), clipped.
+/// Clip the rect `(x, y, w, h)` to the `bw*bh` framebuffer, returning
+/// `(x0, y0, cw, ch)` in buffer pixels (`cw == 0` or `ch == 0` = fully off-screen).
+fn clip_to_screen(x: i32, y: i32, w: i32, h: i32, bw: usize, bh: usize) -> (usize, usize, usize, usize) {
+    let x0 = x.max(0);
+    let y0 = y.max(0);
+    let x1 = (x + w).min(bw as i32);
+    let y1 = (y + h).min(bh as i32);
+    if x1 <= x0 || y1 <= y0 {
+        return (0, 0, 0, 0);
+    }
+    (x0 as usize, y0 as usize, (x1 - x0) as usize, (y1 - y0) as usize)
+}
+
+/// Blit a client's surface into the back buffer at (x, y), clipped. `argb`
+/// selects the compositing rule per the format the client imported its buffer
+/// with (captured in `ClientState.format`, mirrored into `Win.format`):
+///   * XRGB8888 (`argb == false`): the surface is opaque — a straight copy, the
+///     fast path; the top 8 bits are "don't care" so we never read them.
+///   * ARGB8888 (`argb == true`):  the surface carries a straight-alpha channel
+///     (e.g. a terminal with a translucent background) — src-over blend each
+///     pixel over the already-composited desktop so the wallpaper/windows behind
+///     show through, while opaque pixels (text, icons: alpha 255) overwrite.
 fn blit_surface(
     buf: &mut [u32],
     bw: usize,
@@ -1581,6 +1602,7 @@ fn blit_surface(
     src: &[u32],
     sw: usize,
     sh: usize,
+    argb: bool,
 ) {
     let mut sy = 0usize;
     while sy < sh {
@@ -1592,7 +1614,13 @@ fn blit_surface(
             while sx < sw {
                 let dx = x + sx as i32;
                 if dx >= 0 && (dx as usize) < bw {
-                    buf[drow + dx as usize] = src[srow + sx];
+                    if argb {
+                        // src-over: opaque (a==255) pixels overwrite, translucent
+                        // ones blend, fully transparent (a==0) leave the desktop.
+                        blend_pixel(buf, bw, bh, dx, dy, src[srow + sx]);
+                    } else {
+                        buf[drow + dx as usize] = src[srow + sx];
+                    }
                 }
                 sx += 1;
             }
@@ -1894,6 +1922,12 @@ struct Win {
     /// Lets the headless harness drive a full maximize->restore round trip without a
     /// mouse. Always 0 on the real desktop (`self_test` is false in `default.toml`).
     st_step: u8,
+    /// Pixel format the owning client imported its buffer with (mirrored from
+    /// `ClientState.format` in the per-frame sync). `FORMAT_ARGB8888` selects the
+    /// per-pixel src-over blit in `blit_surface` so a translucent client (e.g. a
+    /// terminal with `bg_alpha < 255`) shows the desktop through its background;
+    /// `FORMAT_XRGB8888` keeps the opaque fast-path copy.
+    format: u32,
 }
 
 impl Win {
@@ -2345,6 +2379,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             state: WinState::Floating,
             restore: None,
             st_step: 0,
+            format: clients[i].format,
         });
         clients[i].ready = true;
         clients[i].win_created = true;
@@ -2411,6 +2446,15 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     let scratch_len = panel_area.max(dock_area).max(menu_area).max(1);
     let mut blur_a: Vec<u32> = alloc::vec![0u32; scratch_len];
     let mut blur_b: Vec<u32> = alloc::vec![0u32; scratch_len];
+    // Scratch for translucent (ARGB) windows: the true backing (wallpaper + lower
+    // windows) behind a window's content rect, snapshotted before the opaque frame
+    // gradient overwrites it, so the client blends over what's actually behind the
+    // window rather than the window's own frame. Reused across frames.
+    let mut win_backing: Vec<u32> = Vec::new();
+    // One-shot latch: log the first per-pixel ARGB composite so the transparency
+    // path is observable in the serial log (headless proof that a translucent
+    // client is blended, not opaque-copied). Never fires when every client is XRGB.
+    let mut argb_blit_logged = false;
     // Frame-time instrumentation so the blur cost is observable in the serial
     // log even headless: report ms/frame once warm, then periodically.
     let mut prev_uptime = 0u64;
@@ -2495,6 +2539,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 w.buf_size = c.buf_size;
                 w.sw = c.surf_w as i32;
                 w.sh = c.surf_h as i32;
+                w.format = c.format;
             }
         }
 
@@ -2535,6 +2580,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 state: WinState::Floating,
                 restore: None,
                 st_step: 0,
+                format: clients[i].format,
             });
             clients[i].win_created = true;
             z.push(wi);
@@ -2984,6 +3030,25 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             if fx.shadow > 0 {
                 draw_soft_shadow(&mut back, bw, bh, ox, oy, ow, oh, fx.corner_radius, fx.shadow, fx.shadow_alpha * a / 255);
             }
+            // Translucent (ARGB) window: snapshot the real backing (wallpaper +
+            // lower-z windows already composited into `back`) under the content
+            // rect NOW, before the opaque frame gradient below overwrites it. It's
+            // restored right before the client blit so the client's semi-transparent
+            // background blends over what's genuinely behind the window. Opaque
+            // (XRGB) windows skip this — they overwrite the content rect wholesale.
+            let translucent = w.format == FORMAT_ARGB8888 && a >= 224;
+            let mut backing_rect: Option<(usize, usize, usize, usize)> = None;
+            if translucent {
+                let (bx, by, cw, ch) = clip_to_screen(w.cx, w.cy, w.sw, w.sh, bw, bh);
+                if cw > 0 && ch > 0 {
+                    win_backing.clear();
+                    for ry in 0..ch {
+                        let srow = (by + ry) * bw + bx;
+                        win_backing.extend_from_slice(&back[srow..srow + cw]);
+                    }
+                    backing_rect = Some((bx, by, cw, ch));
+                }
+            }
             // Rounded frame: top corners only, so the square-bottomed client
             // surface tucks flush against the bottom edge (no corner poke-through).
             fill_rrect_grad(&mut back, bw, bh, ox, oy, ow, oh, fx.corner_radius, RR_TOP, shade(bcol, 18), shade(bcol, -12), a);
@@ -3044,13 +3109,32 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                     draw_text_ttf(&mut back, bw, bh, f, w.cx + 12, baseline, px, win_title(&apps, w.app), txtcol);
                 }
             }
-            // Client surface (opaque). Held back until the frame is nearly solid
-            // so the grow-in shows a clean card, not a half-blended image.
+            // Client surface. Held back until the frame is nearly solid so the
+            // grow-in shows a clean card, not a half-blended image. XRGB surfaces
+            // are an opaque copy (fast path); ARGB surfaces blend per-pixel over
+            // the restored backing so a translucent client reveals the desktop.
             if a >= 224 {
                 let want = (w.sw as usize) * (w.sh as usize);
                 if want > 0 && want * 4 <= w.buf_size {
+                    // Restore the pre-frame backing under the content rect so the
+                    // ARGB blend composites over wallpaper/lower windows, not frame.
+                    if let Some((bx, by, cw, ch)) = backing_rect {
+                        for ry in 0..ch {
+                            let drow = (by + ry) * bw + bx;
+                            let srow = ry * cw;
+                            back[drow..drow + cw].copy_from_slice(&win_backing[srow..srow + cw]);
+                        }
+                    }
                     let src = unsafe { core::slice::from_raw_parts(w.buf_ptr as *const u32, want) };
-                    blit_surface(&mut back, bw, bh, w.cx, w.cy, src, w.sw as usize, w.sh as usize);
+                    let argb = w.format == FORMAT_ARGB8888;
+                    if argb && !argb_blit_logged {
+                        libdunit::println(&alloc::format!(
+                            "gui_server: argb blit (client format={}, per-pixel src-over)",
+                            w.format
+                        ));
+                        argb_blit_logged = true;
+                    }
+                    blit_surface(&mut back, bw, bh, w.cx, w.cy, src, w.sw as usize, w.sh as usize, argb);
                 }
             }
         }

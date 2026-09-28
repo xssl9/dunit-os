@@ -63,6 +63,23 @@ impl<'a> Surface<'a> {
         self.pixels[idx] = (out_a << 24) | (r << 16) | (g << 8) | b;
     }
 
+    /// Overwrite every pixel with `color` (a straight store, NOT a blend). Use
+    /// this — never `fill_rect` — for a per-frame background reset when the
+    /// surface is presented as translucent ARGB: `fill_rect` composites src-over
+    /// onto whatever the buffer held last frame, so a `bg_alpha < 255` fill would
+    /// accumulate alpha over the previous frame's already-blended contents and
+    /// drift toward opaque. `clear` writes the exact `0xAARRGGBB` the client wants
+    /// the compositor to see, so the desktop shows through with a stable alpha.
+    pub fn clear(&mut self, color: Color) {
+        let packed = pack_argb(color);
+        for py in 0..self.height {
+            let row = py * self.stride;
+            for px in 0..self.width {
+                self.pixels[row + px] = packed;
+            }
+        }
+    }
+
     /// Fill the rect `(x, y, w, h)` (surface pixels, clipped) with `color`,
     /// alpha-blended. Fractional coordinates are rounded to the nearest pixel.
     pub fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color) {
