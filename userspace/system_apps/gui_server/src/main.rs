@@ -1102,14 +1102,59 @@ fn reconfigure_client(
     }
 }
 
-/// Toggle a window between maximized (filling the work area = the framebuffer
-/// minus the reserved panel + dock) and its saved floating geometry. This is the
-/// single maximize/restore action shared by the title-bar chip and the headless
-/// self-test: it saves/restores the floating `(cx,cy,sw,sh)`, sets the target
-/// position, and asks the owning client to re-import a buffer at the new size via
-/// `reconfigure_client`. The size is applied only after the client re-imports (the
-/// per-frame Win<->ClientState sync mirrors it), so a client that ignores the
-/// CONFIGURE stays at its old size — position still updates, which is harmless.
+/// The maximize target rect `(cx, cy, w, h)` = the framebuffer minus the reserved
+/// panel (top) and dock (left). Factored into one helper so Phase 5 can swap the
+/// fixed panel/dock insets for configurable per-edge `reserved_insets` in a single
+/// place, and so the interactive chip, the drag-restore path, and the headless
+/// self-test all compute the same geometry.
+fn work_area(bw: usize, bh: usize, ly: &Layout) -> (i32, i32, i32, i32) {
+    let x = ly.dock_w + ly.border;
+    let y = ly.panel_h + ly.title_h + ly.border;
+    let w = (bw as i32 - ly.dock_w - 2 * ly.border).max(1);
+    let h = (bh as i32 - ly.panel_h - ly.title_h - 2 * ly.border).max(1);
+    (x, y, w, h)
+}
+
+/// Move `win` into `new_state`, driving the client re-import needed for the new
+/// size. This is the single window-state transition used by the title-bar chip,
+/// the macOS-style drag-to-restore, and the headless self-test. Leaving `Floating`
+/// snapshots the current `(cx,cy,sw,sh)` into `restore`; returning to `Floating`
+/// replays that snapshot. The *position* is applied here immediately (so the
+/// decoration follows at once); the *size* only actually changes once the owning
+/// client re-imports at the CONFIGURE'd geometry (mirrored back by the per-frame
+/// Win<->ClientState sync), so a client that ignores CONFIGURE keeps its size while
+/// its position still updates — harmless. No-op if already in `new_state`.
+fn set_window_state(
+    server: &mut Server,
+    clients: &[ClientState],
+    win: &mut Win,
+    new_state: WinState,
+    bw: usize,
+    bh: usize,
+    ly: &Layout,
+) {
+    // STATE_ACTIVATED — the surface stays focused across the reconfigure.
+    const STATE_ACTIVATED: u32 = 1;
+    if win.state == new_state {
+        return;
+    }
+    // Snapshot floating geometry once, when first leaving the floating state.
+    if win.state == WinState::Floating {
+        win.restore = Some((win.cx, win.cy, win.sw, win.sh));
+    }
+    let target = match new_state {
+        WinState::Maximized => Some(work_area(bw, bh, ly)),
+        WinState::Floating => win.restore.take(),
+    };
+    win.state = new_state;
+    if let Some((tx, ty, tw, th)) = target {
+        win.cx = tx;
+        win.cy = ty;
+        reconfigure_client(server, clients, win.pid, tw as u32, th as u32, STATE_ACTIVATED);
+    }
+}
+
+/// Toggle the title-bar maximize chip: `Maximized` <-> `Floating`.
 fn toggle_maximize(
     server: &mut Server,
     clients: &[ClientState],
@@ -1118,24 +1163,12 @@ fn toggle_maximize(
     bh: usize,
     ly: &Layout,
 ) {
-    // STATE_ACTIVATED — the surface stays focused across the reconfigure.
-    const STATE_ACTIVATED: u32 = 1;
-    if win.maximized {
-        win.maximized = false;
-        if let Some((rx, ry, rw, rh)) = win.restore.take() {
-            win.cx = rx;
-            win.cy = ry;
-            reconfigure_client(server, clients, win.pid, rw as u32, rh as u32, STATE_ACTIVATED);
-        }
+    let next = if win.state == WinState::Maximized {
+        WinState::Floating
     } else {
-        win.restore = Some((win.cx, win.cy, win.sw, win.sh));
-        let ww = (bw as i32 - ly.dock_w - 2 * ly.border).max(1);
-        let wh = (bh as i32 - ly.panel_h - ly.title_h - 2 * ly.border).max(1);
-        win.cx = ly.dock_w + ly.border;
-        win.cy = ly.panel_h + ly.title_h + ly.border;
-        win.maximized = true;
-        reconfigure_client(server, clients, win.pid, ww as u32, wh as u32, STATE_ACTIVATED);
-    }
+        WinState::Maximized
+    };
+    set_window_state(server, clients, win, next, bw, bh, ly);
 }
 
 // ===========================================================================
@@ -1809,6 +1842,20 @@ fn win_title<'a>(apps: &'a Applications, app: u8) -> &'a str {
 }
 
 
+/// Layout state of a top-level window. `Floating` is the free-form default every
+/// client is created in; `Maximized` fills the work area (screen minus the
+/// reserved panel + dock). Modelled as an enum, not a `maximized: bool`, so the
+/// same state machine (`set_window_state`) extends to `Fullscreen` / tiled layouts
+/// later without touching every call site — a window is always in exactly one
+/// state, and `Win::restore` holds the floating geometry to return to. This also
+/// keeps "maximize" (a window *state*) cleanly separate from "resize" (the
+/// protocol CONFIGURE mechanism that *any* state change drives).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WinState {
+    Floating,
+    Maximized,
+}
+
 /// Per-window compositor state, derived from a `ClientState` but with a live
 /// content origin the user can drag around.
 struct Win {
@@ -1835,14 +1882,18 @@ struct Win {
     /// Minimized windows are not composited and receive no input; a click on the
     /// app's dock icon (task switcher) restores and raises them.
     minimized: bool,
-    /// Maximized to the work area (screen minus the reserved panel/dock). Driven
-    /// by the title-bar maximize chip: the compositor pushes a server-initiated
-    /// CONFIGURE and the client re-imports a work-area-sized buffer (Phase 3).
-    maximized: bool,
-    /// Floating geometry `(cx, cy, sw, sh)` saved when the window maximizes, so an
-    /// un-maximize restores the exact pre-maximize position and size. `None` while
-    /// the window is floating.
+    /// Current layout state (see `WinState`). Driven by the title-bar maximize
+    /// chip and by dragging a tiled window's title bar (macOS-style restore).
+    state: WinState,
+    /// Floating geometry `(cx, cy, sw, sh)` snapshotted when the window leaves the
+    /// floating state, so returning to `Floating` restores the exact pre-maximize
+    /// position and size. `None` while the window is floating.
     restore: Option<(i32, i32, i32, i32)>,
+    /// Self-test choreography step (config-gated `[startup] self_test`, test.toml
+    /// only): 0 = not yet maximized, 1 = maximized (awaiting restore), 2 = restored.
+    /// Lets the headless harness drive a full maximize->restore round trip without a
+    /// mouse. Always 0 on the real desktop (`self_test` is false in `default.toml`).
+    st_step: u8,
 }
 
 impl Win {
@@ -1885,6 +1936,12 @@ impl Win {
         let bx = self.cx + self.sw - 3 * sz - 14;
         let by = self.cy - self.title_h + 6;
         mx >= bx && mx < bx + sz && my >= by && my < by + sz
+    }
+    /// True when the window is not in its free-form floating state (currently only
+    /// `Maximized`): it occupies a compositor-computed region, so a title-bar drag
+    /// restores it to `restore` before following the pointer (macOS-style).
+    fn is_tiled(&self) -> bool {
+        self.state != WinState::Floating
     }
 }
 /// Persistent interactive compositor. Owns a full-screen back buffer, decorates
@@ -2285,8 +2342,9 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             ws: 0,
             born: 0,
             minimized: false,
-            maximized: false,
+            state: WinState::Floating,
             restore: None,
+            st_step: 0,
         });
         clients[i].ready = true;
         clients[i].win_created = true;
@@ -2474,34 +2532,56 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 ws: clients[i].ws,
                 born: ticks,
                 minimized: false,
-                maximized: false,
+                state: WinState::Floating,
                 restore: None,
+                st_step: 0,
             });
             clients[i].win_created = true;
             z.push(wi);
         }
 
         // Config-gated resize self-exercise (`test.toml` `[startup] self_test`).
-        // The automated harness has no mouse, so a title-bar maximize chip can't
-        // be clicked. Instead drive EVERY live window through the SAME
-        // `toggle_maximize` path the chip uses — proving server-push CONFIGURE +
-        // client buffer re-import across a real process boundary. We maximize all
-        // windows (not just runtime-pumped ones): which clients present first in
-        // `serve_two_clients` is a timing race, so the terminal or file manager can
-        // land as an initial window; targeting every window makes the proof
-        // independent of presentation order. Each window latches `maximized`, so it
-        // fires exactly once as it appears and the client then prints its own
-        // "reconfigured OK". Never runs on the real desktop (`self_test` is false in
-        // `default.toml`).
+        // The automated harness has no mouse, so the title-bar maximize chip and
+        // the drag-to-restore gesture can't be exercised by hand. Instead drive
+        // EVERY live window through the SAME `set_window_state` path those gestures
+        // use — proving server-push CONFIGURE + client buffer re-import across a
+        // real process boundary, in BOTH directions:
+        //   step 0 -> 1: maximize on first sight (window fills the work area);
+        //   step 1 -> 2: after a short settle, restore to the floating geometry.
+        // Maximizing every window (not just runtime-pumped ones) makes the proof
+        // independent of which client presents first in `serve_two_clients`. The
+        // restore leg is what verifies the user-visible "un-maximize" actually
+        // works end-to-end (the same `set_window_state(Floating)` the chip and the
+        // drag-restore call). Never runs on the real desktop (`self_test` is false
+        // in `default.toml`).
         if apps.self_test {
+            let (_, _, ww, wh) = work_area(bw, bh, &ly);
             for wi in 0..wins.len() {
-                if wins[wi].alive && !wins[wi].maximized {
-                    let ww = (bw as i32 - ly.dock_w - 2 * ly.border).max(1);
-                    let wh = (bh as i32 - ly.panel_h - ly.title_h - 2 * ly.border).max(1);
-                    toggle_maximize(server, clients, &mut wins[wi], bw, bh, &ly);
+                if !wins[wi].alive {
+                    continue;
+                }
+                if wins[wi].st_step == 0 && wins[wi].state == WinState::Floating {
+                    set_window_state(server, clients, &mut wins[wi], WinState::Maximized, bw, bh, &ly);
+                    wins[wi].st_step = 1;
                     libdunit::println(&alloc::format!(
                         "gui_server: reconfigure w={} h={} acked (self-test)",
                         ww, wh
+                    ));
+                } else if wins[wi].st_step == 1 && wins[wi].sw >= ww {
+                    // The client has observably re-imported the work-area-sized
+                    // buffer (its synced surface reached the maximize width), so the
+                    // maximize round trip is complete. Now prove the reverse leg —
+                    // the user-visible un-maximize — via the SAME
+                    // `set_window_state(Floating)` the chip and drag-to-restore call.
+                    let (rw, rh) = wins[wi]
+                        .restore
+                        .map(|(_, _, w, h)| (w, h))
+                        .unwrap_or((wins[wi].sw, wins[wi].sh));
+                    set_window_state(server, clients, &mut wins[wi], WinState::Floating, bw, bh, &ly);
+                    wins[wi].st_step = 2;
+                    libdunit::println(&alloc::format!(
+                        "gui_server: reconfigure w={} h={} restored (self-test)",
+                        rw, rh
                     ));
                 }
             }
@@ -2654,7 +2734,34 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                     toggle_maximize(server, clients, &mut wins[wi], bw, bh, &ly);
                     drag = None;
                 } else if wins[wi].in_title(mx, my) {
-                    drag = Some((wi, mx - wins[wi].cx, my - wins[wi].cy));
+                    // Title-bar drag. macOS-style restore: grabbing a *tiled*
+                    // window (e.g. maximized) first restores it to its floating
+                    // size, then it follows the pointer keeping the SAME
+                    // proportional grip along the now-narrower title bar — so the
+                    // window "shrinks under the cursor" instead of snapping to a
+                    // corner. A floating window just starts dragging from where it
+                    // was grabbed. `ox`/`oy` are offsets from the window content
+                    // origin to the cursor (oy is negative — the bar sits above the
+                    // content), matching the drag-move math below.
+                    if wins[wi].is_tiled() {
+                        let old_w = wins[wi].sw.max(1);
+                        let grip_x = (mx - wins[wi].cx).clamp(0, old_w);
+                        let grip_y =
+                            (my - (wins[wi].cy - wins[wi].title_h)).clamp(0, (wins[wi].title_h - 1).max(0));
+                        let rest_w = wins[wi]
+                            .restore
+                            .map(|(_, _, w, _)| w)
+                            .unwrap_or(old_w)
+                            .max(1);
+                        set_window_state(server, clients, &mut wins[wi], WinState::Floating, bw, bh, &ly);
+                        let ox = (grip_x as i64 * rest_w as i64 / old_w as i64) as i32;
+                        let oy = grip_y - wins[wi].title_h;
+                        wins[wi].cx = mx - ox;
+                        wins[wi].cy = my - oy;
+                        drag = Some((wi, ox, oy));
+                    } else {
+                        drag = Some((wi, mx - wins[wi].cx, my - wins[wi].cy));
+                    }
                 } else if wins[wi].in_content(mx, my) {
                     // Click landed on client content: forward it to the client.
                     send_input(wins[wi].pid, IN_DOWN, mx - wins[wi].cx, my - wins[wi].cy, 0);
@@ -2916,7 +3023,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 fill_rect_alpha(&mut back, bw, bh, gx, gy, 2, gs, gcol);
                 fill_rect_alpha(&mut back, bw, bh, gx + gs - 2, gy, 2, gs, gcol);
                 // Already maximized: overlay a second, offset square (restore hint).
-                if w.maximized {
+                if w.state == WinState::Maximized {
                     let o = 2;
                     fill_rect_alpha(&mut back, bw, bh, gx + o, gy - o, gs, 2, gcol);
                     fill_rect_alpha(&mut back, bw, bh, gx + gs - 2 + o, gy - o, 2, gs, gcol);
