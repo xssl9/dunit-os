@@ -96,12 +96,14 @@ font             = "/assets/fonts/DejaVuSans.ttf"
 logo             = "/assets/images/logo.rgba"
 
 # Desktop widget card: a translucent plasmoid painted on the wallpaper (behind
-# windows) with the uptime clock and a live RAM/process monitor. `corner`:
-# 0 = top-left, 1 = top-right, 2 = bottom-left, 3 = bottom-right.
+# windows). `[widgets]` holds only desktop-wide policy: `enabled` is the master
+# on/off for the whole plasmoid, and `corner` is the default screen corner
+# (0 = top-left, 1 = top-right, 2 = bottom-left, 3 = bottom-right) inherited by a
+# widget whose file omits `corner`. WHICH widgets appear is owned per-widget by
+# /system/share/dwm/widgets/<name>.toml (clock, monitor, …) — remove a widget by
+# deleting its file or setting `enabled = false` there, not by a bool here.
 [widgets]
 enabled = true
-clock   = true
-monitor = true
 corner  = 1
 
 # Panel placement. `pos`: which screen edge the panel (wordmark + workspace pips +
