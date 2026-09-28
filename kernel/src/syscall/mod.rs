@@ -657,7 +657,13 @@ pub extern "C" fn syscall_handler(
         }
         Syscall::GetMouseState => sys_get_mouse_state(arg0 as *mut u8),
         Syscall::PtyCreate => sys_pty_create(),
-        Syscall::PtySpawn => sys_pty_spawn(arg0 as *const u8, arg1 as usize, arg2 as u32),
+        Syscall::PtySpawn => sys_pty_spawn(
+            arg0 as *const u8,
+            arg1 as usize,
+            arg2 as u32,
+            arg3 as *const u8,
+            arg4 as usize,
+        ),
         Syscall::PtyRead => sys_pty_read(arg0 as u32, arg1 as *mut u8, arg2 as usize),
         Syscall::PtyWrite => sys_pty_write(arg0 as u32, arg1 as *const u8, arg2 as usize),
         Syscall::PtyClose => sys_pty_close(arg0 as u32),
@@ -1888,6 +1894,7 @@ fn sys_get_mouse_state(out: *mut u8) -> i64 {
 fn spawn_process_from_user(
     path: *const u8,
     path_len: usize,
+    extra_env: &[&str],
 ) -> Result<crate::process::ProcessId, i64> {
     let path = copy_string_from_user_len(path, path_len, MAX_USER_PATH)?;
 
@@ -1912,7 +1919,7 @@ fn spawn_process_from_user(
         .find(|part| !part.is_empty())
         .unwrap_or(resolved.as_str());
     let argv = [String::from(argv0)];
-    if crate::elf::prepare_process_elf(pid, &data, &argv).is_err() {
+    if crate::elf::prepare_process_elf_env(pid, &data, &argv, extra_env).is_err() {
         syscall_log(format_args!(
             "[SPAWN] prepare failed pid={} path={}\n",
             pid.0, resolved
@@ -1929,7 +1936,7 @@ fn spawn_process_from_user(
 }
 
 fn sys_spawn_process(path: *const u8, path_len: usize) -> i64 {
-    match spawn_process_from_user(path, path_len) {
+    match spawn_process_from_user(path, path_len, &[]) {
         Ok(pid) => pid.0 as i64,
         Err(error) => error,
     }
@@ -1947,13 +1954,37 @@ fn sys_pty_create() -> i64 {
 
 /// Spawn `path` as a child and attach it as the slave of pty `id`. Its stdin
 /// reads drain the pty's master→slave ring and its stdout/stderr writes feed the
-/// slave→master ring (see `sys_read`/`sys_write` routing). Returns the child pid.
-fn sys_pty_spawn(path: *const u8, path_len: usize, id: u32) -> i64 {
+/// slave→master ring (see `sys_read`/`sys_write` routing). `env_ptr`/`env_len`
+/// point at an optional NUL-separated block of `KEY=VALUE` entries handed to the
+/// child on top of the base exec environment (the terminal uses this to pass its
+/// configured `PROMPT` to the shell). Returns the child pid.
+fn sys_pty_spawn(
+    path: *const u8,
+    path_len: usize,
+    id: u32,
+    env_ptr: *const u8,
+    env_len: usize,
+) -> i64 {
     let master = match crate::process::current_process() {
         Some(process) => process.pid,
         None => return EINVAL,
     };
-    let child = match spawn_process_from_user(path, path_len) {
+    // Copy the optional env block (NUL-separated `KEY=VALUE`) from userspace and
+    // split it into owned strings, dropping empties and non-UTF-8 fragments.
+    let env_owned: Vec<String> = if !env_ptr.is_null() && env_len > 0 {
+        match copy_buffer_from_user(env_ptr, env_len) {
+            Ok(bytes) => bytes
+                .split(|&b| b == 0)
+                .filter(|s| !s.is_empty())
+                .filter_map(|s| core::str::from_utf8(s).ok().map(String::from))
+                .collect(),
+            Err(error) => return error,
+        }
+    } else {
+        Vec::new()
+    };
+    let env_refs: Vec<&str> = env_owned.iter().map(|s| s.as_str()).collect();
+    let child = match spawn_process_from_user(path, path_len, &env_refs) {
         Ok(pid) => pid,
         Err(error) => return error,
     };

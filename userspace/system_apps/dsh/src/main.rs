@@ -27,7 +27,10 @@ fn panic(_: &PanicInfo) -> ! {
     libdunit::exit(101)
 }
 
-const PROMPT: &str = "dunit$ ";
+/// Fallback shell prompt when no `PROMPT` is present in the environment. The
+/// terminal passes its configured `[terminal] prompt` (default "dsh") via the
+/// pty-spawn env, so this only applies when dsh is launched without one.
+const PROMPT_DEFAULT: &str = "dsh";
 
 fn out(s: &str) {
     libdunit::write(1, s.as_bytes());
@@ -191,10 +194,12 @@ struct Ed {
     hist_idx: usize,
     esc: Esc,
     param: u32,
+    /// The shell prompt (from `PROMPT` in the environment, else `PROMPT_DEFAULT`).
+    prompt: &'static str,
 }
 
 impl Ed {
-    fn new() -> Self {
+    fn new(prompt: &'static str) -> Self {
         Ed {
             line: String::new(),
             cursor: 0,
@@ -203,6 +208,7 @@ impl Ed {
             hist_idx: 0,
             esc: Esc::Normal,
             param: 0,
+            prompt,
         }
     }
 
@@ -282,12 +288,12 @@ impl Ed {
         self.cursor = 0;
         self.echoed = 0;
         self.hist_idx = self.history.len();
-        out(PROMPT);
+        out(self.prompt);
     }
 
     fn clear_screen(&mut self) {
         out("\x0c"); // form feed: gui_terminal clears the scrollback
-        out(PROMPT);
+        out(self.prompt);
         self.echoed = 0;
         redraw(&self.line, &mut self.echoed);
     }
@@ -303,7 +309,7 @@ impl Ed {
         }
         self.hist_idx = self.history.len();
         run(&entered);
-        out(PROMPT);
+        out(self.prompt);
     }
 
     /// Feed one raw byte from the pty through the editor / ESC state machine.
@@ -357,9 +363,18 @@ impl Ed {
 }
 
 #[no_mangle]
-pub extern "C" fn _start() -> ! {
-    out(PROMPT);
-    let mut ed = Ed::new();
+pub extern "C" fn _start(
+    argc: usize,
+    argv: libdunit::RawArgv,
+    envp: libdunit::RawEnvp,
+) -> ! {
+    libdunit::init_runtime(argc, argv, envp);
+    // The prompt is desktop policy: the terminal passes its `[terminal] prompt`
+    // through the environment (see `pty_spawn_env`). Fall back to the built-in
+    // default when launched without one.
+    let prompt = libdunit::getenv("PROMPT").unwrap_or(PROMPT_DEFAULT);
+    out(prompt);
+    let mut ed = Ed::new(prompt);
     let mut buf = [0u8; 128];
     loop {
         let n = libdunit::read(0, &mut buf);

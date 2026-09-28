@@ -46,6 +46,7 @@ const BUFFER: u64 = 2;
 const W: u32 = 520;
 const H: u32 = 380;
 const FMT_XRGB8888: u32 = 1;
+const FMT_ARGB8888: u32 = 2;
 
 // --- Grid geometry (client-local pixels) ---
 const PAD: i32 = 10;
@@ -59,15 +60,33 @@ const CELL_H: i32 = 72;
 const ICON: i32 = 32;
 
 
-// --- Palette (opaque ARGB via Color) ---
-const BG: Color = Color::rgb(0x12, 0x18, 0x20);
-const HEADER_BG: Color = Color::rgb(0x0e, 0x14, 0x1b);
-const STATUS_BG: Color = Color::rgb(0x0e, 0x14, 0x1b);
-const ACCENT: Color = Color::rgb(0x2f, 0x8f, 0x5a); // Green Tea accent
-const LABEL: Color = Color::rgb(0xcd, 0xd6, 0xf4);
-const MUTED: Color = Color::rgb(0x8a, 0x94, 0xa8);
-/// Selection wash painted behind the icon+label of the active cell.
-const SEL_BG: Color = Color::rgba(0x2f, 0x8f, 0x5a, 0x50);
+// --- Palette (config-resolved ARGB via Color) ---
+/// Resolved color scheme, built once from `FilesCfg` (config→behavior). Each
+/// field is a straight-alpha ARGB `Color`; the chrome colors are forced opaque
+/// and the selection wash keeps its configured alpha so it blends over the grid.
+#[derive(Clone, Copy)]
+struct Palette {
+    /// Opaque base fill used for dialog input fields. The window's per-frame base
+    /// clear carries the configured `bg_alpha` separately (see `Files::clear_bg`).
+    bg: Color,
+    header_bg: Color,
+    status_bg: Color,
+    accent: Color,
+    label: Color,
+    muted: Color,
+    /// Selection wash painted behind the icon+label of the active cell.
+    sel_bg: Color,
+}
+
+/// Unpack a `0xAARRGGBB` config word into a straight-alpha `Color`.
+fn col(argb: u32) -> Color {
+    Color::rgba(
+        ((argb >> 16) & 0xFF) as u8,
+        ((argb >> 8) & 0xFF) as u8,
+        (argb & 0xFF) as u8,
+        ((argb >> 24) & 0xFF) as u8,
+    )
+}
 
 /// The font, embedded in the ELF (M4 still ships assets in-image).
 static FONT_BYTES: &[u8] = include_bytes!("../../../../assets/fonts/DejaVuSans.ttf");
@@ -245,9 +264,9 @@ fn read_theme_icon(theme: &str, name: &str) -> Option<Vec<u8>> {
 }
 
 impl Icons {
-    fn load() -> Icons {
-        let cfg = dwm_settings::load();
-        let theme = cfg.desktop.icon_theme.as_str();
+    /// Load the six mimetype icons from `theme` (already resolved: the
+    /// `[files] icon_theme` override, else the shared `[desktop] icon_theme`).
+    fn load(theme: &str) -> Icons {
         Icons {
             folder: read_theme_icon(theme, "mime_folder"),
             text: read_theme_icon(theme, "mime_text"),
@@ -297,10 +316,18 @@ struct Files {
     /// CONFIGURE, so the grid geometry (columns/rows/cap) derives from these.
     w: i32,
     h: i32,
+    /// Config-resolved color scheme (chrome + selection wash).
+    pal: Palette,
+    /// Per-frame base clear color, carrying the configured `bg_alpha` (a value
+    /// < 255 lets the wallpaper show through the file-manager background).
+    clear_bg: Color,
+    /// Negotiated pixel format: `FMT_XRGB8888` when opaque, `FMT_ARGB8888` when
+    /// the base carries alpha. Threaded into every ImportBuffer.
+    fmt: u32,
 }
 
 impl Files {
-    fn new() -> Files {
+    fn new(pal: Palette, clear_bg: Color, fmt: u32) -> Files {
         let mut f = Files {
             path: String::from("/"),
             items: Vec::new(),
@@ -309,6 +336,9 @@ impl Files {
             clip: None,
             w: W as i32,
             h: H as i32,
+            pal,
+            clear_bg,
+            fmt,
         };
         f.reload();
         f
@@ -531,12 +561,15 @@ fn render(px: *mut u8, font: &Font, files: &Files, icons: &Icons, mode: &Mode) {
     let pixels = unsafe { core::slice::from_raw_parts_mut(px as *mut u32, (w * h) as usize) };
     let mut s = Surface::new(pixels, w as usize, h as usize);
 
-    s.fill_rect(0.0, 0.0, w as f32, h as f32, BG);
+    // Straight-alpha base: `clear` writes the configured bg (with its alpha)
+    // over every pixel — unlike `fill_rect`, which would blend over and drift
+    // the alpha of the previous frame, breaking a translucent background.
+    s.clear(files.clear_bg);
 
     // Header bar + breadcrumb path.
-    s.fill_rect(0.0, 0.0, w as f32, HEADER_H as f32, HEADER_BG);
+    s.fill_rect(0.0, 0.0, w as f32, HEADER_H as f32, files.pal.header_bg);
     let crumb = fit_label(font, &files.path, 15.0, (w - 2 * PAD) as f32);
-    draw_text(&mut s, font, PAD, 20, 15.0, &crumb, ACCENT);
+    draw_text(&mut s, font, PAD, 20, 15.0, &crumb, files.pal.accent);
 
     // Grid of cells: an optional ".." parent cell, then the entries.
     let has_parent = files.has_parent();
@@ -556,7 +589,7 @@ fn render(px: *mut u8, font: &Font, files: &Files, icons: &Icons, mode: &Mode) {
         };
 
         if is_sel {
-            s.fill_rect((cx + 4) as f32, (cy + 2) as f32, (CELL_W - 8) as f32, (CELL_H - 6) as f32, SEL_BG);
+            s.fill_rect((cx + 4) as f32, (cy + 2) as f32, (CELL_W - 8) as f32, (CELL_H - 6) as f32, files.pal.sel_bg);
         }
 
         // Icon centered horizontally near the top of the cell.
@@ -564,7 +597,7 @@ fn render(px: *mut u8, font: &Font, files: &Files, icons: &Icons, mode: &Mode) {
         let iy = cy + 6;
         match icons.get(kind) {
             Some(rgba) => s.blit_image(ix, iy, rgba, ICON as usize, ICON as usize),
-            None => s.fill_rect(ix as f32, iy as f32, ICON as f32, ICON as f32, MUTED),
+            None => s.fill_rect(ix as f32, iy as f32, ICON as f32, ICON as f32, files.pal.muted),
         }
 
         // Label centered under the icon, ellipsized to the cell width.
@@ -573,11 +606,11 @@ fn render(px: *mut u8, font: &Font, files: &Files, icons: &Icons, mode: &Mode) {
         let tw = text_width(font, &text, px_lbl);
         let tx = cx + ((CELL_W as f32 - tw) / 2.0) as i32;
         let baseline = iy + ICON + 16;
-        draw_text(&mut s, font, tx, baseline, px_lbl, &text, LABEL);
+        draw_text(&mut s, font, tx, baseline, px_lbl, &text, files.pal.label);
     }
 
     // Status bar: entry count (+ hidden overflow) and the selected name.
-    s.fill_rect(0.0, (h - STATUS_H) as f32, w as f32, STATUS_H as f32, STATUS_BG);
+    s.fill_rect(0.0, (h - STATUS_H) as f32, w as f32, STATUS_H as f32, files.pal.status_bg);
     let mut status = String::new();
     push_u32(&mut status, files.total as u32);
     status.push_str(" items");
@@ -593,13 +626,13 @@ fn render(px: *mut u8, font: &Font, files: &Files, icons: &Icons, mode: &Mode) {
         }
     }
     let sb = fit_label(font, &status, 12.0, (w - 2 * PAD) as f32);
-    draw_text(&mut s, font, PAD, h - 7, 12.0, &sb, MUTED);
+    draw_text(&mut s, font, PAD, h - 7, 12.0, &sb, files.pal.muted);
 
     // Overlays on top of the base view.
     match mode {
         Mode::Browse => {}
         Mode::Menu { mx, my } => draw_menu(&mut s, font, files, *mx, *my),
-        Mode::Text { rename, buf } => draw_text_box(&mut s, font, w, h, *rename, buf),
+        Mode::Text { rename, buf } => draw_text_box(&mut s, font, &files.pal, w, h, *rename, buf),
         Mode::Confirm => draw_confirm(&mut s, font, files),
     }
 }
@@ -704,58 +737,58 @@ fn menu_hit(w: i32, h: i32, mx: i32, my: i32, lx: i32, ly: i32) -> Option<usize>
 /// Draw the context menu at its clamped origin.
 fn draw_menu(s: &mut Surface, font: &Font, files: &Files, mx: i32, my: i32) {
     let (ox, oy) = menu_origin(files.w, files.h, mx, my);
-    s.fill_rect(ox as f32, oy as f32, MENU_W as f32, MENU_H as f32, HEADER_BG);
-    s.stroke_rect(ox as f32, oy as f32, MENU_W as f32, MENU_H as f32, 1.0, ACCENT);
+    s.fill_rect(ox as f32, oy as f32, MENU_W as f32, MENU_H as f32, files.pal.header_bg);
+    s.stroke_rect(ox as f32, oy as f32, MENU_W as f32, MENU_H as f32, 1.0, files.pal.accent);
     for (i, (action, label)) in MENU_ACTIONS.iter().enumerate() {
         let ry = oy + i as i32 * MENU_ROW_H;
-        let color = if action_enabled(*action, files) { LABEL } else { MUTED };
+        let color = if action_enabled(*action, files) { files.pal.label } else { files.pal.muted };
         draw_text(s, font, ox + 10, ry + MENU_ROW_H - 8, 13.0, label, color);
     }
 }
 
 /// Draw a centered dialog box (bg + accent border) in a `w`×`h` window and
 /// return its origin.
-fn draw_dialog(s: &mut Surface, w: i32, h: i32) -> (i32, i32) {
+fn draw_dialog(s: &mut Surface, pal: &Palette, w: i32, h: i32) -> (i32, i32) {
     let ox = (w - DLG_W) / 2;
     let oy = (h - DLG_H) / 2;
     s.fill_rect(0.0, 0.0, w as f32, h as f32, Color::rgba(0, 0, 0, 0x70)); // scrim
-    s.fill_rect(ox as f32, oy as f32, DLG_W as f32, DLG_H as f32, HEADER_BG);
-    s.stroke_rect(ox as f32, oy as f32, DLG_W as f32, DLG_H as f32, 1.0, ACCENT);
+    s.fill_rect(ox as f32, oy as f32, DLG_W as f32, DLG_H as f32, pal.header_bg);
+    s.stroke_rect(ox as f32, oy as f32, DLG_W as f32, DLG_H as f32, 1.0, pal.accent);
     (ox, oy)
 }
 
 /// Draw the text-entry overlay (New Folder / Rename) with the current buffer.
-fn draw_text_box(s: &mut Surface, font: &Font, w: i32, h: i32, rename: bool, buf: &str) {
-    let (ox, oy) = draw_dialog(s, w, h);
+fn draw_text_box(s: &mut Surface, font: &Font, pal: &Palette, w: i32, h: i32, rename: bool, buf: &str) {
+    let (ox, oy) = draw_dialog(s, pal, w, h);
     let title = if rename { "Rename to:" } else { "New folder name:" };
-    draw_text(s, font, ox + 14, oy + 26, 14.0, title, ACCENT);
+    draw_text(s, font, ox + 14, oy + 26, 14.0, title, pal.accent);
     // Input field.
     let fx = ox + 14;
     let fy = oy + 38;
     let fw = DLG_W - 28;
-    s.fill_rect(fx as f32, fy as f32, fw as f32, 22.0, BG);
-    s.stroke_rect(fx as f32, fy as f32, fw as f32, 22.0, 1.0, MUTED);
+    s.fill_rect(fx as f32, fy as f32, fw as f32, 22.0, pal.bg);
+    s.stroke_rect(fx as f32, fy as f32, fw as f32, 22.0, 1.0, pal.muted);
     let shown = fit_label(font, buf, 13.0, (fw - 12) as f32);
-    draw_text(s, font, fx + 6, fy + 16, 13.0, &shown, LABEL);
+    draw_text(s, font, fx + 6, fy + 16, 13.0, &shown, pal.label);
     // Caret after the text.
     let cw = text_width(font, &shown, 13.0);
     let cx = fx + 6 + round_i32(cw);
-    s.fill_rect(cx as f32, (fy + 4) as f32, 1.0, 14.0, LABEL);
-    draw_text(s, font, ox + 14, oy + DLG_H - 10, 11.0, "[Enter] ok   [Esc] cancel", MUTED);
+    s.fill_rect(cx as f32, (fy + 4) as f32, 1.0, 14.0, pal.label);
+    draw_text(s, font, ox + 14, oy + DLG_H - 10, 11.0, "[Enter] ok   [Esc] cancel", pal.muted);
 }
 
 /// Draw the delete-confirmation overlay for the selected entry.
 fn draw_confirm(s: &mut Surface, font: &Font, files: &Files) {
-    let (ox, oy) = draw_dialog(s, files.w, files.h);
-    draw_text(s, font, ox + 14, oy + 26, 14.0, "Delete this file?", ACCENT);
+    let (ox, oy) = draw_dialog(s, &files.pal, files.w, files.h);
+    draw_text(s, font, ox + 14, oy + 26, 14.0, "Delete this file?", files.pal.accent);
     let name = files
         .selected
         .and_then(|i| files.items.get(i))
         .map(|it| it.name.as_str())
         .unwrap_or("");
     let shown = fit_label(font, name, 13.0, (DLG_W - 28) as f32);
-    draw_text(s, font, ox + 14, oy + 50, 13.0, &shown, LABEL);
-    draw_text(s, font, ox + 14, oy + DLG_H - 10, 11.0, "[Enter] delete   [Esc] cancel", MUTED);
+    draw_text(s, font, ox + 14, oy + 50, 13.0, &shown, files.pal.label);
+    draw_text(s, font, ox + 14, oy + DLG_H - 10, 11.0, "[Enter] delete   [Esc] cancel", files.pal.muted);
 }
 
 
@@ -828,7 +861,7 @@ fn resize_surface(
         width: new_w,
         height: new_h,
         stride: new_w * 4,
-        format: FMT_XRGB8888,
+        format: files.fmt,
         offset: 0,
     }
     .encode(obj, *serial);
@@ -849,8 +882,8 @@ fn resize_surface(
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     // 0) Load this app's config (apps/gui_files.toml). A missing/garbage file
-    // yields the built-in baseline. The resolved values go to serial so a TOML
-    // edit is observable headless (config→behavior proof); Phase 6 applies them.
+    // yields the built-in baseline. The resolved values below actually drive the
+    // color scheme, icon theme and background transparency (config→behavior).
     let fcfg = dwm_settings::FilesCfg::load("gui_files");
     libdunit::println(&alloc::format!(
         "gui_files: cfg from_file={} icon_theme={} bg={:#010X} accent={:#010X} bg_alpha={}",
@@ -860,6 +893,28 @@ pub extern "C" fn _start() -> ! {
         fcfg.accent,
         fcfg.bg_alpha,
     ));
+
+    // Resolve the color scheme. Chrome colors are forced opaque; the base clear
+    // carries the configured `bg_alpha` (a value < 255 makes the window
+    // translucent, so ImportBuffer must advertise ARGB rather than XRGB).
+    let pal = Palette {
+        bg: col(fcfg.bg | 0xFF00_0000),
+        header_bg: col(fcfg.header_bg | 0xFF00_0000),
+        status_bg: col(fcfg.status_bg | 0xFF00_0000),
+        accent: col(fcfg.accent | 0xFF00_0000),
+        label: col(fcfg.label | 0xFF00_0000),
+        muted: col(fcfg.muted | 0xFF00_0000),
+        sel_bg: col(fcfg.sel_bg),
+    };
+    let clear_bg = col((fcfg.bg_alpha << 24) | (fcfg.bg & 0x00FF_FFFF));
+    let fmt = if fcfg.bg_alpha < 255 { FMT_ARGB8888 } else { FMT_XRGB8888 };
+    // Icon theme: the per-app `[files] icon_theme` override, else the shared
+    // `[desktop] icon_theme`. `read_theme_icon` still falls back to "breeze".
+    let icon_theme = if fcfg.icon_theme.as_str().is_empty() {
+        dwm_settings::load().desktop.icon_theme
+    } else {
+        fcfg.icon_theme
+    };
 
     // 1) Handshake: compositor pid + our client id (id is a tint hint only).
     let mut m = [0u8; 8];
@@ -890,8 +945,8 @@ pub extern "C" fn _start() -> ! {
             libdunit::exit(7);
         }
     };
-    let icons = Icons::load();
-    let mut files = Files::new();
+    let icons = Icons::load(icon_theme.as_str());
+    let mut files = Files::new(pal, clear_bg, fmt);
     let mut mode = Mode::Browse;
     // The surface's live geometry. The compositor may resize us via a
     // server-pushed CONFIGURE, so track it rather than reusing the W/H consts.
@@ -918,7 +973,7 @@ pub extern "C" fn _start() -> ! {
 
     // 4) CREATE_SURFACE -> RESULT + CONFIGURE (capture the configure token).
     let create =
-        Request::CreateSurface { role: 1, width: W, height: H, format: FMT_XRGB8888 }.encode(SURFACE, 2);
+        Request::CreateSurface { role: 1, width: W, height: H, format: fmt }.encode(SURFACE, 2);
     libdunit::ipc_send(compositor, &create);
     libdunit::ipc_recv_blocking(&mut rx, 0); // RESULT
     let n = libdunit::ipc_recv_blocking(&mut rx, 0); // CONFIGURE
@@ -953,7 +1008,7 @@ pub extern "C" fn _start() -> ! {
 
     // 7) IMPORT / ATTACH / COMMIT (each -> RESULT).
     let import =
-        Request::ImportBuffer { width: W, height: H, stride: W * 4, format: FMT_XRGB8888, offset: 0 }
+        Request::ImportBuffer { width: W, height: H, stride: W * 4, format: fmt, offset: 0 }
             .encode(BUFFER, 4);
     libdunit::ipc_send(compositor, &import);
     libdunit::ipc_recv_blocking(&mut rx, 0);

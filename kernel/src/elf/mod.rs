@@ -208,7 +208,23 @@ pub fn run_process_elf(data: &[u8], argv: &[String]) -> Result<ProcessExit, ElfE
 }
 
 pub fn prepare_process_elf(pid: ProcessId, data: &[u8], argv: &[String]) -> Result<(), ElfError> {
+    prepare_process_elf_env(pid, data, argv, &[])
+}
+
+/// Like [`prepare_process_elf`] but appends `extra_env` (spawner-supplied
+/// `KEY=VALUE` entries) after the base [`EXEC_ENV`]. The exec ABI already carries
+/// an `envp` array (see [`prepare_initial_stack`]); this is the generic hook a
+/// spawner uses to hand a child extra environment (e.g. a terminal passing its
+/// configured `PROMPT` to the shell) without the kernel knowing any app specifics.
+pub fn prepare_process_elf_env(
+    pid: ProcessId,
+    data: &[u8],
+    argv: &[String],
+    extra_env: &[&str],
+) -> Result<(), ElfError> {
     let parser = ElfParser::new(data)?;
+    let mut env: alloc::vec::Vec<&str> = EXEC_ENV.to_vec();
+    env.extend_from_slice(extra_env);
     let prepared = crate::process::with_process_mut(pid, |process| {
         if load_into_process_address_space(&parser, process).is_err() {
             crate::memory::serial_write("[ELF-TEST] process load failed\r\n");
@@ -220,7 +236,7 @@ pub fn prepare_process_elf(pid: ProcessId, data: &[u8], argv: &[String]) -> Resu
             return Err(crate::process::ProcessError::InvalidUserContext);
         }
 
-        let initial_stack = match prepare_initial_stack(process, argv, &EXEC_ENV) {
+        let initial_stack = match prepare_initial_stack(process, argv, &env) {
             Ok(stack) => stack,
             Err(_) => {
                 crate::memory::serial_write("[ELF-TEST] argv stack setup failed\r\n");

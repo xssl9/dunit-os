@@ -1258,11 +1258,29 @@ pub fn pty_create() -> isize {
 /// what we `pty_write`, and its stdout/stderr feed what we `pty_read`. Returns
 /// the child pid or a negative errno.
 pub fn pty_spawn(path: &str, id: u32) -> isize {
-    syscall3(
+    pty_spawn_env(path, id, &[])
+}
+
+/// Like [`pty_spawn`] but hands the child extra environment: each `env` entry is
+/// a `KEY=VALUE` string, appended on top of the base exec environment. Entries
+/// are packed NUL-separated and handed to the kernel, which splits them back and
+/// places them on the child's `envp` (readable via [`getenv`]). Used by the
+/// terminal to pass its configured `PROMPT` to the shell without hardcoding it.
+pub fn pty_spawn_env(path: &str, id: u32, env: &[&str]) -> isize {
+    let mut block: Vec<u8> = Vec::new();
+    for (i, entry) in env.iter().enumerate() {
+        if i > 0 {
+            block.push(0);
+        }
+        block.extend_from_slice(entry.as_bytes());
+    }
+    syscall5(
         SYSCALL_PTY_SPAWN,
         path.as_ptr() as usize,
         path.len(),
         id as usize,
+        block.as_ptr() as usize,
+        block.len(),
     )
 }
 

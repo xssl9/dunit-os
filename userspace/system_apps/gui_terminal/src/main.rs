@@ -106,11 +106,17 @@ const POLL_MS: u64 = 40;
 /// The window's text font, embedded in the ELF (M4 still ships assets in-image).
 static FONT_BYTES: &[u8] = include_bytes!("../../../../assets/fonts/DejaVuSans.ttf");
 
-/// Load the configured TTF (`[desktop] font`) from the VFS, falling back to the
-/// embedded `FONT_BYTES` on any error — the desktop font is a live config knob.
-fn load_font() -> Result<Font, ()> {
+/// Load the terminal's TTF, falling back to the embedded `FONT_BYTES` on any
+/// error. Prefers the per-terminal `[terminal] font` when set; otherwise the
+/// shared `[desktop] font`. Both are live config knobs.
+fn load_font(tcfg: &dwm_settings::TerminalCfg) -> Result<Font, ()> {
     let cfg = dwm_settings::load();
-    if let Some(bytes) = libdunit::read_binary(cfg.desktop.font.as_str(), 4 * 1024 * 1024) {
+    let path = if tcfg.font.as_str().is_empty() {
+        cfg.desktop.font.as_str()
+    } else {
+        tcfg.font.as_str()
+    };
+    if let Some(bytes) = libdunit::read_binary(path, 4 * 1024 * 1024) {
         if let Ok(f) = Font::parse(bytes) {
             return Ok(f);
         }
@@ -130,10 +136,9 @@ fn u64_at(p: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(a)
 }
 
-/// Terminal colors (ARGB8888). Background is fixed; the default foreground
-/// matches the old flat theme. The live `fg` is mutated by SGR (ESC[…m).
-const BG: u32 = 0xFF0B0F14;
-const FG_DEFAULT: u32 = 0xFFA6E3A1;
+/// Fixed layout metric: the point size the scrollback renders at, paired with
+/// `ROW_PX`. This is a rendering invariant (not user palette), so it stays a
+/// const; the *colors* below are config-driven via `TerminalCfg`.
 const FONT_PX: f32 = 13.0;
 const ROW_PX: i32 = 16;
 
@@ -143,16 +148,16 @@ fn visible_rows_for(h: u32) -> usize {
     (((h as i32 - 8) / ROW_PX).max(1)) as usize
 }
 
-/// The 8 ANSI colors (30-37) and bright variants (90-97), tinted to the desktop
-/// palette so program output stays coherent with the theme.
-const ANSI: [u32; 8] = [
-    0xFF45475A, 0xFFF38BA8, 0xFFA6E3A1, 0xFFF9E2AF,
-    0xFF89B4FA, 0xFFCBA6F7, 0xFF94E2D5, 0xFFCDD6F4,
-];
-const ANSI_BRIGHT: [u32; 8] = [
-    0xFF585B70, 0xFFEBA0AC, 0xFFA6E3A1, 0xFFFAB387,
-    0xFF89DCEB, 0xFFF5C2E7, 0xFF94E2D5, 0xFFFFFFFF,
-];
+/// The live text palette, resolved from `[terminal]` config (`fg`, `ansi[8]`,
+/// `ansi_bright[8]`). Carried in `Term` so SGR (`ESC[…m`) selects configured
+/// colors instead of hardcoded constants — the single source of truth is the
+/// TOML (falling back to `TerminalCfg::baseline`).
+#[derive(Clone, Copy)]
+struct Palette {
+    fg: u32,
+    ansi: [u32; 8],
+    ansi_bright: [u32; 8],
+}
 
 /// ARGB8888 -> render Color.
 fn col(argb: u32) -> Color {
@@ -194,14 +199,16 @@ struct Term {
     nparams: usize,
     param: u32,
     has_param: bool,
+    /// Config-resolved colors (default fg + the 16 ANSI slots).
+    palette: Palette,
 }
 
 impl Term {
-    fn new() -> Self {
+    fn new(palette: Palette) -> Self {
         Term {
             lines: Vec::new(),
             cur: Vec::new(),
-            fg: FG_DEFAULT,
+            fg: palette.fg,
             dirty: true,
             scroll: 0,
             esc: Esc::Normal,
@@ -209,6 +216,7 @@ impl Term {
             nparams: 0,
             param: 0,
             has_param: false,
+            palette,
         }
     }
 
@@ -273,9 +281,9 @@ impl Term {
         for i in 0..n {
             let p = if self.nparams == 0 { 0 } else { self.params[i] };
             match p {
-                0 | 39 => self.fg = FG_DEFAULT,
-                30..=37 => self.fg = ANSI[(p - 30) as usize],
-                90..=97 => self.fg = ANSI_BRIGHT[(p - 90) as usize],
+                0 | 39 => self.fg = self.palette.fg,
+                30..=37 => self.fg = self.palette.ansi[(p - 30) as usize],
+                90..=97 => self.fg = self.palette.ansi_bright[(p - 90) as usize],
                 _ => {} // bold/reverse/background — not modeled
             }
         }
@@ -495,8 +503,9 @@ fn resize_surface(
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     // 0) Load this app's config (apps/gui_terminal.toml). A missing/garbage file
-    // yields the built-in baseline. The resolved values go to serial so a TOML
-    // edit is observable headless (config→behavior proof); Phase 6 applies them.
+    // yields the built-in baseline. The resolved values drive the prompt (via the
+    // shell's env), the font, the background (with alpha), and the text palette;
+    // they also go to serial so a TOML edit is observable headless.
     let tcfg = dwm_settings::TerminalCfg::load("gui_terminal");
     libdunit::println(&alloc::format!(
         "gui_terminal: cfg from_file={} prompt={} fg={:#010X} bg={:#010X} bg_alpha={} font={}",
@@ -510,12 +519,12 @@ pub extern "C" fn _start() -> ! {
     // Resolve the presentation format from the configured background opacity.
     // `bg_alpha == 255` keeps the opaque XRGB fast path (compositor straight-copy);
     // anything less presents ARGB so the compositor blends our background over the
-    // desktop. `bg` folds that alpha into the background RGB and is written into
-    // every background pixel each frame via `Surface::clear`. NOTE: Phase 4 wires
-    // only the transparency; the full palette (bg/fg/ansi RGB, prompt) lands in
-    // Phase 6 — for now the background RGB stays the built-in `BG`, tinted by alpha.
-    let bg = (tcfg.bg_alpha << 24) | (BG & 0x00FF_FFFF);
+    // desktop. `bg` folds that alpha into the CONFIGURED background RGB and is
+    // written into every background pixel each frame via `Surface::clear`.
+    let bg = (tcfg.bg_alpha << 24) | (tcfg.bg & 0x00FF_FFFF);
     let fmt = if tcfg.bg_alpha < 255 { FMT_ARGB8888 } else { FMT_XRGB8888 };
+    // The live text palette (default fg + ANSI slots) comes straight from config.
+    let palette = Palette { fg: tcfg.fg, ansi: tcfg.ansi, ansi_bright: tcfg.ansi_bright };
     libdunit::println(&alloc::format!(
         "gui_terminal: argb bg_alpha={} fmt={}",
         tcfg.bg_alpha,
@@ -544,14 +553,14 @@ pub extern "C" fn _start() -> ! {
         libdunit::exit(3);
     }
     let mut px = mapped as usize as *mut u8;
-    let font = match load_font() {
+    let font = match load_font(&tcfg) {
         Ok(f) => f,
         Err(_) => {
             libdunit::println("gui_terminal: FAIL font parse");
             libdunit::exit(7);
         }
     };
-    let mut term = Term::new();
+    let mut term = Term::new(palette);
     // The surface's live geometry. The compositor may resize us via a
     // server-pushed CONFIGURE, so track it rather than reusing the W/H consts.
     let mut cur_buf = buf;
@@ -642,7 +651,10 @@ pub extern "C" fn _start() -> ! {
         libdunit::exit(8);
     }
     let pty = pty as u32;
-    if libdunit::pty_spawn("dsh", pty) <= 0 {
+    // Hand the shell its prompt through the environment (desktop policy lives in
+    // config, not baked into dsh): `[terminal] prompt` → `PROMPT=<value>`.
+    let prompt_env = alloc::format!("PROMPT={}", tcfg.prompt.as_str());
+    if libdunit::pty_spawn_env("dsh", pty, &[&prompt_env]) <= 0 {
         libdunit::println("gui_terminal: FAIL pty spawn");
         libdunit::pty_close(pty);
         libdunit::handle_close(buf);
