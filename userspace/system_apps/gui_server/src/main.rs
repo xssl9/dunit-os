@@ -25,7 +25,7 @@ use gui_protocol_v1::wire::{FORMAT_ARGB8888, FORMAT_XRGB8888};
 use gui_protocol_v1::Opcode;
 
 use dwm_settings as settings;
-use settings::{Applications, Layout, Theme};
+use settings::{Applications, Edge, Effects, Layout, Theme};
 
 use dunit_text::Font;
 
@@ -1102,16 +1102,77 @@ fn reconfigure_client(
     }
 }
 
+/// Reserved screen margins (px) that the shell strips subtract from the usable
+/// desktop, one accumulator per edge. `reserved_insets` fills it from the
+/// configured panel/tray edges plus the always-left dock, and every geometry
+/// computation (work area, spawn/drag clamps, dock strip origin) reads from here
+/// so "what real estate is free" has a single source of truth.
+#[derive(Clone, Copy)]
+struct Insets {
+    top: i32,
+    bottom: i32,
+    left: i32,
+    right: i32,
+}
+
+/// Add `size` px to the margin on `edge`.
+fn add_edge(ins: &mut Insets, edge: Edge, size: i32) {
+    match edge {
+        Edge::Top => ins.top += size,
+        Edge::Bottom => ins.bottom += size,
+        Edge::Left => ins.left += size,
+        Edge::Right => ins.right += size,
+    }
+}
+
+/// Resolve the configured shell layout into reserved per-edge margins:
+/// - the panel reserves `ly.panel_h` on `panel_edge`;
+/// - the dock always reserves `ly.dock_w` on the LEFT edge (the dock stays left
+///   in this milestone — only the panel and tray are edge-configurable);
+/// - the tray reserves `tray_size` on `tray_edge`, but ONLY when it does not
+///   share the panel's edge — a same-edge tray rides *inside* the panel strip
+///   (the classic top-panel readout) and reserves nothing extra.
+///
+/// Margins accumulate, so the default (panel=top, tray=top, dock=left) yields
+/// `{top: panel_h, left: dock_w, bottom: 0, right: 0}` — byte-identical to the
+/// pre-Phase-5 fixed layout.
+fn reserved_insets(ly: &Layout, panel_edge: Edge, tray_edge: Edge, tray_size: i32) -> Insets {
+    let mut ins = Insets { top: 0, bottom: 0, left: 0, right: 0 };
+    add_edge(&mut ins, panel_edge, ly.panel_h);
+    ins.left += ly.dock_w;
+    if tray_edge != panel_edge {
+        add_edge(&mut ins, tray_edge, tray_size);
+    }
+    ins
+}
+
+/// The screen rect `(x, y, w, h)` of a shell strip `thickness` px thick on `edge`,
+/// offset `off` px inward from that edge. Horizontal strips (top/bottom) span the
+/// full width and own the corners; vertical strips (left/right) span only the gap
+/// *between* the top/bottom insets, so a left/right strip never overlaps a
+/// top/bottom one at a corner. `off` lets several strips stack on one edge (e.g.
+/// panel outermost at `off=0`, dock innermost at `off = ins.left - dock_w`).
+fn strip_rect(edge: Edge, thickness: i32, off: i32, ins: &Insets, bw: usize, bh: usize) -> (i32, i32, i32, i32) {
+    let bw = bw as i32;
+    let bh = bh as i32;
+    match edge {
+        Edge::Top => (0, off, bw, thickness),
+        Edge::Bottom => (0, bh - off - thickness, bw, thickness),
+        Edge::Left => (off, ins.top, thickness, (bh - ins.top - ins.bottom).max(1)),
+        Edge::Right => (bw - off - thickness, ins.top, thickness, (bh - ins.top - ins.bottom).max(1)),
+    }
+}
+
 /// The maximize target rect `(cx, cy, w, h)` = the framebuffer minus the reserved
-/// panel (top) and dock (left). Factored into one helper so Phase 5 can swap the
-/// fixed panel/dock insets for configurable per-edge `reserved_insets` in a single
-/// place, and so the interactive chip, the drag-restore path, and the headless
-/// self-test all compute the same geometry.
-fn work_area(bw: usize, bh: usize, ly: &Layout) -> (i32, i32, i32, i32) {
-    let x = ly.dock_w + ly.border;
-    let y = ly.panel_h + ly.title_h + ly.border;
-    let w = (bw as i32 - ly.dock_w - 2 * ly.border).max(1);
-    let h = (bh as i32 - ly.panel_h - ly.title_h - 2 * ly.border).max(1);
+/// shell margins (`reserved_insets`) and the window's own title bar + border. One
+/// helper so the interactive chip, the drag-restore path and the headless
+/// self-test all compute the same geometry, and so it honours whatever edges the
+/// panel/tray are configured on.
+fn work_area(bw: usize, bh: usize, ly: &Layout, ins: &Insets) -> (i32, i32, i32, i32) {
+    let x = ins.left + ly.border;
+    let y = ins.top + ly.title_h + ly.border;
+    let w = (bw as i32 - ins.left - ins.right - 2 * ly.border).max(1);
+    let h = (bh as i32 - ins.top - ins.bottom - ly.title_h - 2 * ly.border).max(1);
     (x, y, w, h)
 }
 
@@ -1132,6 +1193,7 @@ fn set_window_state(
     bw: usize,
     bh: usize,
     ly: &Layout,
+    ins: &Insets,
 ) {
     // STATE_ACTIVATED — the surface stays focused across the reconfigure.
     const STATE_ACTIVATED: u32 = 1;
@@ -1143,7 +1205,7 @@ fn set_window_state(
         win.restore = Some((win.cx, win.cy, win.sw, win.sh));
     }
     let target = match new_state {
-        WinState::Maximized => Some(work_area(bw, bh, ly)),
+        WinState::Maximized => Some(work_area(bw, bh, ly, ins)),
         WinState::Floating => win.restore.take(),
     };
     win.state = new_state;
@@ -1162,13 +1224,14 @@ fn toggle_maximize(
     bw: usize,
     bh: usize,
     ly: &Layout,
+    ins: &Insets,
 ) {
     let next = if win.state == WinState::Maximized {
         WinState::Floating
     } else {
         WinState::Maximized
     };
-    set_window_state(server, clients, win, next, bw, bh, ly);
+    set_window_state(server, clients, win, next, bw, bh, ly, ins);
 }
 
 // ===========================================================================
@@ -1692,27 +1755,125 @@ fn draw_cursor(buf: &mut [u32], bw: usize, bh: usize, px: i32, py: i32) {
 // `[launcher]` / `[startup]` TOML tables (baseline in `Applications::baseline`).
 // A window's `app` field is an index into that live registry (0xFF = unknown).
 
-/// Rect of the i-th dock icon (0-based). The dock is a vertical strip down the
-/// left edge, below the top panel; icons are square cells laid out top-down.
-fn dock_icon_rect(ly: &Layout, i: i32) -> (i32, i32, i32, i32) {
+// Shell-content geometry is laid out along the panel's MAIN axis (X for a
+// top/bottom panel, Y for a left/right panel) so one set of helpers serves all
+// four edges. `panel_slot` maps a 1-D span on the main axis to a screen rect
+// spanning the full cross-axis thickness; `inset_cross` trims the cross axis.
+// For the default top panel these reproduce the old fixed geometry byte-for-byte.
+
+/// Fill a shell strip (panel / dock / tray) with the acrylic-glass look: optional
+/// backdrop blur, then a vertical gradient tint (or a flat tint when gradients are
+/// off). `top_shade` lightens the gradient's top edge (panel 16, dock 14). One
+/// code path for every strip so all edges paint identically.
+fn fill_strip_bg(
+    buf: &mut [u32],
+    bw: usize,
+    bh: usize,
+    rect: (i32, i32, i32, i32),
+    panel: u32,
+    fx: &Effects,
+    top_shade: i32,
+    tmp_a: &mut [u32],
+    tmp_b: &mut [u32],
+) {
+    let (x, y, w, h) = rect;
+    if fx.blur {
+        blur_region(buf, bw, bh, x, y, w, h, fx.blur_radius, fx.blur_iters, tmp_a, tmp_b);
+    }
+    if fx.gradient {
+        fill_rrect_grad(buf, bw, bh, x, y, w, h, 0, 0, shade(panel, top_shade), panel, fx.panel_alpha);
+    } else {
+        fill_rect_alpha(buf, bw, bh, x, y, w, h, ((fx.panel_alpha.min(255) as u32) << 24) | (panel & 0x00FF_FFFF));
+    }
+}
+
+/// Map a `[main_off, main_off+main_len)` span on the panel's main axis to a
+/// screen rect that spans the panel's full cross-axis thickness.
+fn panel_slot(panel: (i32, i32, i32, i32), edge: Edge, main_off: i32, main_len: i32) -> (i32, i32, i32, i32) {
+    let (px, py, pw, ph) = panel;
+    if edge.is_horizontal() {
+        (px + main_off, py, main_len, ph)
+    } else {
+        (px, py + main_off, pw, main_len)
+    }
+}
+
+/// Trim `c` px off each side of a strip rect on its CROSS axis (vertical for a
+/// horizontal strip, horizontal for a vertical strip); the main axis is untouched.
+fn inset_cross(rect: (i32, i32, i32, i32), edge: Edge, c: i32) -> (i32, i32, i32, i32) {
+    let (x, y, w, h) = rect;
+    if edge.is_horizontal() {
+        (x, y + c, w, (h - 2 * c).max(1))
+    } else {
+        (x + c, y, (w - 2 * c).max(1), h)
+    }
+}
+
+/// Main-axis length reserved for the launcher button at the panel's start
+/// (`launcher_w` on a horizontal panel; a square panel-thick cell on a vertical
+/// one, so the mark stays legible in the narrow bar).
+fn launcher_main(ly: &Layout, edge: Edge) -> i32 {
+    if edge.is_horizontal() {
+        ly.launcher_w
+    } else {
+        ly.panel_h
+    }
+}
+
+/// The panel strip itself: `ly.panel_h` thick, flush against `panel_edge`, owning
+/// its corners (offset 0). For the default top panel this is `(0, 0, bw, panel_h)`.
+fn panel_strip(ly: &Layout, ins: &Insets, edge: Edge, bw: usize, bh: usize) -> (i32, i32, i32, i32) {
+    strip_rect(edge, ly.panel_h, 0, ins, bw, bh)
+}
+
+/// The dock strip: always the left vertical edge, nested just inside any
+/// left-edge panel/tray (offset = everything reserved on the left minus itself).
+fn dock_strip(ly: &Layout, ins: &Insets, bw: usize, bh: usize) -> (i32, i32, i32, i32) {
+    strip_rect(Edge::Left, ly.dock_w, ins.left - ly.dock_w, ins, bw, bh)
+}
+
+/// Rect of the i-th dock icon (0-based), a square cell laid top-down inside the
+/// dock strip. The dock stays a left vertical strip (only panel/tray are
+/// edge-configurable), so this is always vertical.
+fn dock_icon_rect(ly: &Layout, ins: &Insets, bw: usize, bh: usize, i: i32) -> (i32, i32, i32, i32) {
+    let (dx, dy, _, _) = dock_strip(ly, ins, bw, bh);
     let inset = 6;
     let iw = ly.dock_w - 2 * inset;
-    let x = inset;
-    let y = ly.panel_h + inset + i * (iw + inset);
+    let x = dx + inset;
+    let y = dy + inset + i * (iw + inset);
     (x, y, iw, iw)
 }
 
-/// Rect of the i-th launcher-menu entry (0-based), dropped below the launcher.
-fn menu_item_rect(ly: &Layout, i: i32) -> (i32, i32, i32, i32) {
-    (0, ly.panel_h + i * ly.menu_item_h, ly.menu_w, ly.menu_item_h)
+/// Rect of the i-th workspace pip (0-based), laid along the panel's main axis
+/// immediately after the launcher glyph.
+fn ws_pip_rect(ly: &Layout, edge: Edge, panel: (i32, i32, i32, i32), i: i32) -> (i32, i32, i32, i32) {
+    let off = launcher_main(ly, edge) + i * ly.ws_w;
+    inset_cross(panel_slot(panel, edge, off, ly.ws_w - 2), edge, 2)
 }
 
-/// Rect of the i-th workspace pip (0-based) in the panel switcher, laid out
-/// left-to-right immediately after the launcher glyph. Clicking a pip activates
-/// that workspace.
-fn ws_pip_rect(ly: &Layout, i: i32) -> (i32, i32, i32, i32) {
-    let x = ly.launcher_w + i * ly.ws_w;
-    (x, 2, ly.ws_w - 2, ly.panel_h - 4)
+/// Top-left origin `(x, y)` of the launcher dropdown, flying out PERPENDICULAR to
+/// the panel edge: below a top panel, above a bottom panel, right of a left panel,
+/// left of a right panel. `item_count` sizes the "above" case. The menu itself is
+/// always a vertical list of `menu_item_h` rows.
+fn menu_origin(ly: &Layout, edge: Edge, panel: (i32, i32, i32, i32), item_count: i32) -> (i32, i32) {
+    let (px, py, pw, ph) = panel;
+    let full_h = item_count * ly.menu_item_h;
+    match edge {
+        Edge::Top => (px, py + ph),
+        Edge::Bottom => (px, py - full_h),
+        Edge::Left => (px + pw, py),
+        Edge::Right => (px - ly.menu_w, py),
+    }
+}
+
+/// Rect of the i-th launcher-menu entry, stacked vertically from `origin`.
+fn menu_item_rect(ly: &Layout, origin: (i32, i32), i: i32) -> (i32, i32, i32, i32) {
+    (origin.0, origin.1 + i * ly.menu_item_h, ly.menu_w, ly.menu_item_h)
+}
+
+/// True when the point is inside `rect`.
+fn in_rect(rect: (i32, i32, i32, i32), x: i32, y: i32) -> bool {
+    x >= rect.0 && x < rect.0 + rect.2 && y >= rect.1 && y < rect.1 + rect.3
 }
 
 // A 3x5 bitmap font, just digits and ':' — enough for window numbers and a
@@ -2260,6 +2421,26 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         apps.workspaces
     ));
 
+    // Shell-strip placement (Phase 5): the panel and the system tray each dock to
+    // a configurable screen edge (`[panel] pos` / `[tray] pos`), and the tray has
+    // its own thickness (`[tray] size`). These are `mut` because the live-reload
+    // block re-seeds them, exactly like theme/layout. `reserved_insets` turns them
+    // (plus the always-left dock) into the per-edge margins every geometry
+    // computation below subtracts, so maximize/spawn/drag all honor the edges.
+    let mut panel_edge: Edge = cfg.settings.panel.pos;
+    let mut tray_edge: Edge = cfg.settings.tray.pos;
+    let mut tray_size: i32 = cfg.settings.tray.size;
+    // Serial diagnostic: the resolved edges, so a `[panel]`/`[tray] pos` flip is
+    // observable headless. Flip the TOML and this line moves — proof the shell
+    // layout is config-driven, not baked into Rust.
+    libdunit::println(&alloc::format!(
+        "gui_server: panel edge={} tray edge={} tray_size={}",
+        panel_edge.as_str(),
+        tray_edge.as_str(),
+        tray_size
+    ));
+    let mut ins = reserved_insets(&ly, panel_edge, tray_edge, tray_size);
+
     // Per-widget config (widgets/<name>.toml): resolve each desktop widget's file
     // + enabled flag and log it, so a per-widget TOML edit is observable headless.
     // Phase 2 only surfaces the resolved state; the render block still gates on the
@@ -2346,19 +2527,20 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         let sh = clients[i].surf_h as i32;
         let mut cx = clients[i].slot_x as i32 + offset;
         let mut cy = clients[i].slot_y as i32 + ly.title_h + ly.border + offset;
-        // Keep the whole window (title bar included) below the reserved panel.
-        if cy - ly.title_h < ly.panel_h + ly.border {
-            cy = ly.panel_h + ly.title_h + ly.border;
+        // Keep the whole window (title bar included) clear of the reserved panel/
+        // tray strips on every edge (Phase 5 `reserved_insets`), not just a fixed
+        // top panel + left dock.
+        if cy - ly.title_h < ins.top + ly.border {
+            cy = ins.top + ly.title_h + ly.border;
         }
-        // Keep the whole window to the right of the reserved left dock strip.
-        if cx < ly.dock_w + ly.border {
-            cx = ly.dock_w + ly.border;
+        if cx < ins.left + ly.border {
+            cx = ins.left + ly.border;
         }
-        if cx + sw + ly.border > bw as i32 {
-            cx = (bw as i32 - sw - ly.border).max(ly.dock_w + ly.border);
+        if cx + sw + ins.right + ly.border > bw as i32 {
+            cx = (bw as i32 - ins.right - sw - ly.border).max(ins.left + ly.border);
         }
-        if cy + sh + ly.border > bh as i32 {
-            cy = (bh as i32 - sh - ly.border).max(ly.panel_h + ly.title_h + ly.border);
+        if cy + sh + ins.bottom + ly.border > bh as i32 {
+            cy = (bh as i32 - ins.bottom - sh - ly.border).max(ins.top + ly.title_h + ly.border);
         }
         z.push(wins.len());
         wins.push(Win {
@@ -2487,6 +2669,13 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 fx = ncfg.settings.effects;
                 wg = ncfg.settings.widgets;
                 apps = ncfg.apps;
+                // Re-seed the shell-strip placement + recompute the reserved
+                // margins, so a live `[panel]`/`[tray] pos` edit moves the panel,
+                // tray and the maximize/work area together.
+                panel_edge = ncfg.settings.panel.pos;
+                tray_edge = ncfg.settings.tray.pos;
+                tray_size = ncfg.settings.tray.size;
+                ins = reserved_insets(&ly, panel_edge, tray_edge, tray_size);
                 anim_frames = if fx.anim { (fx.anim_ms / 16).max(1) as u32 } else { 0 };
                 // Every Win caches its own title_h/border (used by outer/contains):
                 // re-seed them so existing windows adopt the new geometry.
@@ -2551,15 +2740,15 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             let sh = clients[i].surf_h as i32;
             let step = (wins.len() as i32 % 6) * 40;
             let mut cx = 90 + step + ly.border;
-            let mut cy = ly.panel_h + ly.title_h + ly.border + step;
-            if cx < ly.dock_w + ly.border {
-                cx = ly.dock_w + ly.border;
+            let mut cy = ins.top + ly.title_h + ly.border + step;
+            if cx < ins.left + ly.border {
+                cx = ins.left + ly.border;
             }
-            if cx + sw + ly.border > bw as i32 {
-                cx = (bw as i32 - sw - ly.border).max(ly.dock_w + ly.border);
+            if cx + sw + ins.right + ly.border > bw as i32 {
+                cx = (bw as i32 - ins.right - sw - ly.border).max(ins.left + ly.border);
             }
-            if cy + sh + ly.border > bh as i32 {
-                cy = (bh as i32 - sh - ly.border).max(ly.panel_h + ly.title_h + ly.border);
+            if cy + sh + ins.bottom + ly.border > bh as i32 {
+                cy = (bh as i32 - ins.bottom - sh - ly.border).max(ins.top + ly.title_h + ly.border);
             }
             let wi = wins.len();
             wins.push(Win {
@@ -2601,13 +2790,13 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         // drag-restore call). Never runs on the real desktop (`self_test` is false
         // in `default.toml`).
         if apps.self_test {
-            let (_, _, ww, wh) = work_area(bw, bh, &ly);
+            let (_, _, ww, wh) = work_area(bw, bh, &ly, &ins);
             for wi in 0..wins.len() {
                 if !wins[wi].alive {
                     continue;
                 }
                 if wins[wi].st_step == 0 && wins[wi].state == WinState::Floating {
-                    set_window_state(server, clients, &mut wins[wi], WinState::Maximized, bw, bh, &ly);
+                    set_window_state(server, clients, &mut wins[wi], WinState::Maximized, bw, bh, &ly, &ins);
                     wins[wi].st_step = 1;
                     libdunit::println(&alloc::format!(
                         "gui_server: reconfigure w={} h={} acked (self-test)",
@@ -2623,7 +2812,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                         .restore
                         .map(|(_, _, w, h)| (w, h))
                         .unwrap_or((wins[wi].sw, wins[wi].sh));
-                    set_window_state(server, clients, &mut wins[wi], WinState::Floating, bw, bh, &ly);
+                    set_window_state(server, clients, &mut wins[wi], WinState::Floating, bw, bh, &ly, &ins);
                     wins[wi].st_step = 2;
                     libdunit::println(&alloc::format!(
                         "gui_server: reconfigure w={} h={} restored (self-test)",
@@ -2642,10 +2831,31 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         let right = m.right();
         let rpress = right && !prev_right;
 
+        // Shell-strip rects for THIS frame (recomputed cheaply so a live reload
+        // that moved the panel/tray takes effect at once). The panel and the dock
+        // always exist; the tray gets its OWN strip only when it does not share the
+        // panel's edge (otherwise it renders inside the panel — the classic look).
+        // `in_shell` marks the shell-owned region: a click/right-click there is the
+        // shell's, never routed to a client window.
+        let panel_rect = panel_strip(&ly, &ins, panel_edge, bw, bh);
+        let dock_rect = dock_strip(&ly, &ins, bw, bh);
+        let tray_own = if tray_edge != panel_edge {
+            Some(strip_rect(tray_edge, tray_size, 0, &ins, bw, bh))
+        } else {
+            None
+        };
+        let launcher_hit = panel_slot(panel_rect, panel_edge, 0, launcher_main(&ly, panel_edge));
+        let menu_org = menu_origin(&ly, panel_edge, panel_rect, apps.launcher.len() as i32);
+        let in_shell = |x: i32, y: i32| {
+            in_rect(panel_rect, x, y)
+                || in_rect(dock_rect, x, y)
+                || tray_own.map_or(false, |t| in_rect(t, x, y))
+        };
+
         // --- Right-button press: forward to the content window under the cursor
         // as IN_DOWN with button=1 (context-menu trigger). Panel/dock/title are
         // shell-owned and ignore the right button; a right-click there is a no-op.
-        if rpress && !menu_open && my >= ly.panel_h && mx >= ly.dock_w {
+        if rpress && !menu_open && !in_shell(mx, my) {
             let mut zi = z.len();
             while zi > 0 {
                 zi -= 1;
@@ -2666,8 +2876,8 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             // and the click is consumed (never reaches a window).
             let mut chosen: Option<usize> = None;
             for i in 0..apps.launcher.len() {
-                let (ix, iy, iw, ih) = menu_item_rect(&ly, i as i32);
-                if mx >= ix && mx < ix + iw && my >= iy && my < iy + ih {
+                let r = menu_item_rect(&ly, menu_org, i as i32);
+                if in_rect(r, mx, my) {
                     chosen = Some(i);
                     break;
                 }
@@ -2685,19 +2895,19 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                     }
                 }
             }
-        } else if press && my < ly.panel_h {
-            // Panel click. The wordmark (launcher_w band) opens the app menu; the
+        } else if press && in_rect(panel_rect, mx, my) {
+            // Panel click. The launcher mark (strip start) opens the app menu; the
             // workspace pips switch workspaces; the rest of the panel is consumed
             // by the shell (task switching lives on the dock now). Either way the
-            // click never reaches a client — the shell owns the panel band.
-            if mx < ly.launcher_w {
+            // click never reaches a client — the shell owns the panel strip.
+            if in_rect(launcher_hit, mx, my) {
                 menu_open = true;
-            } else if mx < ly.launcher_w + apps.workspaces as i32 * ly.ws_w {
+            } else {
                 // Workspace switcher: activate the clicked pip's workspace. A
                 // click in the gap between pips is consumed but changes nothing.
                 for i in 0..apps.workspaces {
-                    let (px, _, pw, _) = ws_pip_rect(&ly, i as i32);
-                    if mx >= px && mx < px + pw {
+                    let r = ws_pip_rect(&ly, panel_edge, panel_rect, i as i32);
+                    if in_rect(r, mx, my) {
                         if current_ws != i {
                             ws_switch_tick = ticks; // start the incoming crossfade
                         }
@@ -2707,15 +2917,15 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 }
             }
             // Any other panel click (centered title, tray) is consumed.
-        } else if press && mx < ly.dock_w {
-            // Dock strip (left edge, below the panel): the task switcher. A click
-            // on a pinned icon raises its running window (switching workspace if
-            // needed) or spawns the app when none is running. The dock owns its
-            // band — clicks never reach a client.
+        } else if press && in_rect(dock_rect, mx, my) {
+            // Dock strip (left edge, inside any left panel/tray): the task switcher.
+            // A click on a pinned icon raises its running window (switching
+            // workspace if needed) or spawns the app when none is running. The dock
+            // owns its strip — clicks never reach a client.
             let mut chosen: Option<usize> = None;
             for i in 0..apps.dock.len() {
-                let (ix, iy, iw, ih) = dock_icon_rect(&ly, i as i32);
-                if mx >= ix && mx < ix + iw && my >= iy && my < iy + ih {
+                let r = dock_icon_rect(&ly, &ins, bw, bh, i as i32);
+                if in_rect(r, mx, my) {
                     chosen = Some(i);
                     break;
                 }
@@ -2777,7 +2987,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                     // and its saved floating geometry via a server-push CONFIGURE
                     // (Phase 3). The owning client re-imports at the new size and
                     // the per-frame sync mirrors the fresh buffer back.
-                    toggle_maximize(server, clients, &mut wins[wi], bw, bh, &ly);
+                    toggle_maximize(server, clients, &mut wins[wi], bw, bh, &ly, &ins);
                     drag = None;
                 } else if wins[wi].in_title(mx, my) {
                     // Title-bar drag. macOS-style restore: grabbing a *tiled*
@@ -2799,7 +3009,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                             .map(|(_, _, w, _)| w)
                             .unwrap_or(old_w)
                             .max(1);
-                        set_window_state(server, clients, &mut wins[wi], WinState::Floating, bw, bh, &ly);
+                        set_window_state(server, clients, &mut wins[wi], WinState::Floating, bw, bh, &ly, &ins);
                         let ox = (grip_x as i64 * rest_w as i64 / old_w as i64) as i32;
                         let oy = grip_y - wins[wi].title_h;
                         wins[wi].cx = mx - ox;
@@ -2823,8 +3033,12 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         if let Some((wi, ox, oy)) = drag {
             let mut ncx = mx - ox;
             let mut ncy = my - oy;
-            ncx = ncx.max(ly.dock_w + ly.border).min(bw as i32 - wins[wi].sw - ly.border);
-            ncy = ncy.max(ly.panel_h + ly.title_h + ly.border).min(bh as i32 - wins[wi].sh - ly.border);
+            ncx = ncx
+                .max(ins.left + ly.border)
+                .min(bw as i32 - ins.right - wins[wi].sw - ly.border);
+            ncy = ncy
+                .max(ins.top + ly.title_h + ly.border)
+                .min(bh as i32 - ins.bottom - wins[wi].sh - ly.border);
             wins[wi].cx = ncx;
             wins[wi].cy = ncy;
         }
@@ -2966,14 +3180,14 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 let card_h = pad * 2 + clock_h + mon_h;
                 let margin = 24i32;
                 let cx = if wg.corner == 1 || wg.corner == 3 {
-                    bw as i32 - card_w - margin
+                    bw as i32 - ins.right - card_w - margin
                 } else {
-                    margin
+                    ins.left + margin
                 };
                 let cy = if wg.corner == 2 || wg.corner == 3 {
-                    bh as i32 - card_h - margin
+                    bh as i32 - ins.bottom - card_h - margin
                 } else {
-                    ly.panel_h + margin
+                    ins.top + margin
                 };
                 if fx.blur {
                     blur_region(&mut back, bw, bh, cx, cy, card_w, card_h, fx.blur_radius, fx.blur_iters, &mut blur_a, &mut blur_b);
@@ -3139,45 +3353,51 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             }
         }
 
-        // --- DWM panel: acrylic glass bar across the top ---
-        if fx.blur {
-            blur_region(&mut back, bw, bh, 0, 0, bw as i32, ly.panel_h, fx.blur_radius, fx.blur_iters, &mut blur_a, &mut blur_b);
-        }
-        if fx.gradient {
-            fill_rrect_grad(&mut back, bw, bh, 0, 0, bw as i32, ly.panel_h, 0, 0, shade(theme.panel, 16), theme.panel, fx.panel_alpha);
-        } else {
-            fill_rect_alpha(&mut back, bw, bh, 0, 0, bw as i32, ly.panel_h, ((fx.panel_alpha.min(255) as u32) << 24) | (theme.panel & 0x00FF_FFFF));
-        }
-        // App-menu button: the "Dunit" wordmark (logo mark + label) at the far
-        // left of the panel, clickable to open the launcher dropdown (hit-tested
-        // against `launcher_w`). Falls back to the old hamburger bars when the
-        // shell font is unavailable.
+        // --- DWM panel: acrylic glass bar on its configured edge ---
+        // `panel_rect` (computed per-frame from `panel_edge`) is the strip; for the
+        // default top edge it is (0,0,bw,panel_h) so the layout below is byte-for-
+        // byte identical. Horizontal panels (top/bottom) carry the full text layout
+        // (wordmark, centred title, tray line); vertical panels (left/right) are a
+        // narrow bar and render only the compact icon + pip content.
+        let (panx, pany, panw, panh) = panel_rect;
+        let horiz = panel_edge.is_horizontal();
+        fill_strip_bg(&mut back, bw, bh, panel_rect, theme.panel, &fx, 16, &mut blur_a, &mut blur_b);
+        // App-menu button: the brand logo mark at the panel's start (top-left on a
+        // horizontal bar, top-centre on a vertical one), clickable to open the
+        // launcher dropdown. The "Dunit" wordmark follows it, but only where a wide
+        // horizontal bar has room for it. Falls back to a flat mark + hamburger
+        // bars when the shell font/logo is unavailable.
         {
             let logo_sz = (ly.panel_h - 8).clamp(8, 22);
-            let ly0 = (ly.panel_h - logo_sz) / 2;
-            // Brand logo (circular RGBA) when present; else the flat accent mark.
+            let (lgx, lgy) = if horiz {
+                (panx + 8, pany + (panh - logo_sz) / 2)
+            } else {
+                (panx + (panw - logo_sz) / 2, pany + 8)
+            };
             if let Some(lg) = logo.as_ref() {
-                blit_icon(&mut back, bw, bh, lg, ICON_W, ICON_H, 8, ly0, logo_sz, logo_sz);
+                blit_icon(&mut back, bw, bh, lg, ICON_W, ICON_H, lgx, lgy, logo_sz, logo_sz);
             } else {
-                fill_rrect(&mut back, bw, bh, 8, ly0, logo_sz, logo_sz, logo_sz / 2, RR_ALL, 0xFF00_0000 | (theme.launcher & 0x00FF_FFFF));
-                fill_rrect(&mut back, bw, bh, 8 + logo_sz / 3, ly0 + logo_sz / 3, logo_sz / 3, logo_sz / 3, logo_sz / 6, RR_ALL, 0xFF00_0000 | (theme.panel & 0x00FF_FFFF));
+                fill_rrect(&mut back, bw, bh, lgx, lgy, logo_sz, logo_sz, logo_sz / 2, RR_ALL, 0xFF00_0000 | (theme.launcher & 0x00FF_FFFF));
+                fill_rrect(&mut back, bw, bh, lgx + logo_sz / 3, lgy + logo_sz / 3, logo_sz / 3, logo_sz / 3, logo_sz / 6, RR_ALL, 0xFF00_0000 | (theme.panel & 0x00FF_FFFF));
             }
-            let text_x = 8 + logo_sz + 6;
-            if let Some(f) = font.as_ref() {
-                let px = ly.panel_font_px as f32;
-                let baseline = ly.panel_h / 2 + 5;
-                draw_text_ttf(&mut back, bw, bh, f, text_x, baseline, px, "Dunit", theme.panel_text & 0x00FF_FFFF);
-            } else {
-                for r in 0..3 {
-                    fill_rect(&mut back, bw, bh, text_x, 8 + r * 5, 18, 2, theme.launcher);
+            if horiz {
+                let text_x = lgx + logo_sz + 6;
+                if let Some(f) = font.as_ref() {
+                    let px = ly.panel_font_px as f32;
+                    let baseline = pany + ly.panel_h / 2 + 5;
+                    draw_text_ttf(&mut back, bw, bh, f, text_x, baseline, px, "Dunit", theme.panel_text & 0x00FF_FFFF);
+                } else {
+                    for r in 0..3 {
+                        fill_rect(&mut back, bw, bh, text_x, pany + 8 + r * 5, 18, 2, theme.launcher);
+                    }
                 }
             }
         }
-        // Workspace switcher: pips 1..=ws_count after the launcher glyph. The
-        // active workspace is highlighted; any workspace holding a live window
-        // gets an accent underline so occupancy is visible at a glance.
+        // Workspace switcher: pips 1..=ws_count laid along the panel's main axis
+        // after the launcher glyph. The active workspace is highlighted; any
+        // workspace holding a live window gets an accent underline.
         for i in 0..apps.workspaces {
-            let (px, py, pw, ph) = ws_pip_rect(&ly, i as i32);
+            let (px, py, pw, ph) = ws_pip_rect(&ly, panel_edge, panel_rect, i as i32);
             let base = if i == current_ws {
                 theme.taskbtn_focused
             } else {
@@ -3192,77 +3412,95 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 fill_rrect(&mut back, bw, bh, px + 2, py + ph - 3, pw - 4, 2, 1, RR_ALL, 0xFF00_0000 | (theme.launcher & 0x00FF_FFFF));
             }
         }
-        // Centered focused-window title (icon + app name), like the reference
-        // panel. Replaces the per-window taskbar strip — task switching now lives
-        // on the dock. Only drawn when a window holds focus on this workspace.
-        if let (Some(wi), Some(f)) = (focused, font.as_ref()) {
-            let title = win_title(&apps, wins[wi].app);
-            let px = ly.title_font_px as f32;
-            let tw = text_width_ttf(f, title, px);
-            let icon = app_icons.get(wins[wi].app as usize).and_then(|s| s.as_ref());
-            let isz = (ly.panel_h - 8).clamp(8, 22);
-            let gap = if icon.is_some() { 6 } else { 0 };
-            let iw = if icon.is_some() { isz } else { 0 };
-            let total = iw + gap + tw;
-            let sx = (bw as i32 - total) / 2;
-            if let Some(ic) = icon {
-                let iy = (ly.panel_h - isz) / 2;
-                blit_icon(&mut back, bw, bh, ic, ICON_W, ICON_H, sx, iy, isz, isz);
+        // Centered focused-window title (icon + app name). Horizontal panels only —
+        // a narrow vertical bar has no room for the label. Task switching lives on
+        // the dock; this is just the active window's identity.
+        if horiz {
+            if let (Some(wi), Some(f)) = (focused, font.as_ref()) {
+                let title = win_title(&apps, wins[wi].app);
+                let px = ly.title_font_px as f32;
+                let tw = text_width_ttf(f, title, px);
+                let icon = app_icons.get(wins[wi].app as usize).and_then(|s| s.as_ref());
+                let isz = (ly.panel_h - 8).clamp(8, 22);
+                let gap = if icon.is_some() { 6 } else { 0 };
+                let iw = if icon.is_some() { isz } else { 0 };
+                let total = iw + gap + tw;
+                let sx = panx + (panw - total) / 2;
+                if let Some(ic) = icon {
+                    let iy = pany + (ly.panel_h - isz) / 2;
+                    blit_icon(&mut back, bw, bh, ic, ICON_W, ICON_H, sx, iy, isz, isz);
+                }
+                let baseline = pany + ly.panel_h / 2 + 5;
+                draw_text_ttf(&mut back, bw, bh, f, sx + iw + gap, baseline, px, title, theme.title_text_focused & 0x00FF_FFFF);
             }
-            let baseline = ly.panel_h / 2 + 5;
-            draw_text_ttf(&mut back, bw, bh, f, sx + iw + gap, baseline, px, title, theme.title_text_focused & 0x00FF_FFFF);
         }
-        // Right-side system tray: live RAM usage, running-process count and the
-        // uptime clock (MM:SS), right-aligned. TTF when the shell font is loaded;
-        // otherwise just the 3x5 clock (last-known-good).
+        // System tray: live RAM usage, running-process count and the uptime clock.
+        // When `[tray] pos` differs from the panel edge it gets its OWN acrylic
+        // strip (`tray_own`); otherwise it rides the end of the panel (right-aligned
+        // on a horizontal bar — the default look). A horizontal tray shows the full
+        // TTF line; a vertical tray shows only the compact MM:SS clock (no room for
+        // the wide text) so it stays legible in the narrow bar.
         {
+            if let Some(t) = tray_own {
+                fill_strip_bg(&mut back, bw, bh, t, theme.panel, &fx, 12, &mut blur_a, &mut blur_b);
+            }
+            let (trect, tray_h) = match tray_own {
+                Some(t) => (t, tray_edge.is_horizontal()),
+                None => (panel_rect, horiz),
+            };
+            let (tx0, ty0, tw0, th0) = trect;
             let mut stats = libdunit::SystemStats::default();
             let have = libdunit::get_system_stats(&mut stats) >= 0;
             let secs = if have { stats.uptime_ticks / 100 } else { 0 };
-            if let Some(f) = font.as_ref() {
-                let ram_pct = if have && stats.pmm_total_bytes > 0 {
-                    (stats.pmm_used_bytes * 100 / stats.pmm_total_bytes) as u32
+            if tray_h {
+                if let Some(f) = font.as_ref() {
+                    let ram_pct = if have && stats.pmm_total_bytes > 0 {
+                        (stats.pmm_used_bytes * 100 / stats.pmm_total_bytes) as u32
+                    } else {
+                        0
+                    };
+                    let tray = alloc::format!(
+                        "RAM {}%   {} proc   {:02}:{:02}",
+                        ram_pct,
+                        stats.process_running,
+                        (secs / 60) % 100,
+                        secs % 60
+                    );
+                    let px = ly.title_font_px as f32;
+                    let tw = text_width_ttf(f, &tray, px);
+                    let baseline = ty0 + th0 / 2 + 5;
+                    draw_text_ttf(&mut back, bw, bh, f, tx0 + tw0 - tw - 14, baseline, px, &tray, theme.panel_text);
                 } else {
-                    0
-                };
-                let tray = alloc::format!(
-                    "RAM {}%   {} proc   {:02}:{:02}",
-                    ram_pct,
-                    stats.process_running,
-                    (secs / 60) % 100,
-                    secs % 60
-                );
-                let px = ly.title_font_px as f32;
-                let tw = text_width_ttf(f, &tray, px);
-                let baseline = ly.panel_h / 2 + 5;
-                draw_text_ttf(&mut back, bw, bh, f, bw as i32 - tw - 14, baseline, px, &tray, theme.panel_text);
+                    let mut clk = *b"00:00";
+                    two_digits(&mut clk, 0, (secs / 60) % 100);
+                    two_digits(&mut clk, 3, secs % 60);
+                    let clk_w = clk.len() as i32 * (GLYPH_W + 1) * 3;
+                    draw_text_3x5(&mut back, bw, bh, tx0 + tw0 - clk_w - 12, ty0 + (th0 - 15) / 2, 3, theme.panel_text, &clk);
+                }
             } else {
                 let mut clk = *b"00:00";
                 two_digits(&mut clk, 0, (secs / 60) % 100);
                 two_digits(&mut clk, 3, secs % 60);
-                let clk_w = clk.len() as i32 * (GLYPH_W + 1) * 3;
-                draw_text_3x5(&mut back, bw, bh, bw as i32 - clk_w - 12, 6, 3, theme.panel_text, &clk);
+                let clk_w = clk.len() as i32 * (GLYPH_W + 1) * 2;
+                let cx0 = tx0 + (tw0 - clk_w) / 2;
+                let cy0 = ty0 + th0 - 5 * 2 - 8;
+                draw_text_3x5(&mut back, bw, bh, cx0, cy0, 2, theme.panel_text, &clk);
             }
         }
 
         // --- DWM dock: acrylic strip of pinned launchers down the left edge ---
-        if fx.blur {
-            blur_region(&mut back, bw, bh, 0, ly.panel_h, ly.dock_w, bh as i32 - ly.panel_h, fx.blur_radius, fx.blur_iters, &mut blur_a, &mut blur_b);
-        }
-        if fx.gradient {
-            fill_rrect_grad(&mut back, bw, bh, 0, ly.panel_h, ly.dock_w, bh as i32 - ly.panel_h, 0, 0, shade(theme.panel, 14), theme.panel, fx.panel_alpha);
-        } else {
-            fill_rect_alpha(&mut back, bw, bh, 0, ly.panel_h, ly.dock_w, bh as i32 - ly.panel_h, ((fx.panel_alpha.min(255) as u32) << 24) | (theme.panel & 0x00FF_FFFF));
-        }
+        // `dock_rect` nests just inside anything the panel/tray reserve on the left;
+        // for the default (top panel) it is (0,panel_h,dock_w,bh-panel_h).
+        fill_strip_bg(&mut back, bw, bh, dock_rect, theme.panel, &fx, 14, &mut blur_a, &mut blur_b);
         // Hover easing step per frame (instant when animations are off).
         let hover_step = if anim_frames == 0 { 255u8 } else { (255 / anim_frames).max(28) as u8 };
         for i in 0..apps.dock.len() {
             let ri = apps.dock[i];
-            let (ix, iy, iw, ih) = dock_icon_rect(&ly, i as i32);
+            let (ix, iy, iw, ih) = dock_icon_rect(&ly, &ins, bw, bh, i as i32);
             if iy + ih > bh as i32 {
                 break;
             }
-            let hovered = mx < ly.dock_w && mx >= ix && mx < ix + iw && my >= iy && my < iy + ih;
+            let hovered = mx >= dock_rect.0 && mx < dock_rect.0 + dock_rect.2 && mx >= ix && mx < ix + iw && my >= iy && my < iy + ih;
             dock_hover[i] = if hovered {
                 dock_hover[i].saturating_add(hover_step)
             } else {
@@ -3309,7 +3547,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         menu_was_open = menu_open;
         if menu_open {
             let mprog = ramp(ticks, menu_anim_tick, anim_frames) as i32; // 0..255
-            let (mx0, my0, mw0, _) = menu_item_rect(&ly, 0);
+            let (mx0, my0, mw0, _) = menu_item_rect(&ly, menu_org, 0);
             let full_h = apps.launcher.len() as i32 * ly.menu_item_h;
             let reveal_h = full_h * mprog / 255; // grow the card downward
             if reveal_h > 0 {
@@ -3320,7 +3558,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             }
             for i in 0..apps.launcher.len() {
                 let ri = apps.launcher[i];
-                let (ix, iy, iw, ih) = menu_item_rect(&ly, i as i32);
+                let (ix, iy, iw, ih) = menu_item_rect(&ly, menu_org, i as i32);
                 if iy + ih > my0 + reveal_h {
                     break; // below the revealed edge — not shown yet
                 }

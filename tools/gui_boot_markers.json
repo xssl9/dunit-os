@@ -7,6 +7,7 @@
     { "marker": "gui_server: start", "claim": "compositor process launched by the kernel GUI branch", "source": "userspace/system_apps/gui_server/src/main.rs" },
     { "marker": "gui_server: no startup apps to autostart", "claim": "empty [startup] honored — no test windows/terminal autostarted", "source": "userspace/system_apps/gui_server/src/main.rs" },
     { "marker": "startup=0", "claim": "resolved DWM config has an empty startup list (data-driven clean boot)", "source": "assets/dwm/default.toml" },
+    { "marker": "gui_server: panel edge=top tray edge=top tray_size=28", "claim": "Phase 5 panel/tray edges resolved from [panel]/[tray] in default.toml (default top/top → byte-identical layout)", "source": "assets/dwm/default.toml" },
     { "marker": "gui_server: desktop ready", "claim": "desktop reached an interactive, presenting state with zero windows", "source": "userspace/system_apps/gui_server/src/main.rs" }
   ],
   "forbidden": [

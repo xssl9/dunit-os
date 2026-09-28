@@ -104,6 +104,20 @@ clock   = true
 monitor = true
 corner  = 1
 
+# Panel placement. `pos`: which screen edge the panel (wordmark + workspace pips +
+# focused-window title + tray) docks to — "top" | "bottom" | "left" | "right".
+# Top/bottom are full text bars; left/right are narrow icon + pip bars. The dock
+# always stays on the left edge (only the panel and tray are edge-configurable).
+[panel]
+pos = "top"
+
+# System tray placement. When `pos` matches the panel edge the tray rides the end
+# of the panel (the classic top-right clock — the default look); a different edge
+# gives the tray its own acrylic strip. `size` is that strip's thickness (px).
+[tray]
+pos  = "top"
+size = 28
+
 # ============================================================================
 # Application registry + desktop composition (data-driven; concept: no app
 # names/exec paths/icons are baked into gui_server). Each `[application.<id>]`

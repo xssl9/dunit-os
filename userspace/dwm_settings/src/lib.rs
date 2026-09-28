@@ -390,6 +390,102 @@ impl Widgets {
     }
 }
 
+/// Screen edge a shell strip (panel / tray) docks to. Fieldless, so it stays
+/// `Copy` and `Settings` with it. Serialized as its lowercase name.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Edge {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+impl Edge {
+    /// Top/Bottom strips run horizontally (full width); Left/Right run vertically.
+    pub const fn is_horizontal(self) -> bool {
+        matches!(self, Edge::Top | Edge::Bottom)
+    }
+
+    /// TOML spelling (matches `parse`).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Edge::Top => "top",
+            Edge::Bottom => "bottom",
+            Edge::Left => "left",
+            Edge::Right => "right",
+        }
+    }
+
+    /// Parse a `pos = "..."` value; unknown spellings return `None` (field keeps
+    /// its baseline edge).
+    fn parse(value: &str) -> Option<Edge> {
+        match value {
+            "top" => Some(Edge::Top),
+            "bottom" => Some(Edge::Bottom),
+            "left" => Some(Edge::Left),
+            "right" => Some(Edge::Right),
+            _ => None,
+        }
+    }
+}
+
+/// Panel placement (`[panel]` table). The panel is the desktop's shell bar
+/// (launcher button, workspace switcher, focused-window title, and — when the
+/// tray shares its edge — the tray readout). Its *thickness* stays `[layout]
+/// panel_h` (single source of truth); this table only picks which screen edge it
+/// docks to, so the panel can move to any side without a rebuild.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Panel {
+    pub pos: Edge,
+}
+
+impl Panel {
+    pub const fn baseline() -> Self {
+        Panel { pos: Edge::Top }
+    }
+
+    fn apply(&mut self, key: &str, value: &str) {
+        if key == "pos" {
+            if let Some(e) = Edge::parse(value) {
+                self.pos = e;
+            }
+        }
+    }
+}
+
+/// System-tray placement + thickness (`[tray]` table). The tray shows live RAM /
+/// process / uptime. When it shares the panel's edge it renders INSIDE the panel
+/// strip (end-aligned — the classic top-panel look); on any other edge it takes
+/// its own reserved strip `size` px thick. Baseline top/28 reproduces the
+/// pre-Phase-5 in-panel tray exactly.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Tray {
+    pub pos: Edge,
+    pub size: i32,
+}
+
+impl Tray {
+    pub const fn baseline() -> Self {
+        Tray { pos: Edge::Top, size: 28 }
+    }
+
+    fn apply(&mut self, key: &str, value: &str) {
+        match key {
+            "pos" => {
+                if let Some(e) = Edge::parse(value) {
+                    self.pos = e;
+                }
+            }
+            "size" => {
+                if let Some(n) = parse_uint(value) {
+                    self.size = (n as i32).clamp(12, 200);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Resolved DWM settings. Extends with `[layout]` etc. in later sub-slices.
 #[derive(Clone, Copy)]
 pub struct Settings {
@@ -398,6 +494,8 @@ pub struct Settings {
     pub effects: Effects,
     pub desktop: Desktop,
     pub widgets: Widgets,
+    pub panel: Panel,
+    pub tray: Tray,
     /// True when a config file was found and read (parse still best-effort).
     pub from_file: bool,
     /// Count of recognised keys applied over the baseline (0 for pure default).
@@ -412,6 +510,8 @@ impl Settings {
             effects: Effects::baseline(),
             desktop: Desktop::baseline(),
             widgets: Widgets::baseline(),
+            panel: Panel::baseline(),
+            tray: Tray::baseline(),
             from_file: false,
             applied: 0,
         }
@@ -557,9 +657,10 @@ pub fn save(settings: &Settings) -> bool {
 }
 
 /// Collect the raw text of every top-level table that `to_toml` does NOT emit
-/// (anything whose header's first segment is not theme/layout/effects/desktop),
-/// so `save` can round-trip user-authored `[application.*]`/`[dock]`/etc. tables
-/// it has no typed knowledge of. Preamble before the first `[header]` is dropped.
+/// (anything whose header's first segment is not theme/layout/effects/desktop/
+/// widgets/panel/tray), so `save` can round-trip user-authored
+/// `[application.*]`/`[dock]`/etc. tables it has no typed knowledge of. Preamble
+/// before the first `[header]` is dropped.
 fn extra_sections(text: &str) -> String {
     let mut out = String::new();
     let mut keep = false;
@@ -567,7 +668,10 @@ fn extra_sections(text: &str) -> String {
         let trimmed = strip_comment(raw).trim();
         if let Some(name) = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
             let base = name.trim().split('.').next().unwrap_or("").trim();
-            keep = !matches!(base, "theme" | "layout" | "effects" | "desktop");
+            keep = !matches!(
+                base,
+                "theme" | "layout" | "effects" | "desktop" | "widgets" | "panel" | "tray"
+            );
         }
         if keep {
             out.push_str(raw);
@@ -621,6 +725,12 @@ pub fn parse_into(text: &str, settings: &mut Settings) {
             settings.applied += 1;
         } else if section == "widgets" {
             settings.widgets.apply(key, value);
+            settings.applied += 1;
+        } else if section == "panel" {
+            settings.panel.apply(key, value);
+            settings.applied += 1;
+        } else if section == "tray" {
+            settings.tray.apply(key, value);
             settings.applied += 1;
         }
     }
@@ -1027,18 +1137,34 @@ pub fn to_toml(s: &Settings) -> String {
     push_bool(&mut out, "clock", s.widgets.clock);
     push_bool(&mut out, "monitor", s.widgets.monitor);
     push_int(&mut out, "corner", s.widgets.corner as i64);
+    out.push('\n');
+
+    out.push_str("[panel]\n");
+    push_string(&mut out, "pos", s.panel.pos.as_str());
+    out.push('\n');
+
+    out.push_str("[tray]\n");
+    push_string(&mut out, "pos", s.tray.pos.as_str());
+    push_int(&mut out, "size", s.tray.size as i64);
 
     out
 }
 
-/// True iff `to_toml` round-trips `s` through `parse_into` (theme/layout/effects;
-/// the `from_file`/`applied` bookkeeping is not part of the value). A cheap
-/// startup self-check that the serializer and parser stay in lockstep.
+/// True iff `to_toml` round-trips `s` through `parse_into` (theme/layout/effects/
+/// desktop/widgets/panel/tray; the `from_file`/`applied` bookkeeping is not part
+/// of the value). A cheap startup self-check that the serializer and parser stay
+/// in lockstep.
 pub fn roundtrip_ok(s: &Settings) -> bool {
     let text = to_toml(s);
     let mut back = Settings::defaults();
     parse_into(&text, &mut back);
-    back.theme == s.theme && back.layout == s.layout && back.effects == s.effects && back.desktop == s.desktop && back.widgets == s.widgets
+    back.theme == s.theme
+        && back.layout == s.layout
+        && back.effects == s.effects
+        && back.desktop == s.desktop
+        && back.widgets == s.widgets
+        && back.panel == s.panel
+        && back.tray == s.tray
 }
 
 // ===========================================================================
