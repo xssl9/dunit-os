@@ -2466,6 +2466,49 @@ fn sample_area(src: &[u32], sw: usize, sh: usize, rx: usize, ry: usize, dw: usiz
     unpremul(asum, rsum, gsum, bsum, count)
 }
 
+/// A desktop widget kind the compositor knows how to draw. The renderer owns the
+/// per-kind drawing code (a clock formats time, a monitor reads system stats);
+/// the CONFIG owns which kinds are shown and where (per-widget `widgets/*.toml`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WidgetKind {
+    Clock,
+    Monitor,
+}
+
+/// One resolved desktop widget: its kind plus the placement/accent resolved from
+/// its per-widget file (falling back to the `[widgets] corner` default / theme).
+#[derive(Clone, Copy)]
+struct DeskWidget {
+    kind: WidgetKind,
+    corner: i32,
+    accent: u32,
+}
+
+/// Resolve the config-driven desktop-widget set. Each widget kind the compositor
+/// implements is included ONLY when its `widgets/<name>.toml` exists AND is
+/// enabled — so a widget is removed by deleting its file or setting
+/// `enabled = false` (the Phase 8 removal switch; single source of truth, no
+/// `[widgets] clock/monitor` bool). Per-widget `corner < 0` inherits
+/// `default_corner` (`[widgets] corner`); `accent == 0` inherits the theme accent
+/// at draw time. Called once at bring-up and again on each live config reload —
+/// never per frame, so the per-widget files are not re-read every tick.
+fn resolve_desk_widgets(default_corner: i32) -> Vec<DeskWidget> {
+    // The compositor's registry of IMPLEMENTED widget kinds. This is renderer
+    // implementation (each kind has bespoke draw code below), not desktop policy:
+    // policy — which of these are actually shown — lives in the per-widget files.
+    let known: [(&str, WidgetKind); 2] =
+        [("clock", WidgetKind::Clock), ("monitor", WidgetKind::Monitor)];
+    let mut v: Vec<DeskWidget> = Vec::new();
+    for (name, kind) in known {
+        let wc = settings::WidgetCfg::load(name);
+        if wc.from_file && wc.enabled {
+            let corner = if wc.corner >= 0 { wc.corner.min(3) } else { default_corner };
+            v.push(DeskWidget { kind, corner, accent: wc.accent });
+        }
+    }
+    v
+}
+
 fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     let mut fb = libdunit::FbInfo {
         addr: 0,
@@ -2530,19 +2573,21 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     ));
     let mut ins = reserved_insets(&ly, panel_edge, tray_edge, tray_size);
 
-    // Per-widget config (widgets/<name>.toml): resolve each desktop widget's file
-    // + enabled flag and log it, so a per-widget TOML edit is observable headless.
-    // Phase 2 only surfaces the resolved state; the render block still gates on the
-    // `[widgets]` table (Phase 8 folds the per-widget files into that gating).
+    // Config-driven desktop-widget set (Phase 8): each widget is present only when
+    // its widgets/<name>.toml exists AND is enabled, so removing a widget = delete
+    // its file (or `enabled = false`). `[widgets] enabled` is the master switch;
+    // `[widgets] corner` the default corner. The render block below iterates THIS
+    // set, not hardcoded per-part bools — the per-widget files are the single
+    // source of truth. Rebuilt on live reload; the marker traces the resolved
+    // decision so a config→behavior change is observable headless.
+    let mut desk_widgets = resolve_desk_widgets(cfg.settings.widgets.corner);
     {
-        let wclock = settings::WidgetCfg::load("clock");
-        let wmon = settings::WidgetCfg::load("monitor");
+        let has = |k: WidgetKind| desk_widgets.iter().any(|w| w.kind == k);
         libdunit::println(&alloc::format!(
-            "gui_server: widgets clock(file={} en={}) monitor(file={} en={})",
-            wclock.from_file as u32,
-            wclock.enabled as u32,
-            wmon.from_file as u32,
-            wmon.enabled as u32,
+            "gui_server: widgets enabled={} clock={} monitor={}",
+            cfg.settings.widgets.enabled as u32,
+            has(WidgetKind::Clock) as u32,
+            has(WidgetKind::Monitor) as u32,
         ));
     }
 
@@ -2757,6 +2802,9 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 ly = ncfg.settings.layout;
                 fx = ncfg.settings.effects;
                 wg = ncfg.settings.widgets;
+                // Re-resolve the config-driven widget set so a live edit that adds/
+                // removes a widgets/<name>.toml (or flips its `enabled`) takes effect.
+                desk_widgets = resolve_desk_widgets(ncfg.settings.widgets.corner);
                 apps = ncfg.apps;
                 // Re-seed the shell-strip placement + recompute the reserved
                 // margins, so a live `[panel]`/`[tray] pos` edit moves the panel,
@@ -3253,60 +3301,79 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             }
         }
 
-        // --- Desktop widget card (concept §5) --------------------------------
-        // A translucent plasmoid on the wallpaper, behind windows: the uptime
-        // clock over a live RAM/process monitor. Config-driven via `[widgets]`
-        // (enable, per-part toggles, screen corner); windows composite on top.
-        if wg.enabled && (wg.clock || wg.monitor) {
+        // --- Desktop widget cards (concept §5) -------------------------------
+        // Translucent plasmoids on the wallpaper, behind windows. The SET is
+        // config-driven (`desk_widgets`, resolved from the per-widget files):
+        // each widget is present only when its file exists and is enabled, so a
+        // widget is removed by deleting its file. `[widgets] enabled` is the
+        // master kill switch. Widgets sharing a corner stack into one card
+        // (clock above monitor), so the default (both in corner 1) reads as one
+        // plasmoid; per-widget `corner` can split them across corners. Windows
+        // composite on top.
+        if wg.enabled && !desk_widgets.is_empty() {
             if let Some(f) = font.as_ref() {
                 let mut wst = libdunit::SystemStats::default();
                 let whave = libdunit::get_system_stats(&mut wst) >= 0;
-                let card_w = 236i32;
-                let pad = 16i32;
-                let clock_px = (ly.title_font_px as f32 * 2.4).max(24.0);
-                let clock_h = if wg.clock { clock_px as i32 + 10 } else { 0 };
-                let mon_h = if wg.monitor { 58 } else { 0 };
-                let card_h = pad * 2 + clock_h + mon_h;
-                let margin = 24i32;
-                let cx = if wg.corner == 1 || wg.corner == 3 {
-                    bw as i32 - ins.right - card_w - margin
-                } else {
-                    ins.left + margin
-                };
-                let cy = if wg.corner == 2 || wg.corner == 3 {
-                    bh as i32 - ins.bottom - card_h - margin
-                } else {
-                    ins.top + margin
-                };
-                if fx.blur {
-                    blur_region(&mut back, bw, bh, cx, cy, card_w, card_h, fx.blur_radius, fx.blur_iters, &mut blur_a, &mut blur_b);
-                }
-                fill_rrect_grad(&mut back, bw, bh, cx, cy, card_w, card_h, fx.corner_radius, RR_ALL, shade(theme.menu, 16), shade(theme.menu, -8), fx.menu_alpha);
-                let secs = if whave { wst.uptime_ticks / 100 } else { 0 };
-                let mut ty = cy + pad;
-                if wg.clock {
-                    let clk = alloc::format!("{:02}:{:02}:{:02}", (secs / 3600) % 100, (secs / 60) % 60, secs % 60);
-                    let tw = text_width_ttf(f, &clk, clock_px);
-                    let baseline = ty + clock_px as i32 - 4;
-                    draw_text_ttf(&mut back, bw, bh, f, cx + (card_w - tw) / 2, baseline, clock_px, &clk, theme.panel_text & 0x00FF_FFFF);
-                    ty += clock_h;
-                }
-                if wg.monitor {
-                    let px = ly.title_font_px as f32;
-                    let ram_pct = if whave && wst.pmm_total_bytes > 0 {
-                        (wst.pmm_used_bytes * 100 / wst.pmm_total_bytes) as u32
+                for corner in 0..4i32 {
+                    let clock_w = desk_widgets
+                        .iter()
+                        .find(|w| w.corner == corner && w.kind == WidgetKind::Clock);
+                    let mon_w = desk_widgets
+                        .iter()
+                        .find(|w| w.corner == corner && w.kind == WidgetKind::Monitor);
+                    if clock_w.is_none() && mon_w.is_none() {
+                        continue;
+                    }
+                    let card_w = 236i32;
+                    let pad = 16i32;
+                    let clock_px = (ly.title_font_px as f32 * 2.4).max(24.0);
+                    let clock_h = if clock_w.is_some() { clock_px as i32 + 10 } else { 0 };
+                    let mon_h = if mon_w.is_some() { 58 } else { 0 };
+                    let card_h = pad * 2 + clock_h + mon_h;
+                    let margin = 24i32;
+                    let cx = if corner == 1 || corner == 3 {
+                        bw as i32 - ins.right - card_w - margin
                     } else {
-                        0
+                        ins.left + margin
                     };
-                    let line = alloc::format!("RAM {}%    {} proc", ram_pct, wst.process_running);
-                    draw_text_ttf(&mut back, bw, bh, f, cx + pad, ty + px as i32, px, &line, theme.panel_text & 0x00FF_FFFF);
-                    // RAM usage bar under the text row.
-                    let bar_y = ty + px as i32 + 12;
-                    let bar_w = card_w - 2 * pad;
-                    fill_rrect(&mut back, bw, bh, cx + pad, bar_y, bar_w, 8, 4, RR_ALL, ((fx.menu_alpha.min(255) as u32) << 24) | (shade(theme.menu, -20) & 0x00FF_FFFF));
-                    let fill_w = (bar_w * ram_pct.min(100) as i32) / 100;
-                    if fill_w > 0 {
-                        fill_rrect(&mut back, bw, bh, cx + pad, bar_y, fill_w, 8, 4, RR_ALL, 0xFF00_0000 | (theme.launcher & 0x00FF_FFFF));
+                    let cy = if corner == 2 || corner == 3 {
+                        bh as i32 - ins.bottom - card_h - margin
+                    } else {
+                        ins.top + margin
+                    };
+                    if fx.blur {
+                        blur_region(&mut back, bw, bh, cx, cy, card_w, card_h, fx.blur_radius, fx.blur_iters, &mut blur_a, &mut blur_b);
+                    }
+                    fill_rrect_grad(&mut back, bw, bh, cx, cy, card_w, card_h, fx.corner_radius, RR_ALL, shade(theme.menu, 16), shade(theme.menu, -8), fx.menu_alpha);
+                    let secs = if whave { wst.uptime_ticks / 100 } else { 0 };
+                    let mut ty = cy + pad;
+                    if clock_w.is_some() {
+                        let clk = alloc::format!("{:02}:{:02}:{:02}", (secs / 3600) % 100, (secs / 60) % 60, secs % 60);
+                        let tw = text_width_ttf(f, &clk, clock_px);
+                        let baseline = ty + clock_px as i32 - 4;
+                        draw_text_ttf(&mut back, bw, bh, f, cx + (card_w - tw) / 2, baseline, clock_px, &clk, theme.panel_text & 0x00FF_FFFF);
+                        ty += clock_h;
+                    }
+                    if let Some(mw) = mon_w {
+                        let px = ly.title_font_px as f32;
+                        let ram_pct = if whave && wst.pmm_total_bytes > 0 {
+                            (wst.pmm_used_bytes * 100 / wst.pmm_total_bytes) as u32
+                        } else {
+                            0
+                        };
+                        let line = alloc::format!("RAM {}%    {} proc", ram_pct, wst.process_running);
+                        draw_text_ttf(&mut back, bw, bh, f, cx + pad, ty + px as i32, px, &line, theme.panel_text & 0x00FF_FFFF);
+                        // RAM usage bar under the text row.
+                        let bar_y = ty + px as i32 + 12;
+                        let bar_w = card_w - 2 * pad;
+                        fill_rrect(&mut back, bw, bh, cx + pad, bar_y, bar_w, 8, 4, RR_ALL, ((fx.menu_alpha.min(255) as u32) << 24) | (shade(theme.menu, -20) & 0x00FF_FFFF));
+                        let fill_w = (bar_w * ram_pct.min(100) as i32) / 100;
+                        if fill_w > 0 {
+                            // Per-widget accent (widgets/monitor.toml `accent`) overrides
+                            // the theme launcher color for the fill; 0 = inherit theme.
+                            let bar_col = if mw.accent != 0 { mw.accent } else { theme.launcher };
+                            fill_rrect(&mut back, bw, bh, cx + pad, bar_y, fill_w, 8, 4, RR_ALL, 0xFF00_0000 | (bar_col & 0x00FF_FFFF));
+                        }
                     }
                 }
             }

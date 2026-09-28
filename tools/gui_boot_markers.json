@@ -8,6 +8,7 @@
     { "marker": "gui_server: no startup apps to autostart", "claim": "empty [startup] honored — no test windows/terminal autostarted", "source": "userspace/system_apps/gui_server/src/main.rs" },
     { "marker": "startup=0", "claim": "resolved DWM config has an empty startup list (data-driven clean boot)", "source": "assets/dwm/default.toml" },
     { "marker": "gui_server: panel edge=top tray edge=top tray_size=28", "claim": "Phase 5 panel/tray edges resolved from [panel]/[tray] in default.toml (default top/top → byte-identical layout)", "source": "assets/dwm/default.toml" },
+    { "marker": "gui_server: widgets enabled=1 clock=1 monitor=1", "claim": "Phase 6 desktop-widget set resolved from the per-widget files (widgets/clock.toml + widgets/monitor.toml present & enabled → both drawn); removing a widget = deleting its file, single source of truth (no [widgets] clock/monitor bool)", "source": "assets/dwm/widgets/" },
     { "marker": "gui_server: desktop ready", "claim": "desktop reached an interactive, presenting state with zero windows", "source": "userspace/system_apps/gui_server/src/main.rs" }
   ],
   "forbidden": [

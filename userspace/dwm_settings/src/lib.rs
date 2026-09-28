@@ -336,31 +336,31 @@ impl Desktop {
 }
 
 /// Desktop widget card (concept §5): a translucent plasmoid painted on the
-/// wallpaper (behind windows). Shows the uptime clock and a live system monitor.
+/// wallpaper (behind windows). `[widgets]` holds only the desktop-wide policy —
+/// the master on/off and the default corner. WHICH widgets are actually drawn is
+/// owned per-widget by `widgets/<name>.toml` (see [`WidgetCfg`]): each widget is
+/// present only when its file exists and is enabled, so a widget is removed by
+/// deleting its file (single source of truth, no `[widgets] clock/monitor` bool).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Widgets {
-    /// Master toggle for the desktop widget card.
+    /// Master toggle: `false` hides the whole plasmoid regardless of per-widget files.
     pub enabled: bool,
-    /// Show the big uptime clock (HH:MM:SS) at the top of the card.
-    pub clock: bool,
-    /// Show the RAM/process monitor rows under the clock.
-    pub monitor: bool,
-    /// Screen corner: 0 = top-left, 1 = top-right, 2 = bottom-left, 3 = bottom-right.
+    /// Default screen corner inherited by a widget whose file omits `corner`:
+    /// 0 = top-left, 1 = top-right, 2 = bottom-left, 3 = bottom-right.
     pub corner: i32,
 }
 
 impl Widgets {
-    /// The built-in baseline: a monitor+clock card in the top-right corner.
+    /// The built-in baseline: plasmoid on, default corner top-right. The clock and
+    /// monitor widgets ship as their own `widgets/*.toml` files, not bools here.
     pub const fn baseline() -> Self {
         Widgets {
             enabled: true,
-            clock: true,
-            monitor: true,
             corner: 1,
         }
     }
 
-    /// Apply one `key`/`value` pair from the `[widgets]` table. Bool keys accept
+    /// Apply one `key`/`value` pair from the `[widgets]` table. `enabled` accepts
     /// `true`/`false`/`1`/`0`; `corner` is a non-negative integer clamped to 0..3.
     /// Unknown keys and malformed values are ignored (field keeps its baseline).
     fn apply(&mut self, key: &str, value: &str) {
@@ -368,16 +368,6 @@ impl Widgets {
             "enabled" => {
                 if let Some(b) = parse_bool(value) {
                     self.enabled = b;
-                }
-            }
-            "clock" => {
-                if let Some(b) = parse_bool(value) {
-                    self.clock = b;
-                }
-            }
-            "monitor" => {
-                if let Some(b) = parse_bool(value) {
-                    self.monitor = b;
                 }
             }
             "corner" => {
@@ -1134,8 +1124,6 @@ pub fn to_toml(s: &Settings) -> String {
 
     out.push_str("[widgets]\n");
     push_bool(&mut out, "enabled", s.widgets.enabled);
-    push_bool(&mut out, "clock", s.widgets.clock);
-    push_bool(&mut out, "monitor", s.widgets.monitor);
     push_int(&mut out, "corner", s.widgets.corner as i64);
     out.push('\n');
 
