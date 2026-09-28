@@ -742,6 +742,16 @@ pub fn init() -> Result<()> {
         (*ROOT_MEMFS.0.get()).add_file("/system/share/dwm/widgets/clock.toml", DWM_WIDGET_CLOCK_TOML.to_vec());
         (*ROOT_MEMFS.0.get()).add_file("/system/share/dwm/widgets/monitor.toml", DWM_WIDGET_MONITOR_TOML.to_vec());
 
+        // Writable window/session store (M4). Pre-created empty so gui_server can
+        // rewrite it at runtime: PROTECTED_ROOTS blocks runtime mkdir under
+        // /system but permits open+write of a file that already exists. RAM-only
+        // (MemFS) until DunitFS v2 gives a persistent user-config partition, so
+        // geometry survives a reload/reconnect within a boot, not across boots.
+        (*ROOT_MEMFS.0.get()).add_file(
+            "/system/share/dwm/session.toml",
+            b"# DWM window session store (auto-written by gui_server).\n".to_vec(),
+        );
+
         vfs.mount("/", &mut *ROOT_MEMFS.0.get())?;
         serial_log("[MEMFS] mounted as /\r\n");
 

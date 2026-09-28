@@ -1234,6 +1234,156 @@ fn toggle_maximize(
     set_window_state(server, clients, win, next, bw, bh, ly, ins);
 }
 
+// ---------------------------------------------------------------------------
+// Window/session persistence (M4). Geometry is remembered per APP id (not per
+// pid, which is ephemeral), so reopening an app restores where its window last
+// sat. The store is `settings::SESSION_PATH`, pre-created writable in the kernel
+// VFS; it is RAM-only until DunitFS v2, then the same path survives reboots.
+// ---------------------------------------------------------------------------
+
+/// The registered app id for a window (its join key into the session store), or
+/// `None` when the window's app is unregistered / id-less (nothing to remember).
+fn win_app_id<'a>(apps: &'a Applications, app: u8) -> Option<&'a str> {
+    let id = apps.apps.get(app as usize)?.id.as_str();
+    if id.is_empty() {
+        None
+    } else {
+        Some(id)
+    }
+}
+
+/// Upsert a window's FLOATING geometry into the in-RAM session mirror, keyed by
+/// its app id. A maximized window records its pre-maximize floating rect (from
+/// `restore`) plus the `maximized` flag, so a later restore reopens it maximized
+/// yet with a sane un-maximize size. No-op for id-less windows.
+fn session_remember(session: &mut Vec<settings::WinGeom>, apps: &Applications, w: &Win) {
+    let Some(id) = win_app_id(apps, w.app) else {
+        return;
+    };
+    let (gx, gy, gw, gh) = match w.restore {
+        Some((rx, ry, rw, rh)) if w.state != WinState::Floating => (rx, ry, rw, rh),
+        _ => (w.cx, w.cy, w.sw, w.sh),
+    };
+    let maximized = w.state == WinState::Maximized;
+    let ge = settings::WinGeom::new(id, gx, gy, gw, gh, maximized);
+    if let Some(e) = session.iter_mut().find(|e| e.id.as_str() == id) {
+        *e = ge;
+    } else if session.len() < settings::MAX_SESSION {
+        session.push(ge);
+    }
+}
+
+/// Find a remembered geometry for the app `app` (registry index) in the mirror.
+fn session_lookup(session: &[settings::WinGeom], apps: &Applications, app: u8) -> Option<settings::WinGeom> {
+    let id = win_app_id(apps, app)?;
+    session.iter().find(|e| e.id.as_str() == id).copied()
+}
+
+// Hardware make-codes the switcher watches. The trigger key (Tab) and the cancel
+// key (Esc) are keyboard-protocol invariants, not desktop policy — only which
+// MODIFIER arms the switcher is config (`[shortcuts] switch_mod`).
+const SC_TAB: u8 = 0x0F;
+const SC_ESC: u8 = 0x01;
+
+/// Alt/Super-Tab window switcher (M4, gated by `[shortcuts]`). While armed it
+/// holds a frozen most-recently-used snapshot of the candidate windows and the
+/// highlighted index; releasing the arming modifier commits the highlight (the
+/// compositor then raises + un-minimizes that window). Tab advances, Shift-Tab
+/// steps back, Esc cancels — all UI invariants.
+struct Switcher {
+    active: bool,
+    order: Vec<usize>,
+    idx: usize,
+}
+
+impl Switcher {
+    fn new() -> Self {
+        Switcher { active: false, order: Vec::new(), idx: 0 }
+    }
+
+    /// Arm over a fresh MRU snapshot. The current front window is index 0, so the
+    /// first Tab moves to the next candidate (classic Alt-Tab "previous window").
+    fn begin(&mut self, mru: &[usize], backward: bool) {
+        self.order.clear();
+        self.order.extend_from_slice(mru);
+        self.active = !self.order.is_empty();
+        self.idx = 0;
+        if self.order.len() >= 2 {
+            self.advance(backward);
+        }
+    }
+
+    fn advance(&mut self, backward: bool) {
+        let n = self.order.len();
+        if n == 0 {
+            return;
+        }
+        self.idx = if backward { (self.idx + n - 1) % n } else { (self.idx + 1) % n };
+    }
+
+    fn selected(&self) -> Option<usize> {
+        self.order.get(self.idx).copied()
+    }
+
+    fn cancel(&mut self) {
+        self.active = false;
+    }
+
+    /// Close the overlay and yield the highlighted window index to raise.
+    fn commit(&mut self) -> Option<usize> {
+        let sel = self.selected();
+        self.active = false;
+        sel
+    }
+}
+
+/// Candidate windows for the switcher in most-recently-used order (topmost of the
+/// z-order first). Only live windows on the active workspace are offered; a
+/// minimized one is still listed — committing to it un-minimizes it.
+fn switcher_mru(z: &[usize], wins: &[Win], ws: usize) -> Vec<usize> {
+    let mut out = Vec::new();
+    for &i in z.iter().rev() {
+        if wins.get(i).map_or(false, |w| w.alive && w.ws == ws) {
+            out.push(i);
+        }
+    }
+    out
+}
+
+/// Move `wi` to the top of the z-order (mirrors the click-to-raise path).
+fn raise_window(z: &mut Vec<usize>, wi: usize) {
+    z.retain(|&i| i != wi);
+    z.push(wi);
+}
+
+/// A transient desktop notification (M4, `[notifications]`). `born`/`expire` are
+/// frame ticks (~16 ms each); the compositor prunes a toast once `expire` passes.
+/// Purely runtime UI feedback — the policy (on/off, timeout, corner) lives in the
+/// config, never a constant.
+struct Toast {
+    text: alloc::string::String,
+    born: u32,
+    expire: u32,
+}
+
+/// Post a notification toast, gated by `[notifications] enabled` (single source of
+/// truth — the flag is the resolved config's, never a hardcoded default). The
+/// per-toast lifetime comes from `timeout_ms` (clamped 500..30000 at parse time)
+/// converted to ~16 ms frames. The queue is bounded so a burst of launches can't
+/// grow it without limit; the oldest toasts are dropped first.
+fn notify_post(q: &mut Vec<Toast>, cfg: &settings::Notifications, now: u32, text: &str) {
+    if !cfg.enabled {
+        return;
+    }
+    const MAX_TOASTS: usize = 4;
+    let frames = (cfg.timeout_ms / 16).max(1);
+    q.push(Toast { text: text.into(), born: now, expire: now.saturating_add(frames) });
+    if q.len() > MAX_TOASTS {
+        let drop = q.len() - MAX_TOASTS;
+        q.drain(0..drop);
+    }
+}
+
 // ===========================================================================
 // M4 userspace DWM — interactive desktop session
 // ===========================================================================
@@ -1869,6 +2019,35 @@ fn menu_origin(ly: &Layout, edge: Edge, panel: (i32, i32, i32, i32), item_count:
 /// Rect of the i-th launcher-menu entry, stacked vertically from `origin`.
 fn menu_item_rect(ly: &Layout, origin: (i32, i32), i: i32) -> (i32, i32, i32, i32) {
     (origin.0, origin.1 + i * ly.menu_item_h, ly.menu_w, ly.menu_item_h)
+}
+
+/// Quick-settings applet cell (M4, `[quicksettings]`): a panel-thick square on the
+/// panel's main axis, just past the workspace pips. Clickable to open the flyout
+/// of live toggles. Only meaningful when `[quicksettings] enabled` (the caller
+/// gates on it); geometry follows the configured panel edge like every other cell.
+fn qs_applet_rect(ly: &Layout, edge: Edge, panel: (i32, i32, i32, i32), ws_count: usize) -> (i32, i32, i32, i32) {
+    let off = launcher_main(ly, edge) + ws_count as i32 * ly.ws_w + 6;
+    let side = if edge.is_horizontal() { panel.3 } else { panel.2 };
+    inset_cross(panel_slot(panel, edge, off, side), edge, 3)
+}
+
+/// Quick-settings flyout card: `rows` toggle rows flying out PERPENDICULAR to the
+/// panel edge from the applet cell (same convention as the launcher `menu_origin`).
+fn qs_flyout_rect(ly: &Layout, edge: Edge, applet: (i32, i32, i32, i32), rows: i32) -> (i32, i32, i32, i32) {
+    let (ax, ay, aw, _ah) = applet;
+    let w = 150i32;
+    let h = rows * ly.menu_item_h + 8;
+    match edge {
+        Edge::Top => (ax, ay + applet.3, w, h),
+        Edge::Bottom => (ax, ay - h, w, h),
+        Edge::Left => (ax + aw, ay, w, h),
+        Edge::Right => (ax - w, ay, w, h),
+    }
+}
+
+/// Rect of the i-th quick-settings flyout row (a toggle line).
+fn qs_row_rect(ly: &Layout, flyout: (i32, i32, i32, i32), i: i32) -> (i32, i32, i32, i32) {
+    (flyout.0 + 4, flyout.1 + 4 + i * ly.menu_item_h, flyout.2 - 8, ly.menu_item_h)
 }
 
 /// True when the point is inside `rect`.
@@ -2528,6 +2707,18 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     // Slice C: `theme`/`ly`/`fx` are `mut` because a gui_settings "reload" signal
     // re-reads the config live and re-seeds them (see the reload block in `loop`).
     let cfg = settings::load_config();
+    // Boot-time schema/shape gate (mirrors the live-reload path): a config from a
+    // FUTURE schema, or one that parsed to an incoherent shape, is `!valid`. Rather
+    // than half-apply an unknown layout we fall back WHOLESALE to the built-in
+    // baseline — the same last-known-good discipline the reload block uses, applied
+    // to the very first load. A well-formed current/older file passes through as-is
+    // (older ones are already forward-migrated inside `load_config`).
+    let cfg = if cfg.valid {
+        cfg
+    } else {
+        libdunit::println("gui_server: boot config invalid (schema/shape) — using baseline");
+        settings::Config::defaults()
+    };
     let mut theme: Theme = cfg.settings.theme;
     let mut ly: Layout = cfg.settings.layout;
     // The application registry (id/name/exec/icon/label), the dock/launcher/
@@ -2552,6 +2743,28 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         apps.startup.len(),
         apps.workspaces
     ));
+
+    // Schema-version handling (M4): the single predicate `settings::version_supported`
+    // decides which document versions this build accepts, in the config layer — the
+    // compositor only reports the RESOLVED version and runs a boundary self-check so
+    // the acceptance is observable headless. The guard proves the predicate rejects a
+    // future schema (SCHEMA_VERSION+1) and the non-schema 0, and accepts the current
+    // one — the same rule that made a bad-version boot fall back to baseline above.
+    {
+        let sv = cfg.settings.meta.schema_version;
+        libdunit::println(&alloc::format!(
+            "gui_server: config schema_version={} supported={}",
+            sv,
+            settings::version_supported(sv) as u32
+        ));
+        let guard_ok = settings::version_supported(settings::SCHEMA_VERSION)
+            && !settings::version_supported(settings::SCHEMA_VERSION + 1)
+            && !settings::version_supported(0);
+        libdunit::println(&alloc::format!(
+            "gui_server: schema guard {} (rejects future)",
+            if guard_ok { "ok" } else { "FAIL" }
+        ));
+    }
 
     // Shell-strip placement (Phase 5): the panel and the system tray each dock to
     // a configurable screen edge (`[panel] pos` / `[tray] pos`), and the tray has
@@ -2648,6 +2861,22 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         libdunit::println("gui_server: shell font unavailable — 3x5 labels only");
     }
 
+    // Window/session restore (M4): the remembered per-app geometry, loaded once
+    // from the writable session store. Gated by `[session] restore`; when off we
+    // start with an empty mirror so nothing is restored *or* rewritten. The marker
+    // traces the resolved policy + how many windows were remembered, so the
+    // save→restore round-trip is observable headless.
+    let mut session: Vec<settings::WinGeom> = if cfg.settings.session.restore {
+        settings::load_session()
+    } else {
+        Vec::new()
+    };
+    libdunit::println(&alloc::format!(
+        "gui_server: session restore={} entries={}",
+        cfg.settings.session.restore as u32,
+        session.len()
+    ));
+
     // Build the window model from presented clients, tiling them if their slot
     // origins collide, and keeping the title bar on-screen.
     let mut wins: Vec<Win> = Vec::new();
@@ -2676,6 +2905,20 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         if cy + sh + ins.bottom + ly.border > bh as i32 {
             cy = (bh as i32 - ins.bottom - sh - ly.border).max(ins.top + ly.title_h + ly.border);
         }
+        // Session restore: if this app has a remembered position, reopen it there
+        // (clamped back on-screen), so windows return to where the user left them.
+        // Size stays client-owned here (a floating resize would need a CONFIGURE
+        // round-trip); position is the immediately-safe part restored at boot.
+        if let Some(g) = session_lookup(&session, &apps, clients[i].app) {
+            cx = g
+                .x
+                .max(ins.left + ly.border)
+                .min((bw as i32 - ins.right - sw - ly.border).max(ins.left + ly.border));
+            cy = g
+                .y
+                .max(ins.top + ly.title_h + ly.border)
+                .min((bh as i32 - ins.bottom - sh - ly.border).max(ins.top + ly.title_h + ly.border));
+        }
         z.push(wins.len());
         wins.push(Win {
             pid: clients[i].pid,
@@ -2700,6 +2943,33 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         clients[i].ready = true;
         clients[i].win_created = true;
         offset += 32;
+    }
+
+    // Config-gated session round-trip proof (`test.toml` `[startup] self_test`).
+    // The harness has no mouse to drag/close windows, so exercise the persistence
+    // MECHANISM directly: remember every initial window, write the store, read it
+    // back through the real VFS file, and confirm the geometry survived. This is
+    // the same `session_remember` + `save_session` + `load_session` path the live
+    // desktop drives on window create/move/close. Never runs on the real desktop.
+    if apps.self_test {
+        for w in wins.iter() {
+            session_remember(&mut session, &apps, w);
+        }
+        let wrote = settings::save_session(&session);
+        let reloaded = settings::load_session();
+        let matched = reloaded.len() == session.len()
+            && session.iter().all(|s| {
+                reloaded
+                    .iter()
+                    .any(|r| r.id.as_str() == s.id.as_str() && r.x == s.x && r.y == s.y && r.w == s.w && r.h == s.h)
+            });
+        libdunit::println(&alloc::format!(
+            "gui_server: session roundtrip {} (wrote={} saved={} reloaded={})",
+            if wrote && matched { "ok" } else { "FAIL" },
+            wrote as u32,
+            session.len(),
+            reloaded.len()
+        ));
     }
     // An EMPTY window set is a first-class state now: a clean desktop boots into
     // a usable but window-less session (panel/dock/launcher/wallpaper/widgets are
@@ -2740,8 +3010,34 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     let mut desktop_ready_announced = false;
     // --- Visual-effects state (concept §5) -------------------------------
     let mut fx = cfg.settings.effects;
+    // Keyboard-shortcut policy (`[shortcuts]`): whether the Alt/Super-Tab window
+    // switcher is offered and which modifier arms it. `mut` so a live reload can
+    // flip the switcher on/off or swap Alt<->Super without a restart (re-seeded in
+    // the reload block, single source of truth — never read from a constant).
+    let mut shortcuts = cfg.settings.shortcuts;
+    // Live window-switcher overlay state (armed by `switch_mod`+Tab, committed on
+    // modifier release). Empty/inactive until the user (or the self-test) arms it.
+    let mut switcher = Switcher::new();
+    // One-shot latch so the config-gated switcher self-test drives exactly one
+    // cycle (test.toml `[startup] self_test`), never on the real desktop.
+    let mut switcher_st_done = false;
     // Desktop widget card (concept §5): painted on the wallpaper behind windows.
     let mut wg = cfg.settings.widgets;
+    // Quick-settings applet (`[quicksettings]`): a panel cell whose flyout flips the
+    // LIVE effect/widget flags (`fx.blur` / `wg.enabled`) — single source of truth,
+    // the flyout mutates the very fields the renderer reads, never a shadow copy.
+    // `mut` so a live reload re-seeds `enabled`; the flyout closes on reload so a
+    // now-disabled applet can't leave a stale card up.
+    let mut quicksettings = cfg.settings.quicksettings;
+    let mut qs_open = false;
+    let mut qs_st_done = false;
+    // Desktop notifications (`[notifications]`): a bounded queue of transient
+    // launch-feedback toasts, each auto-dismissed after `timeout_ms` (→ ~16 ms
+    // frames) and stacked in the configured corner. All policy is config-driven.
+    let mut notifications = cfg.settings.notifications;
+    let mut notifs: Vec<Toast> = Vec::new();
+    let mut notify_st_done = false;
+    let mut notify_expired_logged = false;
     // Animation length in frames (~16ms/frame); 0 when animations are off, so
     // every ramp/reveal collapses to instant (the flat look).
     let mut anim_frames = if fx.anim { (fx.anim_ms / 16).max(1) as u32 } else { 0 };
@@ -2801,7 +3097,14 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 theme = ncfg.settings.theme;
                 ly = ncfg.settings.layout;
                 fx = ncfg.settings.effects;
+                shortcuts = ncfg.settings.shortcuts;
                 wg = ncfg.settings.widgets;
+                // Quick-settings + notification policy travel through the same
+                // reload (single source of truth); close any open flyout so a
+                // now-disabled applet can't leave a stale card behind.
+                quicksettings = ncfg.settings.quicksettings;
+                qs_open = false;
+                notifications = ncfg.settings.notifications;
                 // Re-resolve the config-driven widget set so a live edit that adds/
                 // removes a widgets/<name>.toml (or flips its `enabled`) takes effect.
                 desk_widgets = resolve_desk_widgets(ncfg.settings.widgets.corner);
@@ -2846,6 +3149,9 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 if current_ws >= apps.workspaces {
                     current_ws = apps.workspaces.saturating_sub(1);
                 }
+                // A live shortcut-policy change (switcher toggled off, or the
+                // arming modifier swapped) must not leave a stale overlay armed.
+                switcher.cancel();
                 libdunit::println("gui_server: settings reloaded (config changed)");
             }
         }
@@ -2887,6 +3193,21 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             if cy + sh + ins.bottom + ly.border > bh as i32 {
                 cy = (bh as i32 - ins.bottom - sh - ly.border).max(ins.top + ly.title_h + ly.border);
             }
+            // Session restore for a runtime-launched app: reopen at the remembered
+            // position (clamped on-screen). A window remembered as maximized is
+            // re-maximized just after creation via the shared `set_window_state`
+            // path (below), once the Win exists.
+            let remembered = session_lookup(&session, &apps, clients[i].app);
+            if let Some(g) = remembered {
+                cx = g
+                    .x
+                    .max(ins.left + ly.border)
+                    .min((bw as i32 - ins.right - sw - ly.border).max(ins.left + ly.border));
+                cy = g
+                    .y
+                    .max(ins.top + ly.title_h + ly.border)
+                    .min((bh as i32 - ins.bottom - sh - ly.border).max(ins.top + ly.title_h + ly.border));
+            }
             let wi = wins.len();
             wins.push(Win {
                 pid: clients[i].pid,
@@ -2910,6 +3231,14 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             });
             clients[i].win_created = true;
             z.push(wi);
+            // Re-maximize a window that was remembered maximized (uses the same
+            // CONFIGURE path the chip drives), then persist the freshly-placed
+            // window so its geometry is remembered from birth.
+            if remembered.map_or(false, |g| g.maximized) {
+                set_window_state(server, clients, &mut wins[wi], WinState::Maximized, bw, bh, &ly, &ins);
+            }
+            session_remember(&mut session, &apps, &wins[wi]);
+            settings::save_session(&session);
         }
 
         // Config-gated resize self-exercise (`test.toml` `[startup] self_test`).
@@ -2959,6 +3288,95 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             }
         }
 
+        // Config-gated window-switcher proof (`test.toml` `[startup] self_test`,
+        // and only when `[shortcuts] switcher` is on). The harness has no keyboard
+        // to hold Alt+Tab, so drive the SAME `Switcher` state the key-drain path
+        // arms: snapshot the MRU list, arm (advancing off the front window), commit
+        // to the highlight, then raise it exactly as the modifier-release path does.
+        // Proves the switcher selects a DIFFERENT window and that committing makes
+        // it the topmost/focused one. One-shot; never runs on the real desktop.
+        if apps.self_test && !switcher_st_done && shortcuts.switcher {
+            let mru = switcher_mru(&z, &wins, current_ws);
+            if mru.len() >= 2 {
+                let front_pid = wins[mru[0]].pid;
+                switcher.begin(&mru, false); // advances to the next candidate
+                if let Some(sel) = switcher.commit() {
+                    let sel_pid = wins[sel].pid;
+                    wins[sel].minimized = false;
+                    raise_window(&mut z, sel);
+                    let now_top = z
+                        .iter()
+                        .rev()
+                        .copied()
+                        .find(|&i| wins[i].alive && wins[i].ws == current_ws && !wins[i].minimized);
+                    if now_top == Some(sel) && sel_pid != front_pid {
+                        libdunit::println(&alloc::format!(
+                            "gui_server: switcher cycle prev_pid={} -> pid={} ok (self-test)",
+                            front_pid, sel_pid
+                        ));
+                    } else {
+                        libdunit::println(&alloc::format!(
+                            "gui_server: FAIL switcher cycle prev_pid={} -> pid={} top={:?}",
+                            front_pid,
+                            sel_pid,
+                            now_top.map(|i| wins[i].pid)
+                        ));
+                    }
+                }
+                switcher_st_done = true;
+            }
+        }
+
+        // Config-gated notification proof (`test.toml` `[startup] self_test`). The
+        // harness has no mouse to click the dock, so post one toast through the
+        // SAME `notify_post` path a launch uses, prove it enqueues, and prove the
+        // auto-dismiss predicate removes it once its timeout elapses — checked
+        // against the very predicate the per-frame prune runs (`now < expire`), so
+        // the queue lifecycle is verified without a fragile wall-clock wait. The
+        // toast stays queued and expires for real a few frames later (below),
+        // which trips the end-to-end `notify expired` marker.
+        if apps.self_test && !notify_st_done && notifications.enabled {
+            let before = notifs.len();
+            notify_post(&mut notifs, &notifications, ticks, "Self-test");
+            let posted = notifs.len();
+            let frames = (notifications.timeout_ms / 16).max(1);
+            let future = ticks.saturating_add(frames + 1);
+            let survivors = notifs.iter().filter(|t| future < t.expire).count();
+            let ok = posted == before + 1 && survivors < posted;
+            libdunit::println(&alloc::format!(
+                "gui_server: notify posted queued={} corner={} timeout_ms={} {} (self-test)",
+                posted,
+                notifications.corner,
+                notifications.timeout_ms,
+                if ok { "ok" } else { "FAIL" }
+            ));
+            notify_st_done = true;
+        }
+
+        // Config-gated quick-settings proof. The applet can't be clicked headless,
+        // so flip the SAME live flags its flyout toggles (`fx.blur`, `wg.enabled`)
+        // and confirm each change lands on the field the renderer reads — proving
+        // the applet mutates real state, not a shadow copy — then restore them so
+        // the desktop's configured look is untouched. One-shot.
+        if apps.self_test && !qs_st_done && quicksettings.enabled {
+            let b0 = fx.blur;
+            let w0 = wg.enabled;
+            fx.blur = !b0;
+            wg.enabled = !w0;
+            let flipped = fx.blur != b0 && wg.enabled != w0;
+            fx.blur = b0;
+            wg.enabled = w0;
+            libdunit::println(&alloc::format!(
+                "gui_server: quicksettings applet enabled=1 toggled blur={}->{} widgets={}->{} {} (self-test)",
+                b0 as u32,
+                (!b0) as u32,
+                w0 as u32,
+                (!w0) as u32,
+                if flipped { "ok" } else { "FAIL" }
+            ));
+            qs_st_done = true;
+        }
+
         let m = libdunit::get_mouse_state();
         let mx = m.x as i32;
         let my = m.y as i32;
@@ -2983,6 +3401,11 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         };
         let launcher_hit = panel_slot(panel_rect, panel_edge, 0, launcher_main(&ly, panel_edge));
         let menu_org = menu_origin(&ly, panel_edge, panel_rect, apps.launcher.len() as i32);
+        // Quick-settings applet cell on the panel (only when enabled); its flyout
+        // flies out below/beside the panel and is NOT part of `in_shell` (a
+        // transient overlay), so its clicks are caught by the `qs_open` branch
+        // below before window routing — exactly like the launcher dropdown.
+        let qs_applet = qs_applet_rect(&ly, panel_edge, panel_rect, apps.workspaces);
         let in_shell = |x: i32, y: i32| {
             in_rect(panel_rect, x, y)
                 || in_rect(dock_rect, x, y)
@@ -2992,7 +3415,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
         // --- Right-button press: forward to the content window under the cursor
         // as IN_DOWN with button=1 (context-menu trigger). Panel/dock/title are
         // shell-owned and ignore the right button; a right-click there is a no-op.
-        if rpress && !menu_open && !in_shell(mx, my) {
+        if rpress && !menu_open && !qs_open && !in_shell(mx, my) {
             let mut zi = z.len();
             while zi > 0 {
                 zi -= 1;
@@ -3028,17 +3451,42 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                             c.ws = current_ws;
                             clients.push(c);
                             next_id += 1;
+                            // Launch feedback toast (config-gated inside notify_post).
+                            let nm = apps.apps.get(ri).map(|a| a.name.as_str()).unwrap_or("App");
+                            notify_post(&mut notifs, &notifications, ticks, nm);
                         }
                     }
                 }
             }
+        } else if press && qs_open {
+            // Quick-settings flyout is open: a click on a toggle row flips the LIVE
+            // flag it represents (single source of truth — `fx.blur` / `wg.enabled`
+            // are exactly the fields the renderer reads); any other click just
+            // dismisses the flyout. Either way the click is consumed and the flyout
+            // closes, mirroring the launcher-dropdown model.
+            let flyout = qs_flyout_rect(&ly, panel_edge, qs_applet, 2);
+            if in_rect(qs_row_rect(&ly, flyout, 0), mx, my) {
+                fx.blur = !fx.blur;
+                libdunit::println(&alloc::format!("gui_server: quicksettings blur={}", fx.blur as u32));
+            } else if in_rect(qs_row_rect(&ly, flyout, 1), mx, my) {
+                wg.enabled = !wg.enabled;
+                libdunit::println(&alloc::format!("gui_server: quicksettings widgets={}", wg.enabled as u32));
+            }
+            qs_open = false;
         } else if press && in_rect(panel_rect, mx, my) {
             // Panel click. The launcher mark (strip start) opens the app menu; the
-            // workspace pips switch workspaces; the rest of the panel is consumed
-            // by the shell (task switching lives on the dock now). Either way the
-            // click never reaches a client — the shell owns the panel strip.
+            // quick-settings applet opens its flyout; the workspace pips switch
+            // workspaces; the rest of the panel is consumed by the shell (task
+            // switching lives on the dock now). Either way the click never reaches a
+            // client — the shell owns the panel strip.
             if in_rect(launcher_hit, mx, my) {
                 menu_open = true;
+                qs_open = false;
+            } else if quicksettings.enabled && panel_edge.is_horizontal() && in_rect(qs_applet, mx, my) {
+                // Toggle the quick-settings flyout (horizontal panels only — a
+                // narrow vertical bar has no spare main-axis room for the applet).
+                qs_open = !qs_open;
+                menu_open = false;
             } else {
                 // Workspace switcher: activate the clicked pip's workspace. A
                 // click in the gap between pips is consumed but changes nothing.
@@ -3091,6 +3539,9 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                             c.ws = current_ws;
                             clients.push(c);
                             next_id += 1;
+                            // Launch feedback toast (config-gated inside notify_post).
+                            let nm = apps.apps.get(ri).map(|a| a.name.as_str()).unwrap_or("App");
+                            notify_post(&mut notifs, &notifications, ticks, nm);
                         }
                     }
                 }
@@ -3114,6 +3565,10 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                     wins[wi].alive = false;
                     send_input(wins[wi].pid, IN_QUIT, 0, 0, 0);
                     drag = None;
+                    // Remember where it was before it goes away, so reopening the
+                    // app restores its last geometry.
+                    session_remember(&mut session, &apps, &wins[wi]);
+                    settings::save_session(&session);
                 } else if wins[wi].in_min(mx, my) {
                     // Minimize: drop it from compositing/input; the dock task
                     // switcher restores it on click.
@@ -3126,6 +3581,10 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                     // the per-frame sync mirrors the fresh buffer back.
                     toggle_maximize(server, clients, &mut wins[wi], bw, bh, &ly, &ins);
                     drag = None;
+                    // Persist the new maximize state (with the preserved floating
+                    // rect) so a reopen restores it in the same state.
+                    session_remember(&mut session, &apps, &wins[wi]);
+                    settings::save_session(&session);
                 } else if wins[wi].in_title(mx, my) {
                     // Title-bar drag. macOS-style restore: grabbing a *tiled*
                     // window (e.g. maximized) first restores it to its floating
@@ -3163,6 +3622,12 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             }
         }
         if !left {
+            // Drag released: persist the window's final position so it reopens
+            // where the user dropped it (save on drag-END, not every move frame).
+            if let Some((wi, _, _)) = drag {
+                session_remember(&mut session, &apps, &wins[wi]);
+                settings::save_session(&session);
+            }
             drag = None;
         }
 
@@ -3265,6 +3730,49 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             input_ready_announced = true;
         }
         while let Some(ev) = libdunit::get_key_event() {
+            // Window switcher (M4, config-gated). The compositor owns the seat, so
+            // it intercepts the switcher gesture BEFORE forwarding keys to clients:
+            //   * `switch_mod`+Tab arms/advances an MRU overlay (Tab is swallowed,
+            //     never reaches the focused client);
+            //   * Shift adds reverse cycling; Esc cancels without switching;
+            //   * releasing the arming modifier commits — raise + un-minimize the
+            //     highlighted window.
+            // `mods` reflects the modifier state at the event moment, so a cleared
+            // arming bit on any drained event while armed means "modifier released".
+            if shortcuts.switcher {
+                let mask = shortcuts.switch_mod.mask();
+                let mod_held = (ev.mods & mask) != 0;
+                if ev.pressed && ev.scancode == SC_TAB && mod_held {
+                    if switcher.active {
+                        switcher.advance(ev.shift());
+                    } else {
+                        let mru = switcher_mru(&z, &wins, current_ws);
+                        switcher.begin(&mru, ev.shift());
+                    }
+                    continue; // swallow Tab — it never reaches a client
+                }
+                if switcher.active {
+                    if ev.pressed && ev.scancode == SC_ESC {
+                        switcher.cancel();
+                        continue;
+                    }
+                    if !mod_held {
+                        // Arming modifier released → commit the highlighted window.
+                        if let Some(sel) = switcher.commit() {
+                            if wins.get(sel).map_or(false, |w| w.alive) {
+                                wins[sel].minimized = false;
+                                raise_window(&mut z, sel);
+                                libdunit::println(&alloc::format!(
+                                    "gui_server: switcher raised pid={}",
+                                    wins[sel].pid
+                                ));
+                            }
+                        }
+                        // Fall through: this event is the modifier release itself,
+                        // dropped by the release/modifier filter just below.
+                    }
+                }
+            }
             if !ev.pressed || is_modifier_scancode(ev.scancode) {
                 continue;
             }
@@ -3568,6 +4076,23 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 fill_rrect(&mut back, bw, bh, px + 2, py + ph - 3, pw - 4, 2, 1, RR_ALL, 0xFF00_0000 | (theme.launcher & 0x00FF_FFFF));
             }
         }
+        // Quick-settings applet cell: a small toggle button just past the pips
+        // (horizontal panels only — a vertical bar has no spare main-axis room).
+        // Gated by `[quicksettings] enabled`; opening it reveals the live-toggle
+        // flyout drawn later. A "sliders" mark keeps it legible without an asset.
+        if quicksettings.enabled && horiz {
+            let (ax, ay, aw, ah) = qs_applet;
+            let hot = qs_open || (mx >= ax && mx < ax + aw && my >= ay && my < ay + ah);
+            let base = if hot { theme.taskbtn_focused } else { theme.taskbtn };
+            fill_rrect_grad(&mut back, bw, bh, ax, ay, aw, ah, 6, RR_ALL, shade(base, 18), shade(base, -10), 255);
+            let gx = ax + aw / 2 - 5;
+            for r in 0..3i32 {
+                let gy = ay + ah / 2 - 4 + r * 4;
+                fill_rect(&mut back, bw, bh, gx, gy, 10, 2, theme.panel_text);
+                let kx = gx + if r == 1 { 6 } else { r * 3 };
+                fill_rrect(&mut back, bw, bh, kx, gy - 1, 3, 4, 1, RR_ALL, 0xFF00_0000 | (theme.launcher & 0x00FF_FFFF));
+            }
+        }
         // Centered focused-window title (icon + app name). Horizontal panels only —
         // a narrow vertical bar has no room for the label. Task switching lives on
         // the dock; this is just the active window's identity.
@@ -3735,7 +4260,135 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             }
         }
 
+        // --- Window switcher overlay (M4) ------------------------------------
+        // A centered acrylic card with one icon tile per candidate window and the
+        // highlighted app's name below it. Drawn above all windows (below only the
+        // cursor) while the switcher is armed; every colour comes from the resolved
+        // theme, so it inherits the desktop palette rather than hardcoding one.
+        if switcher.active && !switcher.order.is_empty() {
+            let n = switcher.order.len() as i32;
+            let tile = 64i32;
+            let gap = 12i32;
+            let pad = 20i32;
+            let label_h = 24i32;
+            let panw = n * tile + (n - 1) * gap + 2 * pad;
+            let panh = tile + label_h + 2 * pad;
+            let px0 = (bw as i32 - panw) / 2;
+            let py0 = (bh as i32 - panh) / 2;
+            draw_soft_shadow(&mut back, bw, bh, px0, py0, panw, panh, 16, 10, 90);
+            fill_rrect(&mut back, bw, bh, px0, py0, panw, panh, 16, 0x0F, 0xF0000000 | (theme.menu & 0x00FF_FFFF));
+            for (k, &wi) in switcher.order.iter().enumerate() {
+                let tx = px0 + pad + k as i32 * (tile + gap);
+                let ty = py0 + pad;
+                if k == switcher.idx {
+                    fill_rrect(&mut back, bw, bh, tx - 4, ty - 4, tile + 8, tile + 8, 10, 0x0F,
+                        0xFF00_0000 | (theme.menu_hover & 0x00FF_FFFF));
+                }
+                let app = wins[wi].app as usize;
+                let isz = tile - 12;
+                if let Some(ic) = app_icons.get(app).and_then(|s| s.as_ref()) {
+                    blit_icon(&mut back, bw, bh, ic, ICON_W, ICON_H, tx + 6, ty + 6, isz, isz);
+                } else {
+                    let lbl = apps.apps.get(app).map(|a| a.label.as_str()).unwrap_or("?");
+                    draw_text_3x5(&mut back, bw, bh, tx + 8, ty + isz / 2 - 6, 3, theme.panel_text, lbl.as_bytes());
+                }
+            }
+            if let Some(&wi) = switcher.order.get(switcher.idx) {
+                if let Some(f) = font.as_ref() {
+                    let title = win_title(&apps, wins[wi].app);
+                    let fpx = 15.0f32;
+                    let tw = text_width_ttf(f, title, fpx);
+                    let sx = px0 + (panw - tw) / 2;
+                    let baseline = py0 + pad + tile + label_h - 6;
+                    draw_text_ttf(&mut back, bw, bh, f, sx, baseline, fpx, title, theme.panel_text & 0x00FF_FFFF);
+                }
+            }
+        }
+
+        // --- Quick-settings flyout (M4) --------------------------------------
+        // A small acrylic card of live toggles that flies out from the applet cell.
+        // Each row shows and flips the SAME flag the renderer reads (fx.blur /
+        // wg.enabled) with an on/off pill — no shadow state. Drawn above windows,
+        // below the switcher overlay/cursor. Every colour comes from the theme.
+        if quicksettings.enabled && qs_open && panel_edge.is_horizontal() {
+            let flyout = qs_flyout_rect(&ly, panel_edge, qs_applet, 2);
+            let (fx0, fy0, fw0, fh0) = flyout;
+            if fx.blur {
+                blur_region(&mut back, bw, bh, fx0, fy0, fw0, fh0, fx.blur_radius, fx.blur_iters, &mut blur_a, &mut blur_b);
+            }
+            draw_soft_shadow(&mut back, bw, bh, fx0, fy0, fw0, fh0, 10, 10, 90);
+            fill_rrect_grad(&mut back, bw, bh, fx0, fy0, fw0, fh0, fx.corner_radius, RR_ALL, shade(theme.menu, 14), theme.menu, fx.menu_alpha);
+            let rows = [("Blur", fx.blur), ("Widgets", wg.enabled)];
+            for (i, (lbl, on)) in rows.iter().enumerate() {
+                let (rx, ry, rw, rh) = qs_row_rect(&ly, flyout, i as i32);
+                let hover = mx >= rx && mx < rx + rw && my >= ry && my < ry + rh;
+                if hover {
+                    fill_rrect(&mut back, bw, bh, rx + 2, ry + 2, rw - 4, rh - 4, 5, RR_ALL, 0xC000_0000 | (theme.menu_hover & 0x00FF_FFFF));
+                }
+                if let Some(f) = font.as_ref() {
+                    let px = ly.panel_font_px as f32;
+                    let baseline = ry + rh / 2 + 5;
+                    draw_text_ttf(&mut back, bw, bh, f, rx + 10, baseline, px, lbl, theme.panel_text & 0x00FF_FFFF);
+                }
+                // On/off pill on the row's trailing edge, knob sliding to reflect state.
+                let (pw, ph) = (22i32, 12i32);
+                let px0 = rx + rw - pw - 8;
+                let py0 = ry + (rh - ph) / 2;
+                let pill = if *on { theme.launcher } else { theme.taskbtn };
+                fill_rrect(&mut back, bw, bh, px0, py0, pw, ph, ph / 2, RR_ALL, 0xFF00_0000 | (pill & 0x00FF_FFFF));
+                let knob = ph - 4;
+                let kx = if *on { px0 + pw - knob - 2 } else { px0 + 2 };
+                fill_rrect(&mut back, bw, bh, kx, py0 + 2, knob, knob, knob / 2, RR_ALL, 0xFFFF_FFFF);
+            }
+        }
+
+        // --- Notification toasts (M4) ----------------------------------------
+        // Prune expired toasts (the SAME `now < expire` predicate the self-test
+        // verifies), then stack the survivors in the configured corner. The
+        // one-shot `notify expired` marker fires when the self-test's toast has
+        // drained end-to-end, proving the auto-dismiss path — not just the queue.
+        notifs.retain(|t| ticks < t.expire);
+        if notify_st_done && !notify_expired_logged && notifs.is_empty() {
+            libdunit::println("gui_server: notify expired (self-test)");
+            notify_expired_logged = true;
+        }
+        if notifications.enabled && !notifs.is_empty() {
+            let margin = 16i32;
+            let cardh = 30i32;
+            let gap = 8i32;
+            let corner = notifications.corner;
+            let top = corner == 0 || corner == 1;
+            let leftc = corner == 0 || corner == 2;
+            for (slot, t) in notifs.iter().enumerate() {
+                let px = ly.title_font_px as f32;
+                let tw = font
+                    .as_ref()
+                    .map(|f| text_width_ttf(f, &t.text, px))
+                    .unwrap_or(t.text.len() as i32 * 8);
+                let cardw = (tw + 30).clamp(96, bw as i32 - 2 * margin);
+                // Short slide-in from the anchored edge over the first few frames.
+                let age = ticks.saturating_sub(t.born) as i32;
+                let slide = (12 - age.min(12)).max(0);
+                let base_x = if leftc { margin } else { bw as i32 - margin - cardw };
+                let cx = if leftc { base_x - slide } else { base_x + slide };
+                let cy = if top {
+                    margin + slot as i32 * (cardh + gap)
+                } else {
+                    bh as i32 - margin - cardh - slot as i32 * (cardh + gap)
+                };
+                draw_soft_shadow(&mut back, bw, bh, cx, cy, cardw, cardh, 10, 8, 80);
+                fill_rrect_grad(&mut back, bw, bh, cx, cy, cardw, cardh, 10, RR_ALL, shade(theme.menu, 14), theme.menu, fx.menu_alpha);
+                // Accent bar on the leading edge marks it as a toast.
+                fill_rrect(&mut back, bw, bh, cx, cy + 4, 4, cardh - 8, 2, RR_ALL, 0xFF00_0000 | (theme.launcher & 0x00FF_FFFF));
+                if let Some(f) = font.as_ref() {
+                    let baseline = cy + cardh / 2 + 5;
+                    draw_text_ttf(&mut back, bw, bh, f, cx + 14, baseline, px, &t.text, theme.panel_text & 0x00FF_FFFF);
+                }
+            }
+        }
+
         draw_cursor(&mut back, bw, bh, mx, my);
+
 
         let bytes =
             unsafe { core::slice::from_raw_parts(back.as_ptr() as *const u8, back.len() * 4) };

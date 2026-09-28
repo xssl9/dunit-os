@@ -476,9 +476,206 @@ impl Tray {
     }
 }
 
+/// Highest config schema this build understands. A `[meta] schema_version`
+/// greater than this means the file was written by a NEWER desktop and may use
+/// keys/semantics we cannot honour, so `load_config` rejects it (→ last-known-
+/// good) rather than half-applying an unknown layout. An older version is
+/// forward-migrated (see `migrate_config`). Absent `[meta]` ⇒ treated as the
+/// current version (old hand-written files stay valid).
+pub const SCHEMA_VERSION: u32 = 1;
+
+/// True iff this build can load a document declaring schema version `v`. The
+/// single predicate `load_config` and the compositor's startup guard both use,
+/// so "which versions are accepted" has one definition. Version 0 is not a real
+/// schema (a malformed/empty `schema_version`), so it is rejected.
+pub const fn version_supported(v: u32) -> bool {
+    v >= 1 && v <= SCHEMA_VERSION
+}
+
+/// Config document metadata (`[meta]` table). Currently just the schema version,
+/// which drives compatibility handling in `load_config`. Kept as its own typed
+/// section so the version travels through the same parse/serialize/round-trip
+/// path as every other table (no special-case string handling).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Meta {
+    pub schema_version: u32,
+}
+
+impl Meta {
+    pub const fn baseline() -> Self {
+        Meta { schema_version: SCHEMA_VERSION }
+    }
+
+    fn apply(&mut self, key: &str, value: &str) {
+        if key == "schema_version" {
+            if let Some(n) = parse_uint(value) {
+                self.schema_version = n;
+            }
+        }
+    }
+}
+
+/// Which keyboard modifier arms the Alt-Tab-style window switcher (`[shortcuts]
+/// switch_mod`). The switch KEY is always Tab (a UI invariant); only the held
+/// modifier is user policy, so a user who prefers a Super-Tab switcher (GNOME
+/// style) flips this without a rebuild. `mask()` returns the `libdunit::KEYMOD_*`
+/// bit so the compositor tests the held modifier against config, not a constant.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SwitchMod {
+    Alt,
+    Super,
+}
+
+impl SwitchMod {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            SwitchMod::Alt => "alt",
+            SwitchMod::Super => "super",
+        }
+    }
+
+    fn parse(value: &str) -> Option<SwitchMod> {
+        match value {
+            "alt" => Some(SwitchMod::Alt),
+            "super" => Some(SwitchMod::Super),
+            _ => None,
+        }
+    }
+
+    /// The `KEYMOD_*` bit (mirrors libdunit: ALT = 1<<2, SUPER = 1<<3) this
+    /// modifier maps to, so the switcher tests `ev.mods & switch_mod.mask()`.
+    pub const fn mask(self) -> u8 {
+        match self {
+            SwitchMod::Alt => 1 << 2,
+            SwitchMod::Super => 1 << 3,
+        }
+    }
+}
+
+/// Keyboard shortcut policy (`[shortcuts]` table). Which global gestures the
+/// compositor honours and how they are triggered — user-facing policy, so it
+/// lives in config rather than baked into the key-drain loop.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Shortcuts {
+    /// Enable the Alt/Super-Tab window switcher overlay.
+    pub switcher: bool,
+    /// Modifier that arms the switcher (Tab is the fixed trigger key).
+    pub switch_mod: SwitchMod,
+}
+
+impl Shortcuts {
+    pub const fn baseline() -> Self {
+        Shortcuts { switcher: true, switch_mod: SwitchMod::Alt }
+    }
+
+    fn apply(&mut self, key: &str, value: &str) {
+        match key {
+            "switcher" => {
+                if let Some(b) = parse_bool(value) {
+                    self.switcher = b;
+                }
+            }
+            "switch_mod" => {
+                if let Some(m) = SwitchMod::parse(value) {
+                    self.switch_mod = m;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Quick-settings applet policy (`[quicksettings]` table). The panel applet opens
+/// a flyout that toggles live effect/widget flags. The flags themselves stay in
+/// `[effects]`/`[widgets]` (single source of truth); this table only gates whether
+/// the applet is offered.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct QuickSettings {
+    pub enabled: bool,
+}
+
+impl QuickSettings {
+    pub const fn baseline() -> Self {
+        QuickSettings { enabled: true }
+    }
+
+    fn apply(&mut self, key: &str, value: &str) {
+        if key == "enabled" {
+            if let Some(b) = parse_bool(value) {
+                self.enabled = b;
+            }
+        }
+    }
+}
+
+/// Desktop notification policy (`[notifications]` table). Transient toasts posted
+/// by the compositor (launch feedback) or by clients over the notify IPC channel.
+/// `corner` uses the same 0=TL/1=TR/2=BL/3=BR convention as `[widgets] corner`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Notifications {
+    pub enabled: bool,
+    /// Auto-dismiss timeout in milliseconds (clamped to a sane range on parse).
+    pub timeout_ms: u32,
+    /// Screen corner toasts stack in (0=top-left, 1=top-right, 2=bottom-left,
+    /// 3=bottom-right).
+    pub corner: i32,
+}
+
+impl Notifications {
+    pub const fn baseline() -> Self {
+        Notifications { enabled: true, timeout_ms: 3000, corner: 1 }
+    }
+
+    fn apply(&mut self, key: &str, value: &str) {
+        match key {
+            "enabled" => {
+                if let Some(b) = parse_bool(value) {
+                    self.enabled = b;
+                }
+            }
+            "timeout_ms" => {
+                if let Some(n) = parse_uint(value) {
+                    self.timeout_ms = n.clamp(500, 30_000);
+                }
+            }
+            "corner" => {
+                if let Some(n) = parse_uint(value) {
+                    self.corner = (n as i32).clamp(0, 3);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Window/session restore policy (`[session]` table). When `restore` is on, the
+/// compositor persists each window's geometry (keyed by app id) to the session
+/// store `SESSION_PATH` and re-applies it when the app opens again. The geometry
+/// data lives in its own file (`[window.<id>]` tables); this table is just the
+/// master toggle. RAM-only until DunitFS v2, then it survives reboots unchanged.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Session {
+    pub restore: bool,
+}
+
+impl Session {
+    pub const fn baseline() -> Self {
+        Session { restore: true }
+    }
+
+    fn apply(&mut self, key: &str, value: &str) {
+        if key == "restore" {
+            if let Some(b) = parse_bool(value) {
+                self.restore = b;
+            }
+        }
+    }
+}
+
 /// Resolved DWM settings. Extends with `[layout]` etc. in later sub-slices.
 #[derive(Clone, Copy)]
 pub struct Settings {
+    pub meta: Meta,
     pub theme: Theme,
     pub layout: Layout,
     pub effects: Effects,
@@ -486,6 +683,10 @@ pub struct Settings {
     pub widgets: Widgets,
     pub panel: Panel,
     pub tray: Tray,
+    pub shortcuts: Shortcuts,
+    pub quicksettings: QuickSettings,
+    pub notifications: Notifications,
+    pub session: Session,
     /// True when a config file was found and read (parse still best-effort).
     pub from_file: bool,
     /// Count of recognised keys applied over the baseline (0 for pure default).
@@ -495,6 +696,7 @@ pub struct Settings {
 impl Settings {
     pub const fn defaults() -> Self {
         Settings {
+            meta: Meta::baseline(),
             theme: Theme::baseline(),
             layout: Layout::baseline(),
             effects: Effects::baseline(),
@@ -502,6 +704,10 @@ impl Settings {
             widgets: Widgets::baseline(),
             panel: Panel::baseline(),
             tray: Tray::baseline(),
+            shortcuts: Shortcuts::baseline(),
+            quicksettings: QuickSettings::baseline(),
+            notifications: Notifications::baseline(),
+            session: Session::baseline(),
             from_file: false,
             applied: 0,
         }
@@ -647,8 +853,9 @@ pub fn save(settings: &Settings) -> bool {
 }
 
 /// Collect the raw text of every top-level table that `to_toml` does NOT emit
-/// (anything whose header's first segment is not theme/layout/effects/desktop/
-/// widgets/panel/tray), so `save` can round-trip user-authored
+/// (anything whose header's first segment is not one of the typed scalar tables
+/// meta/theme/layout/effects/desktop/widgets/panel/tray/shortcuts/quicksettings/
+/// notifications/session), so `save` can round-trip user-authored
 /// `[application.*]`/`[dock]`/etc. tables it has no typed knowledge of. Preamble
 /// before the first `[header]` is dropped.
 fn extra_sections(text: &str) -> String {
@@ -660,7 +867,18 @@ fn extra_sections(text: &str) -> String {
             let base = name.trim().split('.').next().unwrap_or("").trim();
             keep = !matches!(
                 base,
-                "theme" | "layout" | "effects" | "desktop" | "widgets" | "panel" | "tray"
+                "theme"
+                    | "layout"
+                    | "effects"
+                    | "desktop"
+                    | "widgets"
+                    | "panel"
+                    | "tray"
+                    | "meta"
+                    | "shortcuts"
+                    | "quicksettings"
+                    | "notifications"
+                    | "session"
             );
         }
         if keep {
@@ -722,6 +940,21 @@ pub fn parse_into(text: &str, settings: &mut Settings) {
         } else if section == "tray" {
             settings.tray.apply(key, value);
             settings.applied += 1;
+        } else if section == "meta" {
+            settings.meta.apply(key, value);
+            settings.applied += 1;
+        } else if section == "shortcuts" {
+            settings.shortcuts.apply(key, value);
+            settings.applied += 1;
+        } else if section == "quicksettings" {
+            settings.quicksettings.apply(key, value);
+            settings.applied += 1;
+        } else if section == "notifications" {
+            settings.notifications.apply(key, value);
+            settings.applied += 1;
+        } else if section == "session" {
+            settings.session.apply(key, value);
+            settings.applied += 1;
         }
     }
 }
@@ -740,18 +973,43 @@ pub fn load_config() -> Config {
     settings.from_file = true;
     parse_into(&text, &mut settings);
 
-    let (apps, saw_apps) = parse_apps(&text);
+    let (mut apps, saw_apps) = parse_apps(&text);
+
+    // Schema-version gate. A document from a NEWER build (version > ours) may use
+    // keys/semantics we cannot honour, so it is rejected here → the reload path
+    // keeps last-known-good rather than half-applying an unknown layout. An OLDER
+    // (but valid) version is forward-migrated in place, then stamped current.
+    let declared = settings.meta.schema_version;
+    let version_ok = version_supported(declared);
+    if version_ok && declared < SCHEMA_VERSION {
+        migrate_config(&mut settings, &mut apps, declared);
+        settings.meta.schema_version = SCHEMA_VERSION;
+    }
 
     // A file counts as a usable config when it changed *something* — either a
-    // recognised scalar key or an `[application.*]` table. A file that parsed to
-    // nothing (empty/garbage) is `!valid`, and the reload path keeps last-good.
-    let valid = apps.workspaces >= 1
+    // recognised scalar key or an `[application.*]` table — AND its schema version
+    // is one this build understands. A file that parsed to nothing (empty/garbage)
+    // or targets a future schema is `!valid`, and the reload path keeps last-good.
+    let valid = version_ok
+        && apps.workspaces >= 1
         && apps.workspaces <= MAX_WS
         && !apps.apps.is_empty()
         && apps.apps.len() <= MAX_APPS
         && (settings.applied > 0 || saw_apps);
 
     Config { settings, apps, valid }
+}
+
+/// Forward-migrate a parsed document from an older schema `from` to
+/// `SCHEMA_VERSION`. The hook exists so a future field rename / default change
+/// lands in ONE place instead of scattering `if version < N` checks across the
+/// compositor. v1 is the earliest schema, so there is nothing older to transform
+/// yet; a v2 that (say) renamed a key would remap it here.
+fn migrate_config(_settings: &mut Settings, _apps: &mut Applications, from: u32) {
+    match from {
+        // 0 is never a real schema (rejected before we get here); 1 is current.
+        _ => {}
+    }
 }
 
 /// Build the `Applications` model from a config document. Returns the model and
@@ -1067,6 +1325,10 @@ pub fn to_toml(s: &Settings) -> String {
     let mut out = String::new();
     out.push_str("# Dunit DWM settings (written by gui_settings; live in RAM this session).\n\n");
 
+    out.push_str("[meta]\n");
+    push_int(&mut out, "schema_version", s.meta.schema_version as i64);
+    out.push('\n');
+
     out.push_str("[theme]\n");
     push_color(&mut out, "desktop", s.theme.desktop);
     push_color(&mut out, "title_focused", s.theme.title_focused);
@@ -1134,25 +1396,49 @@ pub fn to_toml(s: &Settings) -> String {
     out.push_str("[tray]\n");
     push_string(&mut out, "pos", s.tray.pos.as_str());
     push_int(&mut out, "size", s.tray.size as i64);
+    out.push('\n');
+
+    out.push_str("[shortcuts]\n");
+    push_bool(&mut out, "switcher", s.shortcuts.switcher);
+    push_string(&mut out, "switch_mod", s.shortcuts.switch_mod.as_str());
+    out.push('\n');
+
+    out.push_str("[quicksettings]\n");
+    push_bool(&mut out, "enabled", s.quicksettings.enabled);
+    out.push('\n');
+
+    out.push_str("[notifications]\n");
+    push_bool(&mut out, "enabled", s.notifications.enabled);
+    push_int(&mut out, "timeout_ms", s.notifications.timeout_ms as i64);
+    push_int(&mut out, "corner", s.notifications.corner as i64);
+    out.push('\n');
+
+    out.push_str("[session]\n");
+    push_bool(&mut out, "restore", s.session.restore);
 
     out
 }
 
-/// True iff `to_toml` round-trips `s` through `parse_into` (theme/layout/effects/
-/// desktop/widgets/panel/tray; the `from_file`/`applied` bookkeeping is not part
-/// of the value). A cheap startup self-check that the serializer and parser stay
-/// in lockstep.
+/// True iff `to_toml` round-trips `s` through `parse_into` (meta/theme/layout/
+/// effects/desktop/widgets/panel/tray/shortcuts/quicksettings/notifications/
+/// session; the `from_file`/`applied` bookkeeping is not part of the value). A
+/// cheap startup self-check that the serializer and parser stay in lockstep.
 pub fn roundtrip_ok(s: &Settings) -> bool {
     let text = to_toml(s);
     let mut back = Settings::defaults();
     parse_into(&text, &mut back);
-    back.theme == s.theme
+    back.meta == s.meta
+        && back.theme == s.theme
         && back.layout == s.layout
         && back.effects == s.effects
         && back.desktop == s.desktop
         && back.widgets == s.widgets
         && back.panel == s.panel
         && back.tray == s.tray
+        && back.shortcuts == s.shortcuts
+        && back.quicksettings == s.quicksettings
+        && back.notifications == s.notifications
+        && back.session == s.session
 }
 
 // ===========================================================================
@@ -1404,4 +1690,123 @@ impl WidgetCfg {
             }
         }
     }
+}
+
+// ===========================================================================
+// Session store (window geometry persistence). Separate from the scalar
+// `[session]` policy toggle: this is the DATA the compositor persists so a
+// window reopens where the user left it. One `[window.<app_id>]` table per app,
+// keyed by the registry id (the same join key the dock/launcher use), written to
+// `SESSION_PATH`. RAM-only until DunitFS v2 — then the identical code path
+// survives reboots because the MemFS node gains disk backing, no edit needed.
+// ===========================================================================
+
+/// Writable session store: per-app window geometry as `[window.<id>]` tables.
+/// Pre-created empty+owned in the kernel VFS (like `default.toml`) so the
+/// compositor can rewrite it at runtime despite the `/system` mkdir guard.
+pub const SESSION_PATH: &str = "/system/share/dwm/session.toml";
+
+/// Upper bound on remembered windows (safety cap on a malformed store).
+pub const MAX_SESSION: usize = 32;
+
+/// One remembered window: its app id (join key) and last floating geometry plus
+/// whether it was maximized. `Copy` so the compositor keeps a plain `Vec` mirror.
+#[derive(Clone, Copy)]
+pub struct WinGeom {
+    pub id: ConfigStr,
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    pub maximized: bool,
+}
+
+impl WinGeom {
+    pub fn new(id: &str, x: i32, y: i32, w: i32, h: i32, maximized: bool) -> Self {
+        let mut s = ConfigStr::new("");
+        s.set(id);
+        WinGeom { id: s, x, y, w, h, maximized }
+    }
+}
+
+/// Read the session store into a flat list of remembered windows. Never fails: a
+/// missing/empty/garbage file yields an empty list (fresh session). Bounded by
+/// `MAX_SESSION` so a malformed store cannot make the compositor allocate wildly.
+pub fn load_session() -> Vec<WinGeom> {
+    let mut out: Vec<WinGeom> = Vec::new();
+    let Some(text) = read_file(SESSION_PATH) else {
+        return out;
+    };
+    let mut cur_id = String::new();
+    let mut cur = WinGeom::new("", 0, 0, 0, 0, false);
+    let mut have = false;
+    let flush = |out: &mut Vec<WinGeom>, id: &str, g: &WinGeom| {
+        if !id.is_empty() && g.w > 0 && g.h > 0 && out.len() < MAX_SESSION {
+            let mut e = *g;
+            e.id.set(id);
+            out.push(e);
+        }
+    };
+    for raw in text.lines() {
+        let line = strip_comment(raw).trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(name) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            if have {
+                flush(&mut out, &cur_id, &cur);
+            }
+            cur_id.clear();
+            cur = WinGeom::new("", 0, 0, 0, 0, false);
+            have = false;
+            // Table header `window.<id>`: the id after the first '.' is the join key.
+            let hdr = name.trim();
+            if let Some(rest) = hdr.strip_prefix("window.") {
+                cur_id.push_str(rest.trim());
+                have = true;
+            }
+            continue;
+        }
+        if !have {
+            continue;
+        }
+        let Some(eq) = line.find('=') else { continue };
+        let key = line[..eq].trim();
+        let rhs = line[eq + 1..].trim();
+        match key {
+            "x" => if let Some(n) = parse_uint(rhs) { cur.x = n as i32; },
+            "y" => if let Some(n) = parse_uint(rhs) { cur.y = n as i32; },
+            "w" => if let Some(n) = parse_uint(rhs) { cur.w = n as i32; },
+            "h" => if let Some(n) = parse_uint(rhs) { cur.h = n as i32; },
+            "maximized" => if let Some(b) = parse_bool(rhs) { cur.maximized = b; },
+            _ => {}
+        }
+    }
+    if have {
+        flush(&mut out, &cur_id, &cur);
+    }
+    out
+}
+
+/// Serialize the remembered-window list to `SESSION_PATH`. One `[window.<id>]`
+/// table each; the newest entry per id wins (the caller upserts its mirror before
+/// calling). Returns whether the write succeeded; never panics.
+pub fn save_session(entries: &[WinGeom]) -> bool {
+    let mut text = String::new();
+    text.push_str("# Dunit DWM session (window geometry; live in RAM this session).\n");
+    for e in entries.iter().take(MAX_SESSION) {
+        let id = e.id.as_str();
+        if id.is_empty() {
+            continue;
+        }
+        text.push_str("\n[window.");
+        text.push_str(id);
+        text.push_str("]\n");
+        push_int(&mut text, "x", e.x as i64);
+        push_int(&mut text, "y", e.y as i64);
+        push_int(&mut text, "w", e.w as i64);
+        push_int(&mut text, "h", e.h as i64);
+        push_bool(&mut text, "maximized", e.maximized);
+    }
+    libdunit::write_string(SESSION_PATH, &text).is_ok()
 }

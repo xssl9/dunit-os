@@ -18,6 +18,15 @@
 # Colors are #RRGGBB or #AARRGGBB (alpha defaults to opaque). Geometry is in
 # pixels.
 
+# Config document metadata. `schema_version` is the ONLY compatibility knob:
+# gui_server accepts a document iff dwm_settings::version_supported() is true
+# (currently 1..=1). A future build that bumps SCHEMA_VERSION migrates an older
+# doc forward on load; a doc declaring a newer version than the running build is
+# rejected (last-known-good baseline is used) rather than mis-parsed. Omit to
+# assume the current version.
+[meta]
+schema_version = 1
+
 [theme]
 desktop          = "#1E1E2E"
 title_focused    = "#313244"
@@ -119,6 +128,36 @@ pos = "top"
 [tray]
 pos  = "top"
 size = 28
+
+# Keyboard-shortcut policy. `switcher` toggles the Alt/Super-Tab window switcher
+# overlay; the trigger key is always Tab (a UI invariant), only the held modifier
+# is policy. `switch_mod` = "alt" (classic Alt-Tab) | "super" (GNOME-style
+# Super-Tab). The compositor tests the live modifier against this, never a
+# constant.
+[shortcuts]
+switcher   = true
+switch_mod = "alt"
+
+# Quick-settings applet. When enabled, the panel offers an applet whose flyout
+# toggles live effect/widget flags. The flags themselves stay in [effects] /
+# [widgets] (single source of truth); this only gates whether the applet appears.
+[quicksettings]
+enabled = true
+
+# Desktop notifications. Transient toasts the compositor posts (e.g. app-launch
+# feedback). `timeout_ms` is the auto-dismiss delay (clamped 500..30000); `corner`
+# is where toasts stack, same 0=TL/1=TR/2=BL/3=BR convention as [widgets] corner.
+[notifications]
+enabled    = true
+timeout_ms = 3000
+corner     = 1
+
+# Window/session restore. When on, the compositor remembers each window's
+# geometry (keyed by app id) in the session store and re-applies it the next time
+# that app opens. RAM-only (survives a reload/reconnect within a boot) until
+# DunitFS v2 provides a persistent user-config partition, then it spans reboots.
+[session]
+restore = true
 
 # ============================================================================
 # Application registry + desktop composition (data-driven; concept: no app
