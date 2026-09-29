@@ -46,6 +46,7 @@ static HANDLE_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/handl
 static GUI_SERVER_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_server");
 static GUI_SHBUF_PEER_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_shbuf_peer");
 static GUI_CLIENT_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_client");
+static GUI_DEMO_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_demo");
 static GUI_CALC_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_calc");
 static GUI_STAT_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_stat");
 static GUI_FILES_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_files");
@@ -80,6 +81,8 @@ static DWM_DEFAULT_TOML: &[u8] = include_bytes!("../../../assets/dwm/test.toml")
 /// the owning app fall back to its built-in baseline.
 static DWM_APP_TERMINAL_TOML: &[u8] = include_bytes!("../../../assets/dwm/apps/gui_terminal.toml");
 static DWM_APP_FILES_TOML: &[u8] = include_bytes!("../../../assets/dwm/apps/gui_files.toml");
+static DWM_APP_CALC_TOML: &[u8] = include_bytes!("../../../assets/dwm/apps/gui_calc.toml");
+static DWM_APP_DEMO_TOML: &[u8] = include_bytes!("../../../assets/dwm/apps/gui_demo.toml");
 static DWM_WIDGET_CLOCK_TOML: &[u8] = include_bytes!("../../../assets/dwm/widgets/clock.toml");
 static DWM_WIDGET_MONITOR_TOML: &[u8] = include_bytes!("../../../assets/dwm/widgets/monitor.toml");
 
@@ -715,6 +718,7 @@ pub fn init() -> Result<()> {
         (*ROOT_MEMFS.0.get()).add_file("/app/gui_server", GUI_SERVER_BYTES.to_vec());
         (*ROOT_MEMFS.0.get()).add_file("/app/gui_shbuf_peer", GUI_SHBUF_PEER_BYTES.to_vec());
         (*ROOT_MEMFS.0.get()).add_file("/app/gui_client", GUI_CLIENT_BYTES.to_vec());
+        (*ROOT_MEMFS.0.get()).add_file("/app/gui_demo", GUI_DEMO_BYTES.to_vec());
         (*ROOT_MEMFS.0.get()).add_file("/app/gui_calc", GUI_CALC_BYTES.to_vec());
         (*ROOT_MEMFS.0.get()).add_file("/app/gui_stat", GUI_STAT_BYTES.to_vec());
         (*ROOT_MEMFS.0.get()).add_file("/app/gui_files", GUI_FILES_BYTES.to_vec());
@@ -739,6 +743,8 @@ pub fn init() -> Result<()> {
         let _ = (*ROOT_MEMFS.0.get()).mkdir("/system/share/dwm/widgets");
         (*ROOT_MEMFS.0.get()).add_file("/system/share/dwm/apps/gui_terminal.toml", DWM_APP_TERMINAL_TOML.to_vec());
         (*ROOT_MEMFS.0.get()).add_file("/system/share/dwm/apps/gui_files.toml", DWM_APP_FILES_TOML.to_vec());
+        (*ROOT_MEMFS.0.get()).add_file("/system/share/dwm/apps/gui_calc.toml", DWM_APP_CALC_TOML.to_vec());
+        (*ROOT_MEMFS.0.get()).add_file("/system/share/dwm/apps/gui_demo.toml", DWM_APP_DEMO_TOML.to_vec());
         (*ROOT_MEMFS.0.get()).add_file("/system/share/dwm/widgets/clock.toml", DWM_WIDGET_CLOCK_TOML.to_vec());
         (*ROOT_MEMFS.0.get()).add_file("/system/share/dwm/widgets/monitor.toml", DWM_WIDGET_MONITOR_TOML.to_vec());
 

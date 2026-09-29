@@ -134,9 +134,23 @@ size = 28
 # is policy. `switch_mod` = "alt" (classic Alt-Tab) | "super" (GNOME-style
 # Super-Tab). The compositor tests the live modifier against this, never a
 # constant.
+#
+# `cmd_mod` is the global desktop command modifier (the tiling-WM `$mod` key):
+# "super" (default) | "alt". The action keys it arms are UI invariants, not
+# policy — only whether each action is on and which modifier fires it are config:
+#   cmd_mod + 1..N   → switch to that virtual workspace   (ws_switch)
+#   cmd_mod + Space  → open the app launcher menu          (launcher)
+#   cmd_mod + Q      → close the focused window            (win_close)
+#   cmd_mod + M      → maximize/restore the focused window (win_max)
+# The launcher menu is keyboard-navigable once open (Up/Down + Enter, Esc closes).
 [shortcuts]
 switcher   = true
 switch_mod = "alt"
+cmd_mod    = "super"
+ws_switch  = true
+launcher   = true
+win_close  = true
+win_max    = true
 
 # Quick-settings applet. When enabled, the panel offers an applet whose flyout
 # toggles live effect/widget flags. The flags themselves stay in [effects] /
@@ -175,6 +189,10 @@ restore = true
 name  = "Window"
 label = "WIN"
 
+[application.gui_demo]
+name  = "Demo"
+label = "DEMO"
+
 [application.gui_calc]
 name  = "Calculator"
 label = "CALC"
@@ -198,21 +216,23 @@ label = "SET"
 # Pinned dock icons, left-edge strip, top-to-bottom. Ids resolve to registry
 # entries; unknown ids are dropped. Omit this table to pin the whole registry.
 [dock]
-entries = ["gui_client", "gui_calc", "gui_stat", "gui_files", "gui_terminal", "gui_settings"]
+entries = ["gui_demo", "gui_calc", "gui_stat", "gui_files", "gui_terminal", "gui_settings"]
 
 # Launcher-menu entries (the hamburger dropdown), top-to-bottom. Same id rules
 # as `[dock]`; omit to list the whole registry.
 [launcher]
-entries = ["gui_client", "gui_calc", "gui_stat", "gui_files", "gui_terminal", "gui_settings"]
+entries = ["gui_demo", "gui_calc", "gui_stat", "gui_files", "gui_terminal", "gui_settings"]
 
 # Autostart: THE ONLY DIFFERENCE FROM default.toml. Two gui_clients prove the M3
 # cross-process isolation invariant (two untrusted clients composited at once);
-# gui_terminal + gui_files then autostart so their per-app config (apps/*.toml)
-# is exercised and its resolved-config diagnostic is observable headless. The
+# gui_terminal + gui_files + gui_calc then autostart so their per-app config
+# (apps/*.toml) is exercised and its resolved-config diagnostic is observable
+# headless. gui_demo autostarts last and posts its startup toast, exercising the
+# client→compositor NOTIFY path (the compositor prints `client notify …`). The
 # isolation marker fires off the two gui_clients — the heavier apps come up later
 # as runtime-pumped windows and do not gate it.
 [startup]
-entries = ["gui_client", "gui_client", "gui_terminal", "gui_files"]
+entries = ["gui_client", "gui_client", "gui_terminal", "gui_files", "gui_calc", "gui_demo"]
 # Phase 3 headless resize proof: the automated harness has no mouse, so the
 # title-bar maximize chip can't be clicked. With this set, the compositor drives
 # each runtime-pumped window (terminal + files) through the SAME maximize path

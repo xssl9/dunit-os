@@ -10,8 +10,10 @@
 [terminal]
 # Shell prompt handed to `dsh` via the PROMPT env var.
 prompt      = "dsh"
-# TrueType font path; empty inherits the desktop `[desktop] font`.
-font        = ""
+# TrueType font path; empty inherits the desktop `[desktop] font`. The terminal
+# renders a monospace CELL GRID, so it defaults to a monospace face (the desktop
+# font stays proportional for panel/title text).
+font        = "/assets/fonts/DejaVuSansMono.ttf"
 # Default foreground and background (the live `fg` is mutated by SGR / ESC[…m).
 fg          = "#A6E3A1"
 bg          = "#0B0F14"

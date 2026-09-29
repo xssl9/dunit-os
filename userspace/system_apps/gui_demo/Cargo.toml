@@ -1,0 +1,25 @@
+# Demo / self-tests client for the M4 userspace DWM.
+#
+# A normal, unprivileged ELF (no display/input master, no elevated rights). It
+# renders a small "showcase" surface — a column of buttons that each post a
+# desktop notification to the compositor through the NOTIFY control message —
+# into its own kernel shared buffer and drives its surface through the gui-v1
+# wire protocol over IPC, exactly like gui_calc. It replaces the bare gui_client
+# test window on the dock: instead of an empty surface, the user gets an app that
+# exercises real desktop features (notifications, config-driven palette, resize).
+[package]
+name = "gui_demo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libdunit = { path = "../../libdunit" }
+gui_protocol_v1 = { path = "../../../protocols/gui-v1" }
+dwm_settings = { path = "../../dwm_settings" }
+dunit_style = { path = "../../../runtime/dunit-style" }
+dunit_text = { path = "../../../runtime/dunit-text" }
+dunit_render = { path = "../../../runtime/dunit-render" }
+
+[[bin]]
+name = "gui_demo"
+path = "src/main.rs"

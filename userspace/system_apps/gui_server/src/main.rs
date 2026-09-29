@@ -661,6 +661,20 @@ const CTRL_MAGIC: u32 = 0x3150_4143; // "CAP1"
 // apart from a buffer announce or a wire packet.
 const RELOAD_MAGIC: u32 = 0x3144_4C52; // "RLD1"
 
+// Client -> compositor "post a desktop notification" signal. An unprivileged
+// client asks the compositor to raise a toast (e.g. gui_demo's "Notify" button).
+// The client never touches the toast queue itself — it only names the text; ALL
+// policy (whether notifications are on, the timeout, the corner) stays in the
+// compositor's `[notifications]` config (single source of truth), applied when
+// the frame loop drains the request into `notify_post`. Layout: [magic:u32]
+// [len:u32][utf8 text bytes]. A distinct magic from CAP1/INP1/RLD1/DGUI so
+// `handle_client_payload` can tell it apart from a buffer announce or wire packet.
+const NOTIFY_MAGIC: u32 = 0x3154_4F4E; // "NOT1"
+
+/// Longest client-supplied toast text the compositor accepts (bytes). Bounds the
+/// copy out of the untrusted IPC buffer; longer text is truncated, never trusted.
+const NOTIFY_TEXT_MAX: usize = 64;
+
 // Compositor -> client input control messages (20 bytes). Distinct magic from
 // CTRL_MAGIC and the DGUI wire magic so the client can tell them apart. Coords
 // are client-local (relative to the surface origin). Kept deliberately simple:
@@ -752,7 +766,13 @@ impl ClientState {
 /// Process one inbound (envelope-stripped) message for client `c`: either map
 /// its announced buffer capability, or track geometry + feed the protocol
 /// packet through the Server and relay the replies back to the client.
-fn handle_client_payload(server: &mut Server, c: &mut ClientState, payload: &[u8], reload: &mut bool) {
+fn handle_client_payload(
+    server: &mut Server,
+    c: &mut ClientState,
+    payload: &[u8],
+    reload: &mut bool,
+    notify_out: &mut Vec<alloc::string::String>,
+) {
     let n = payload.len();
     if n >= 16 && u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) == CTRL_MAGIC
     {
@@ -778,6 +798,23 @@ fn handle_client_payload(server: &mut Server, c: &mut ClientState, payload: &[u8
     if n >= 4 && u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) == RELOAD_MAGIC
     {
         *reload = true;
+        return;
+    }
+    // "Post a notification" signal: the client names the toast text; the frame
+    // loop turns it into a toast through the SAME `notify_post` path a launch
+    // uses (so `[notifications]` policy still gates it). The text length is the
+    // client's claim, so clamp it to the real remaining bytes AND a hard cap
+    // before copying — an untrusted client must not drive an out-of-bounds read
+    // or an unbounded allocation.
+    if n >= 8 && u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) == NOTIFY_MAGIC
+    {
+        let claimed = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
+        let avail = n - 8;
+        let len = claimed.min(avail).min(NOTIFY_TEXT_MAX);
+        let text = core::str::from_utf8(&payload[8..8 + len]).unwrap_or("");
+        if !text.is_empty() {
+            notify_out.push(text.into());
+        }
         return;
     }
     // Заголовок wire-протокола — 32 байта; CreateSurface читает поля вплоть до
@@ -856,6 +893,42 @@ fn spawn_client(
     Some(c)
 }
 
+/// Open the app at registry index `ri` as a fresh client window on `current_ws`,
+/// respecting the `max_windows` cap, and post the config-gated launch toast. This
+/// is the SINGLE "launch an app" path shared by the launcher menu (mouse click +
+/// keyboard Enter) and the dock — so program-launch policy lives in exactly one
+/// place instead of being copied per trigger. Returns true iff a client spawned.
+fn try_launch(
+    server: &mut Server,
+    clients: &mut Vec<ClientState>,
+    apps: &Applications,
+    ri: usize,
+    current_ws: usize,
+    next_id: &mut u32,
+    max_windows: usize,
+    notifs: &mut Vec<Toast>,
+    notifications: &settings::Notifications,
+    ticks: u32,
+) -> bool {
+    if clients.len() >= max_windows {
+        return false;
+    }
+    let Some(entry) = apps.apps.get(ri) else {
+        return false;
+    };
+    let exec = entry.exec.as_str();
+    let name = entry.name.as_str();
+    if let Some(mut c) = spawn_client(server, *next_id, 0, 0, ri as u8, exec) {
+        c.ws = current_ws;
+        clients.push(c);
+        *next_id += 1;
+        notify_post(notifs, notifications, ticks, name);
+        true
+    } else {
+        false
+    }
+}
+
 /// Bring up the desktop: autostart the configured `[startup]` apps, prove the
 /// M3 cross-process isolation invariant (≥2 untrusted clients composited
 /// concurrently, routed by KERNEL-AUTHENTICATED sender pid so one cannot inject
@@ -867,6 +940,15 @@ fn serve_two_clients() -> bool {
     let cfg = settings::load_config();
     let mut server = Server::new();
     let mut clients: Vec<ClientState> = Vec::new();
+    // Notification texts a client posts (NOTIFY_MAGIC) DURING bring-up — before the
+    // interactive desktop loop and its per-tick `pump_clients` exist. An autostart
+    // app can toast the moment it presents (e.g. gui_demo's "I'm up" toast), which
+    // lands here in `serve_two_clients` or the `resize_one_client` resize proof, not
+    // in `run_desktop_session`. Collect them instead of dropping them, and hand them
+    // to the session so it emits each through the SAME config-gated `notify_post`
+    // path once its toast queue exists (single source of truth; nothing is lost to a
+    // bring-up race).
+    let mut pending_notifies: Vec<alloc::string::String> = Vec::new();
 
     // Autostart the configured startup apps. Each entry is a registry index; a
     // stale/out-of-range index is skipped rather than trusted. Initial slots
@@ -887,7 +969,7 @@ fn serve_two_clients() -> bool {
         // No startup apps (or none spawnable): still raise the shell so the
         // panel/dock/launcher are usable and can spawn apps on demand.
         libdunit::println("gui_server: no startup apps to autostart");
-        run_desktop_session(&mut server, &mut clients);
+        run_desktop_session(&mut server, &mut clients, pending_notifies);
         return false;
     }
 
@@ -917,9 +999,11 @@ fn serve_two_clients() -> bool {
             Some(idx) => idx,
             None => continue, // message from an unknown pid — ignore
         };
-        // Startup smoke: no live-reload here, so discard the signal into a scratch.
+        // Startup smoke: no live-reload here, so discard that signal. A client
+        // NOTIFY posted this early is preserved in `pending_notifies` and shown once
+        // the desktop session's toast queue exists (bring-up race safety).
         let mut _reload = false;
-        handle_client_payload(&mut server, &mut clients[idx], &rx[..n], &mut _reload);
+        handle_client_payload(&mut server, &mut clients[idx], &rx[..n], &mut _reload, &mut pending_notifies);
 
         // A composition tick: route each FRAME_DONE to its client and blit that
         // client's committed buffer into its own slot.
@@ -975,9 +1059,9 @@ fn serve_two_clients() -> bool {
         // the maximize/fullscreen mechanism across a REAL process boundary (the
         // client re-allocates its buffer and re-imports it with a fresh object
         // id), which the in-process compositor self-test cannot cover.
-        resize_one_client(&mut server, &mut clients);
+        resize_one_client(&mut server, &mut clients, &mut pending_notifies);
     }
-    run_desktop_session(&mut server, &mut clients);
+    run_desktop_session(&mut server, &mut clients, pending_notifies);
 
     for c in clients.iter() {
         if c.mapped_handle != 0 {
@@ -1001,7 +1085,11 @@ fn serve_two_clients() -> bool {
 /// a new buffer and replays IMPORT/ATTACH/COMMIT with a FRESH object id, and the
 /// compositor picks up the new size from the client's IMPORT_BUFFER. Verifiable
 /// headlessly (the in-process self-test cannot cross an address-space boundary).
-fn resize_one_client(server: &mut Server, clients: &mut [ClientState]) {
+fn resize_one_client(
+    server: &mut Server,
+    clients: &mut [ClientState],
+    pending_notifies: &mut Vec<alloc::string::String>,
+) {
     const NEWW: u32 = 320;
     const NEWH: u32 = 160;
     const STATE_ACTIVATED: u32 = 1;
@@ -1031,8 +1119,11 @@ fn resize_one_client(server: &mut Server, clients: &mut [ClientState]) {
             Some(i) => i,
             None => continue,
         };
+        // Live-reload is not driven during this resize proof; a NOTIFY posted by any
+        // client mid-resize is preserved (bring-up race safety) and shown once the
+        // desktop session's toast queue exists.
         let mut _reload = false;
-        handle_client_payload(server, &mut clients[idx], &rx[..n], &mut _reload);
+        handle_client_payload(server, &mut clients[idx], &rx[..n], &mut _reload, pending_notifies);
         // Route every frame callback to its owner (keeps the other clients live).
         // Mirror `pump_clients`: a client that completes its handshake here (a
         // slower startup app such as the terminal or file manager, which finishes
@@ -1284,6 +1375,72 @@ fn session_lookup(session: &[settings::WinGeom], apps: &Applications, app: u8) -
 // MODIFIER arms the switcher is config (`[shortcuts] switch_mod`).
 const SC_TAB: u8 = 0x0F;
 const SC_ESC: u8 = 0x01;
+// Make-codes the global desktop shortcuts watch. Like Tab/Esc above these are
+// keyboard-protocol invariants (the physical key positions), NOT desktop policy —
+// only WHICH MODIFIER arms them and WHETHER each action is enabled is config
+// (`[shortcuts] cmd_mod` + the per-action bools). The digit row 1..9/0 is the
+// PC set-1 make sequence 0x02..0x0B.
+const SC_SPACE: u8 = 0x39;
+const SC_Q: u8 = 0x10;
+const SC_M: u8 = 0x32;
+const SC_UP: u8 = 0x48;
+const SC_DOWN: u8 = 0x50;
+const SC_ENTER: u8 = 0x1C;
+
+/// Map a top-row digit make-code to its value 1..=9 (0 maps to 10, so it can
+/// index workspace 10 when there are that many). Non-digit scancodes yield None.
+fn digit_from_scancode(sc: u8) -> Option<u32> {
+    match sc {
+        0x02..=0x0A => Some((sc - 0x01) as u32), // '1'..'9'
+        0x0B => Some(10),                        // '0' → the 10th workspace
+        _ => None,
+    }
+}
+
+/// A global desktop shortcut resolved from a key event. The DECISION (key+mods →
+/// action, gated by `[shortcuts]`) is pure and lives here so it can be unit-proven
+/// headless; the EFFECT (mutating compositor state) stays in the key-drain loop,
+/// reusing the exact same paths the mouse chips drive (single source of truth).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShortcutAction {
+    None,
+    /// Jump to this 0-based virtual workspace.
+    Workspace(usize),
+    /// Open the application launcher menu.
+    Launcher,
+    /// Close the focused window.
+    CloseWindow,
+    /// Toggle maximize on the focused window.
+    MaximizeWindow,
+}
+
+/// Resolve a key press against the config-driven global-shortcut policy. Returns
+/// the action a matching `cmd_mod`+key chord maps to, or `None`. A bare key (no
+/// `cmd_mod` held) never fires a global action — it falls through to the focused
+/// client — so app typing is never stolen. Pure: no compositor state touched,
+/// which is exactly what lets the self-test prove the mapping without a keyboard.
+fn match_shortcut(scancode: u8, mods: u8, pressed: bool, sc: &settings::Shortcuts, ws_count: usize) -> ShortcutAction {
+    if !pressed || (mods & sc.cmd_mod.mask()) == 0 {
+        return ShortcutAction::None;
+    }
+    if sc.ws_switch {
+        if let Some(n) = digit_from_scancode(scancode) {
+            if n >= 1 && (n as usize) <= ws_count {
+                return ShortcutAction::Workspace(n as usize - 1);
+            }
+        }
+    }
+    if sc.launcher && scancode == SC_SPACE {
+        return ShortcutAction::Launcher;
+    }
+    if sc.win_close && scancode == SC_Q {
+        return ShortcutAction::CloseWindow;
+    }
+    if sc.win_max && scancode == SC_M {
+        return ShortcutAction::MaximizeWindow;
+    }
+    ShortcutAction::None
+}
 
 /// Alt/Super-Tab window switcher (M4, gated by `[shortcuts]`). While armed it
 /// holds a frozen most-recently-used snapshot of the candidate windows and the
@@ -2325,7 +2482,12 @@ impl Win {
 /// complete their handshake while the compositor keeps rendering. Bounded per
 /// tick so a chatty client cannot starve the frame. Routing is by the
 /// kernel-authenticated sender pid, so clients stay isolated.
-fn pump_clients(server: &mut Server, clients: &mut Vec<ClientState>, reload: &mut bool) {
+fn pump_clients(
+    server: &mut Server,
+    clients: &mut Vec<ClientState>,
+    reload: &mut bool,
+    notify_out: &mut Vec<alloc::string::String>,
+) {
     let mut rx = [0u8; 256];
     let mut sender: u32 = 0;
     for _ in 0..64 {
@@ -2338,7 +2500,7 @@ fn pump_clients(server: &mut Server, clients: &mut Vec<ClientState>, reload: &mu
             Some(i) => i,
             None => continue, // message from an unknown pid — ignore
         };
-        handle_client_payload(server, &mut clients[idx], &rx[..n], reload);
+        handle_client_payload(server, &mut clients[idx], &rx[..n], reload, notify_out);
         for (fc, fp) in &server.composite() {
             let status = if fp.len() >= 52 {
                 u32::from_le_bytes([fp[48], fp[49], fp[50], fp[51]])
@@ -2688,7 +2850,11 @@ fn resolve_desk_widgets(default_corner: i32) -> Vec<DeskWidget> {
     v
 }
 
-fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
+fn run_desktop_session(
+    server: &mut Server,
+    clients: &mut Vec<ClientState>,
+    pending_notifies: Vec<alloc::string::String>,
+) {
     let mut fb = libdunit::FbInfo {
         addr: 0,
         width: 0,
@@ -2998,6 +3164,9 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     // Launcher dropdown state. Toggled by the launcher glyph; any click either
     // selects a menu entry (spawn) or dismisses the menu.
     let mut menu_open = false;
+    // Keyboard-highlighted launcher row (`cmd_mod`+Space opens the menu, then
+    // Up/Down move this selection and Enter launches it). Reset to 0 on each open.
+    let mut menu_sel: usize = 0;
     // Active workspace (0-based, concept §11). Only its windows composite and
     // take input; the panel switcher and newly-spawned windows follow it.
     let mut current_ws: usize = 0;
@@ -3038,6 +3207,22 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     let mut notifs: Vec<Toast> = Vec::new();
     let mut notify_st_done = false;
     let mut notify_expired_logged = false;
+    // Flush any notifications a client posted during bring-up (before this session's
+    // toast queue existed) through the SAME config-gated `notify_post` path the
+    // per-tick client-notify drain and app-launch sites use — so a startup toast
+    // (e.g. gui_demo's "I'm up") is honored exactly once here rather than lost to
+    // the bring-up race. Policy stays the compositor's; the client only named text.
+    for text in pending_notifies {
+        notify_post(&mut notifs, &notifications, ticks, &text);
+        libdunit::println(&alloc::format!(
+            "gui_server: client notify \"{}\" queued={} (enabled={})",
+            text,
+            notifs.len(),
+            notifications.enabled as u32,
+        ));
+    }
+    // One-shot flag for the global keyboard-shortcut self-test (below).
+    let mut shortcut_st_done = false;
     // Animation length in frames (~16ms/frame); 0 when animations are off, so
     // every ramp/reveal collapses to instant (the flat look).
     let mut anim_frames = if fx.anim { (fx.anim_ms / 16).max(1) as u32 } else { 0 };
@@ -3075,10 +3260,15 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
     // `handle_client_payload`); drained at the top of the frame to re-read the
     // config and re-seed live theme/layout/effects state.
     let mut reload_requested = false;
+    // Client-posted notification texts collected by `pump_clients` this tick
+    // (NOTIFY_MAGIC), turned into config-gated toasts right after the pump. Reused
+    // across frames (cleared each tick) so no per-frame allocation in the hot path.
+    let mut notify_requests: Vec<alloc::string::String> = Vec::new();
     loop {
         // Advance any runtime-spawned clients through their protocol handshake,
         // then hand each newly-ready client a cascaded, focused window.
-        pump_clients(server, clients, &mut reload_requested);
+        notify_requests.clear();
+        pump_clients(server, clients, &mut reload_requested, &mut notify_requests);
 
         // Live settings reload (GUI<->TOML round-trip): a gui_settings client
         // rewrote the config and pinged us. Re-read it and re-seed everything
@@ -3154,6 +3344,21 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 switcher.cancel();
                 libdunit::println("gui_server: settings reloaded (config changed)");
             }
+        }
+
+        // Turn this tick's client-posted notification requests (NOTIFY_MAGIC) into
+        // toasts. Policy stays the compositor's: `notify_post` is a no-op when
+        // `[notifications]` is disabled, and the timeout/corner come from config —
+        // the client only supplied the (bounds-checked) text. Drained AFTER the
+        // reload block so a just-reloaded `notifications` policy applies at once.
+        for text in notify_requests.drain(..) {
+            notify_post(&mut notifs, &notifications, ticks, &text);
+            libdunit::println(&alloc::format!(
+                "gui_server: client notify \"{}\" queued={} (enabled={})",
+                text,
+                notifs.len(),
+                notifications.enabled as u32,
+            ));
         }
 
         // Per-frame Win<->ClientState reconciliation. A client that re-imported a
@@ -3343,12 +3548,19 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             let future = ticks.saturating_add(frames + 1);
             let survivors = notifs.iter().filter(|t| future < t.expire).count();
             let ok = posted == before + 1 && survivors < posted;
+            // Report the DELTA this post added (`added`), not the absolute queue
+            // size: a client (e.g. autostarted gui_demo) may have a live startup
+            // toast already queued, so the absolute count is timing/config-dependent
+            // while "this post enqueued exactly one" is the real invariant. `queued`
+            // trails as a diagnostic. corner/timeout_ms prove the policy is config-
+            // driven; "ok" folds in the enqueue-delta + auto-dismiss predicate.
             libdunit::println(&alloc::format!(
-                "gui_server: notify posted queued={} corner={} timeout_ms={} {} (self-test)",
-                posted,
+                "gui_server: notify posted added={} corner={} timeout_ms={} {} (self-test) queued={}",
+                posted - before,
                 notifications.corner,
                 notifications.timeout_ms,
-                if ok { "ok" } else { "FAIL" }
+                if ok { "ok" } else { "FAIL" },
+                posted,
             ));
             notify_st_done = true;
         }
@@ -3375,6 +3587,61 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 if flipped { "ok" } else { "FAIL" }
             ));
             qs_st_done = true;
+        }
+
+        // Config-gated global-shortcut proof (`test.toml` `[startup] self_test`).
+        // The harness cannot hold `cmd_mod`+key, so exercise the SAME pure
+        // `match_shortcut` decision the key-drain loop uses: assert every ENABLED
+        // action maps from its `cmd_mod`+key chord, that a bare key (no modifier)
+        // maps to nothing (app typing is never stolen), and — the behavioural
+        // anchor — that APPLYING a workspace action really moves `current_ws`
+        // (config→behaviour, not just parse). Launcher/close/maximize reuse the
+        // exact mouse-chip effect paths, so proving their mapping proves the wiring.
+        if apps.self_test && !shortcut_st_done {
+            let m = shortcuts.cmd_mod.mask();
+            let mut map_ok = true;
+            if shortcuts.ws_switch && apps.workspaces >= 2 {
+                map_ok &= match_shortcut(0x03, m, true, &shortcuts, apps.workspaces)
+                    == ShortcutAction::Workspace(1); // cmd_mod + '2' → ws index 1
+            }
+            if shortcuts.launcher {
+                map_ok &= match_shortcut(SC_SPACE, m, true, &shortcuts, apps.workspaces)
+                    == ShortcutAction::Launcher;
+            }
+            if shortcuts.win_close {
+                map_ok &= match_shortcut(SC_Q, m, true, &shortcuts, apps.workspaces)
+                    == ShortcutAction::CloseWindow;
+            }
+            if shortcuts.win_max {
+                map_ok &= match_shortcut(SC_M, m, true, &shortcuts, apps.workspaces)
+                    == ShortcutAction::MaximizeWindow;
+            }
+            // Negative: the same keys WITHOUT the modifier must not fire globally.
+            map_ok &= match_shortcut(SC_Q, 0, true, &shortcuts, apps.workspaces)
+                == ShortcutAction::None;
+            // Behavioural: apply a workspace jump and read it back, then restore.
+            let mut effect_ok = true;
+            if shortcuts.ws_switch && apps.workspaces >= 3 {
+                let before = current_ws;
+                if let ShortcutAction::Workspace(ws) =
+                    match_shortcut(0x04, m, true, &shortcuts, apps.workspaces) // cmd_mod + '3'
+                {
+                    current_ws = ws;
+                }
+                effect_ok = current_ws == 2;
+                current_ws = before;
+            }
+            libdunit::println(&alloc::format!(
+                "gui_server: shortcuts cmd_mod={} ws={} launcher={} close={} max={} map={} effect={} (self-test)",
+                shortcuts.cmd_mod.as_str(),
+                shortcuts.ws_switch as u32,
+                shortcuts.launcher as u32,
+                shortcuts.win_close as u32,
+                shortcuts.win_max as u32,
+                if map_ok { "ok" } else { "FAIL" },
+                if effect_ok { "ok" } else { "FAIL" },
+            ));
+            shortcut_st_done = true;
         }
 
         let m = libdunit::get_mouse_state();
@@ -3444,18 +3711,11 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             }
             menu_open = false;
             if let Some(i) = chosen {
-                if clients.len() < ly.max_windows {
-                    if let Some(ri) = apps.launcher.get(i).copied() {
-                        let exec = apps.apps[ri].exec.as_str();
-                        if let Some(mut c) = spawn_client(server, next_id, 0, 0, ri as u8, exec) {
-                            c.ws = current_ws;
-                            clients.push(c);
-                            next_id += 1;
-                            // Launch feedback toast (config-gated inside notify_post).
-                            let nm = apps.apps.get(ri).map(|a| a.name.as_str()).unwrap_or("App");
-                            notify_post(&mut notifs, &notifications, ticks, nm);
-                        }
-                    }
+                if let Some(ri) = apps.launcher.get(i).copied() {
+                    try_launch(
+                        server, clients, &apps, ri, current_ws, &mut next_id,
+                        ly.max_windows, &mut notifs, &notifications, ticks,
+                    );
                 }
             }
         } else if press && qs_open {
@@ -3481,6 +3741,7 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
             // client — the shell owns the panel strip.
             if in_rect(launcher_hit, mx, my) {
                 menu_open = true;
+                menu_sel = 0;
                 qs_open = false;
             } else if quicksettings.enabled && panel_edge.is_horizontal() && in_rect(qs_applet, mx, my) {
                 // Toggle the quick-settings flyout (horizontal panels only — a
@@ -3533,16 +3794,11 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                         }
                         z.retain(|&i| i != wi);
                         z.push(wi);
-                    } else if clients.len() < ly.max_windows {
-                        let exec = apps.apps[ri].exec.as_str();
-                        if let Some(mut c) = spawn_client(server, next_id, 0, 0, ri as u8, exec) {
-                            c.ws = current_ws;
-                            clients.push(c);
-                            next_id += 1;
-                            // Launch feedback toast (config-gated inside notify_post).
-                            let nm = apps.apps.get(ri).map(|a| a.name.as_str()).unwrap_or("App");
-                            notify_post(&mut notifs, &notifications, ticks, nm);
-                        }
+                    } else {
+                        try_launch(
+                            server, clients, &apps, ri, current_ws, &mut next_id,
+                            ly.max_windows, &mut notifs, &notifications, ticks,
+                        );
                     }
                 }
             }
@@ -3773,6 +4029,86 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                     }
                 }
             }
+
+            // --- Launcher menu keyboard navigation (modal) ---------------------
+            // While the dropdown is open it CAPTURES every key: Up/Down move the
+            // highlight, Enter launches the highlighted app (the SAME `try_launch`
+            // path a mouse click uses), Esc closes. Swallowing all keys keeps them
+            // out of the focused client so typing can't leak past the open menu.
+            if menu_open {
+                if ev.pressed {
+                    match ev.scancode {
+                        SC_ESC => menu_open = false,
+                        SC_UP => {
+                            if menu_sel > 0 {
+                                menu_sel -= 1;
+                            }
+                        }
+                        SC_DOWN => {
+                            if menu_sel + 1 < apps.launcher.len() {
+                                menu_sel += 1;
+                            }
+                        }
+                        SC_ENTER => {
+                            menu_open = false;
+                            if let Some(ri) = apps.launcher.get(menu_sel).copied() {
+                                try_launch(
+                                    server, clients, &apps, ri, current_ws, &mut next_id,
+                                    ly.max_windows, &mut notifs, &notifications, ticks,
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                continue; // menu is modal — no key reaches a client while it is open
+            }
+
+            // --- Global desktop shortcuts (config-driven `cmd_mod` + key) -------
+            // Intercepted before client forwarding, exactly like the switcher. The
+            // DECISION is the pure `match_shortcut` (so the self-test can prove the
+            // mapping); the EFFECT here reuses the same paths the mouse chips drive.
+            match match_shortcut(ev.scancode, ev.mods, ev.pressed, &shortcuts, apps.workspaces) {
+                ShortcutAction::Workspace(ws) => {
+                    if current_ws != ws {
+                        ws_switch_tick = ticks; // start the incoming crossfade
+                        current_ws = ws;
+                    }
+                    continue;
+                }
+                ShortcutAction::Launcher => {
+                    menu_open = true;
+                    menu_sel = 0;
+                    qs_open = false;
+                    continue;
+                }
+                ShortcutAction::CloseWindow => {
+                    if let Some(wi) = focused {
+                        // Same close path as the title-bar close chip: drop it from
+                        // compositing, tell the client to quit, and remember its
+                        // geometry so reopening restores where it sat.
+                        wins[wi].alive = false;
+                        send_input(wins[wi].pid, IN_QUIT, 0, 0, 0);
+                        drag = None;
+                        session_remember(&mut session, &apps, &wins[wi]);
+                        settings::save_session(&session);
+                    }
+                    continue;
+                }
+                ShortcutAction::MaximizeWindow => {
+                    if let Some(wi) = focused {
+                        // Same maximize path as the title-bar chip: a server-push
+                        // CONFIGURE the client re-imports at the new size.
+                        toggle_maximize(server, clients, &mut wins[wi], bw, bh, &ly, &ins);
+                        drag = None;
+                        session_remember(&mut session, &apps, &wins[wi]);
+                        settings::save_session(&session);
+                    }
+                    continue;
+                }
+                ShortcutAction::None => {}
+            }
+
             if !ev.pressed || is_modifier_scancode(ev.scancode) {
                 continue;
             }
@@ -4243,7 +4579,9 @@ fn run_desktop_session(server: &mut Server, clients: &mut Vec<ClientState>) {
                 if iy + ih > my0 + reveal_h {
                     break; // below the revealed edge — not shown yet
                 }
-                let hover = mx >= ix && mx < ix + iw && my >= iy && my < iy + ih;
+                // Highlight the row under the pointer OR the keyboard selection,
+                // so mouse and `cmd_mod`+Space→Up/Down navigation share one cue.
+                let hover = (mx >= ix && mx < ix + iw && my >= iy && my < iy + ih) || i == menu_sel;
                 if hover {
                     fill_rrect(&mut back, bw, bh, ix + 3, iy + 2, iw - 6, ih - 4, 5, RR_ALL, 0xC000_0000 | (theme.menu_hover & 0x00FF_FFFF));
                 }

@@ -5,21 +5,26 @@
 //!
 //! Spawned by `gui_terminal` through `pty_spawn`, so fd 0/1/2 are routed to the
 //! pty rings (not the console). It runs a full line editor over the raw byte
-//! stream the terminal forwards: printable insert at the cursor, Backspace and
-//! Delete, cursor movement (←/→, Home/End) and history (↑/↓) via the xterm ESC
-//! sequences `gui_terminal::encode_key` emits, plus the control codes Ctrl-C
-//! (abort line), Ctrl-D (EOF on an empty line) and Ctrl-L (clear). On Enter it
-//! runs one of a small set of builtins, or — for any other name — spawns
-//! `/app/<name>` as a child on a private inner pty and bridges its stdio to the
-//! terminal until it exits (see `spawn_external`). Output is written to stdout,
-//! which the gui_terminal client interprets into its on-screen scrollback.
+//! stream the terminal forwards, and dispatches a command set that MIRRORS the
+//! kernel text-mode shell (`kernel/src/shell.rs`) in syntax and output — the
+//! same `ls / cd / pwd / mkdir / touch / cat / rm / tree / echo(>,>>)` FS verbs
+//! and the same `uname / whoami / date / uptime / free / ps` system verbs — so
+//! the GUI terminal behaves "just like a clean terminal". The FS verbs go
+//! through the libdunit filesystem syscalls (resolved against this process's
+//! cwd by the kernel); the system verbs read the read-only counters exposed by
+//! `get_system_stats` (syscall 26). No kernel-internal APIs, no hardcoded
+//! policy: pure userspace. Any other name is run as `/app/<name>` on a private
+//! inner pty whose stdio we bridge until it exits (see `spawn_external`).
 
 use core::panic::PanicInfo;
 
 extern crate alloc;
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+
+use libdunit::{DirEntry, SystemStats};
 
 #[panic_handler]
 fn panic(_: &PanicInfo) -> ! {
@@ -47,317 +52,568 @@ fn cwd() -> String {
     }
 }
 
-fn cmd_ls(path: &str) {
-    let mut raw = [libdunit::DirEntry::empty(); 64];
-    let n = libdunit::readdir(path, &mut raw);
-    if n < 0 {
-        out("ls: cannot read directory\n");
-        return;
-    }
-    for e in raw.iter().take(n as usize) {
-        out(e.name());
-        if e.file_type == libdunit::FILE_TYPE_DIRECTORY {
-            out("/");
-        }
-        out("\n");
+/// A readdir scratch buffer of `n` owned entries (heap, so large listings do
+/// not blow the userspace stack).
+fn dir_buf(n: usize) -> Vec<DirEntry> {
+    let mut v: Vec<DirEntry> = Vec::new();
+    v.resize(n, DirEntry::empty());
+    v
+}
+
+/// Join a directory path and a child name into an absolute path.
+fn join(dir: &str, name: &str) -> String {
+    if dir.ends_with('/') {
+        format!("{}{}", dir, name)
+    } else {
+        format!("{}/{}", dir, name)
     }
 }
 
-/// Launch an external program as a child on a private (inner) pty and bridge it
-/// to our own stdio for the duration, so a non-builtin command behaves like a
-/// real shell exec. `dsh` is itself the pty *slave* of `gui_terminal` (fd 0/1 are
-/// the outer rings); here we flip roles and become the *master* of a fresh inner
-/// pty whose slave is the child. The bridge then pumps two directions until the
-/// child exits: child stdout (inner master read) → our stdout (fd 1 → terminal),
-/// and terminal keystrokes (our stdin, fd 0) → child stdin (inner master write).
-/// Ctrl-C on the way through kills the child. Returns false if `cmd` could not be
-/// spawned (unknown path / not an ELF), so the caller can report "not found".
-fn spawn_external(cmd: &str) -> bool {
-    let inner = libdunit::pty_create();
-    if inner <= 0 {
-        return false;
-    }
-    let inner = inner as u32;
-    // `pty_spawn` resolves a bare name against /app (see resolve_exec_path); a
-    // negative return means the program does not exist or is not a valid ELF.
-    let child = libdunit::pty_spawn(cmd, inner);
-    if child <= 0 {
-        libdunit::pty_close(inner);
-        return false;
-    }
-    let child = child as u32;
-
-    let mut obuf = [0u8; 256];
-    let mut ibuf = [0u8; 128];
-    loop {
-        // 1) Drain everything the child has produced, fast, before touching input.
-        let r = libdunit::pty_read(inner, &mut obuf);
-        if r > 0 {
-            libdunit::write(1, &obuf[..r as usize]);
-            continue;
-        }
-        if r == libdunit::EPIPE {
-            break; // child exited and its output is fully drained
-        }
-        // 2) Forward any terminal input to the child. Ctrl-C interrupts it.
-        let k = libdunit::read(0, &mut ibuf);
-        if k > 0 {
-            let bytes = &ibuf[..k as usize];
-            if bytes.contains(&0x03) {
-                libdunit::kill(child);
+/// Resolve `path` (absolute or relative to `base`) into a canonical absolute
+/// path, folding `.`/`..`/empty components — mirrors the kernel shell's
+/// `normalize_at` so `tree`/`cd` behave identically to the text terminal.
+fn normalize(base: &str, path: &str) -> String {
+    let combined = if path.starts_with('/') {
+        String::from(path)
+    } else {
+        join(base, path)
+    };
+    let mut stack: Vec<&str> = Vec::new();
+    for comp in combined.split('/') {
+        match comp {
+            "" | "." => {}
+            ".." => {
+                stack.pop();
             }
-            libdunit::pty_write(inner, bytes);
-            continue;
+            c => stack.push(c),
         }
-        // 3) Nothing either way: yield on a short timer (see the main loop note).
-        libdunit::sleep_ms(5);
     }
-    libdunit::pty_close(inner);
-    true
+    let mut result = String::from("/");
+    for (i, c) in stack.iter().enumerate() {
+        if i > 0 {
+            result.push('/');
+        }
+        result.push_str(c);
+    }
+    result
 }
 
-/// Execute one entered command line.
+/// Split a command line into `(command, rest)` on the first run of whitespace;
+/// `rest` is the trimmed remainder (a single argument/text/path, exactly like
+/// the kernel shell's prefix dispatch).
+fn split_cmd(line: &str) -> (&str, &str) {
+    match line.find(|c: char| c.is_ascii_whitespace()) {
+        Some(i) => (&line[..i], line[i..].trim_start()),
+        None => (line, ""),
+    }
+}
+
+/// Dispatch one command line. FS verbs go through libdunit syscalls (resolved
+/// against this process's cwd by the kernel); system verbs read `get_system_stats`.
+/// Anything else is executed as `/app/<name>` on a bridged inner pty.
 fn run(line: &str) {
     let line = line.trim();
     if line.is_empty() {
         return;
     }
-    let (cmd, rest) = match line.find(' ') {
-        Some(i) => (&line[..i], line[i + 1..].trim()),
-        None => (line, ""),
-    };
+    let (cmd, rest) = split_cmd(line);
     match cmd {
-        "help" => out("builtins: help echo pwd ls cd clear uname exit — other names run /app/<name>\n"),
-        "echo" => {
-            out(rest);
-            out("\n");
-        }
+        "help" => cmd_help(),
+        "echo" => cmd_echo(rest),
         "pwd" => {
             out(&cwd());
             out("\n");
         }
-        "ls" => {
-            let p = if rest.is_empty() { cwd() } else { String::from(rest) };
-            cmd_ls(&p);
-        }
-        "cd" => {
-            let p = if rest.is_empty() { "/" } else { rest };
-            if libdunit::chdir(p) < 0 {
-                out("cd: no such directory\n");
-            }
-        }
-        "uname" => out("Dunit OS x86_64 (M4)\n"),
-        // Form feed: the terminal treats 0x0C as "clear the scrollback".
-        "clear" => out("\x0c"),
-        "exit" => {
-            out("bye\n");
-            libdunit::exit(0);
-        }
+        "ls" => cmd_ls(rest),
+        "cd" => cmd_cd(rest),
+        "mkdir" => cmd_mkdir(rest),
+        "touch" => cmd_touch(rest),
+        "cat" => cmd_cat(rest),
+        "rm" => cmd_rm(rest),
+        "tree" => cmd_tree(rest),
+        "clear" => out("\x1b[2J\x1b[H"),
+        "uname" => cmd_uname(rest),
+        "whoami" => out("root\n"),
+        "date" => out("date: RTC unavailable\n"),
+        "uptime" => cmd_uptime(),
+        "free" => cmd_free(),
+        "ps" => cmd_ps(),
+        "exit" => libdunit::exit(0),
         _ => {
-            // Not a builtin: try to run it as an external program from /app.
-            if !spawn_external(cmd) {
-                out(cmd);
-                out(": command not found\n");
+            let path = format!("/app/{}", cmd);
+            if !spawn_external(&path) {
+                out(&format!("dsh: command not found: {}\n", cmd));
             }
         }
     }
 }
 
-/// Repaint the editable line in the terminal. The terminal renderer only
-/// understands "append printable" and "backspace pops the last char", so we
-/// erase the previously-echoed typed portion with backspaces (never touching
-/// the prompt) and rewrite the whole buffer. The visual caret therefore always
-/// sits at end-of-line even when the logical cursor is mid-line.
-fn redraw(line: &str, echoed: &mut usize) {
-    for _ in 0..*echoed {
-        libdunit::write(1, &[0x08]);
-    }
-    libdunit::write(1, line.as_bytes());
-    *echoed = line.len();
+fn cmd_help() {
+    out("dsh — Dunit userspace shell (mirrors the text-mode terminal)\n");
+    out("filesystem: ls [path]  cd [path]  pwd  mkdir <dir>  touch <file>  cat <file>  rm <path>  tree [path]\n");
+    out("text:       echo <text> [> file | >> file]\n");
+    out("system:     uname [-a]  whoami  date  uptime  free  ps\n");
+    out("control:    clear  help  exit\n");
+    out("any other name runs /app/<name> on a bridged pty\n");
 }
 
-/// xterm ESC-sequence parser state (`ESC` `[` `<param>` `<final>`).
-enum Esc {
+fn cmd_echo(rest: &str) {
+    if let Some(idx) = rest.find(">>") {
+        let text = rest[..idx].trim_end();
+        let path = rest[idx + 2..].trim();
+        if path.is_empty() {
+            out("echo: missing output file\n");
+            return;
+        }
+        let data = format!("{}\n", text);
+        if libdunit::append_string(path, &data).is_err() {
+            out(&format!("echo: {}: write error\n", path));
+        }
+        return;
+    }
+    if let Some(idx) = rest.find('>') {
+        let text = rest[..idx].trim_end();
+        let path = rest[idx + 1..].trim();
+        if path.is_empty() {
+            out("echo: missing output file\n");
+            return;
+        }
+        let data = format!("{}\n", text);
+        if libdunit::write_string(path, &data).is_err() {
+            out(&format!("echo: {}: write error\n", path));
+        }
+        return;
+    }
+    out(rest);
+    out("\n");
+}
+
+fn cmd_ls(rest: &str) {
+    let path = if rest.is_empty() { "." } else { rest };
+    let mut entries = dir_buf(256);
+    let n = libdunit::readdir(path, &mut entries);
+    if n < 0 {
+        out(&format!("ls: {}: {}\n", path, libdunit::error_name(n)));
+        return;
+    }
+    for i in 0..(n as usize) {
+        if i > 0 {
+            out("  ");
+        }
+        out(entries[i].name());
+    }
+    out("\n");
+}
+
+fn cmd_cd(rest: &str) {
+    let path = if rest.is_empty() { "/" } else { rest };
+    let r = libdunit::chdir(path);
+    if r < 0 {
+        out(&format!("cd: {}: {}\n", path, libdunit::error_name(r)));
+    }
+}
+
+fn cmd_mkdir(rest: &str) {
+    if rest.is_empty() {
+        out("mkdir: missing operand\n");
+        return;
+    }
+    let r = libdunit::mkdir(rest);
+    if r < 0 {
+        out(&format!("mkdir: {}: {}\n", rest, libdunit::error_name(r)));
+    }
+}
+
+fn cmd_touch(rest: &str) {
+    if rest.is_empty() {
+        out("touch: missing operand\n");
+        return;
+    }
+    let fd = libdunit::open(rest, libdunit::OPEN_CREATE | libdunit::OPEN_WRITE);
+    if fd < 0 {
+        out(&format!("touch: {}: {}\n", rest, libdunit::error_name(fd)));
+    } else {
+        libdunit::close(fd as usize);
+    }
+}
+
+fn cmd_cat(rest: &str) {
+    if rest.is_empty() {
+        out("cat: missing operand\n");
+        return;
+    }
+    let fd = libdunit::open(rest, libdunit::OPEN_READ);
+    if fd < 0 {
+        out(&format!("cat: {}: {}\n", rest, libdunit::error_name(fd)));
+        return;
+    }
+    let fd = fd as usize;
+    let mut buf = [0u8; 512];
+    loop {
+        let n = libdunit::read(fd, &mut buf);
+        if n <= 0 {
+            break;
+        }
+        match core::str::from_utf8(&buf[..n as usize]) {
+            Ok(s) => out(s),
+            Err(_) => out("<binary>"),
+        }
+    }
+    libdunit::close(fd);
+    out("\n");
+}
+
+fn cmd_rm(rest: &str) {
+    if rest.is_empty() {
+        out("rm: missing operand\n");
+        return;
+    }
+    let r = libdunit::unlink(rest);
+    if r < 0 {
+        out(&format!("rm: {}: {}\n", rest, libdunit::error_name(r)));
+    }
+}
+
+fn cmd_tree(rest: &str) {
+    let base = normalize(&cwd(), if rest.is_empty() { "." } else { rest });
+    out(&base);
+    out("\n");
+    tree_recurse(&base, 1);
+}
+
+fn tree_recurse(dir: &str, depth: usize) {
+    if depth > 16 {
+        return;
+    }
+    let mut entries = dir_buf(256);
+    let n = libdunit::readdir(dir, &mut entries);
+    if n < 0 {
+        return;
+    }
+    for i in 0..(n as usize) {
+        let name = entries[i].name();
+        for _ in 0..depth {
+            out("  ");
+        }
+        out(name);
+        if entries[i].file_type == libdunit::FILE_TYPE_DIRECTORY {
+            out("/\n");
+            let child = join(dir, name);
+            tree_recurse(&child, depth + 1);
+        } else {
+            out("\n");
+        }
+    }
+}
+
+fn cmd_uname(rest: &str) {
+    if rest == "-a" {
+        out("Dunit OS 1.0.0 Green Tea x86_64 kernel=monolithic-rust-hal\n");
+    } else {
+        out("Dunit OS\n");
+    }
+}
+
+fn cmd_uptime() {
+    let mut s = SystemStats::default();
+    libdunit::get_system_stats(&mut s);
+    let hz = if s.uptime_hz == 0 { 100 } else { s.uptime_hz };
+    let total = s.uptime_ticks / hz;
+    let h = total / 3600;
+    let m = (total % 3600) / 60;
+    let sec = total % 60;
+    out(&format!(
+        "up {}h {}m {}s ({} ticks @ {} Hz)\n",
+        h, m, sec, s.uptime_ticks, hz
+    ));
+}
+
+fn cmd_free() {
+    let mut s = SystemStats::default();
+    libdunit::get_system_stats(&mut s);
+    let kib = |b: u64| b / 1024;
+    out("              total        used        free\n");
+    out(&format!(
+        "PMM KiB:   {:>10}  {:>10}  {:>10}\n",
+        kib(s.pmm_total_bytes),
+        kib(s.pmm_used_bytes),
+        kib(s.pmm_free_bytes)
+    ));
+    out(&format!(
+        "Heap KiB:  {:>10}  {:>10}  {:>10}\n",
+        kib(s.heap_total_bytes),
+        kib(s.heap_used_bytes),
+        kib(s.heap_free_bytes)
+    ));
+    out("Swap: unavailable\n");
+}
+
+fn cmd_ps() {
+    let mut s = SystemStats::default();
+    libdunit::get_system_stats(&mut s);
+    out(&format!(
+        "processes: total={} running={} ready={} prepared={} blocked={} dead={} reaped={}\n",
+        s.process_total,
+        s.process_running,
+        s.process_ready,
+        s.process_prepared,
+        s.process_blocked,
+        s.process_dead,
+        s.process_reaped
+    ));
+}
+
+/// Run an external program `path` (typically `/app/<name>`) on a private inner
+/// pty and bridge its stdio to ours until it exits. dsh becomes the MASTER of
+/// the inner pty; the child's stdout is forwarded to our stdout (the terminal)
+/// and keystrokes from our stdin are forwarded to the child's stdin. Ctrl-C
+/// (0x03) on our stdin kills the child. Returns false if the program could not
+/// be spawned (so the caller can print "command not found").
+fn spawn_external(path: &str) -> bool {
+    let inner = libdunit::pty_create();
+    if inner < 0 {
+        return false;
+    }
+    let inner = inner as u32;
+    let child = libdunit::pty_spawn(path, inner);
+    if child < 0 {
+        libdunit::pty_close(inner);
+        return false;
+    }
+    let child = child as u32;
+    let mut out_buf = [0u8; 512];
+    let mut in_buf = [0u8; 256];
+    loop {
+        let mut progressed = false;
+        // Child stdout -> our stdout (the terminal). EPIPE => child exited and
+        // its output is fully drained: we are done.
+        let n = libdunit::pty_read(inner, &mut out_buf);
+        if n > 0 {
+            libdunit::write(1, &out_buf[..n as usize]);
+            progressed = true;
+        } else if n == libdunit::EPIPE {
+            break;
+        }
+        // Our stdin (terminal keystrokes) -> child stdin.
+        let m = libdunit::read(0, &mut in_buf);
+        if m > 0 {
+            let slice = &in_buf[..m as usize];
+            if slice.contains(&0x03) {
+                libdunit::kill(child);
+            }
+            libdunit::pty_write(inner, slice);
+            progressed = true;
+        }
+        if !progressed {
+            libdunit::sleep_ms(5);
+        }
+    }
+    let mut st = libdunit::WaitStatus::empty();
+    let _ = libdunit::wait(child, &mut st);
+    libdunit::pty_close(inner);
+    true
+}
+
+/// ANSI escape-parser state for the line editor: bytes arriving from the
+/// terminal may be raw ASCII or `ESC [ … final` control sequences (arrows,
+/// Home/End/Delete) synthesized by `gui_terminal::encode_key`.
+enum EscState {
     Normal,
     Esc,
     Csi,
 }
 
-/// The line editor: the current buffer, a logical cursor (byte index; input is
-/// ASCII so byte == char), the count of typed chars currently on screen, the
-/// command history with a navigation index, and the ESC parser state.
+/// A one-line editor with history and a real caret. It reprints the whole line
+/// on every edit (`\r` + prompt + text + `ESC[K`, then `ESC[nD` to place the
+/// caret), so the terminal only needs CR / EL / CUB — no absolute addressing.
 struct Ed {
     line: String,
     cursor: usize,
-    echoed: usize,
+    prompt: String,
     history: Vec<String>,
-    hist_idx: usize,
-    esc: Esc,
-    param: u32,
-    /// The shell prompt (from `PROMPT` in the environment, else `PROMPT_DEFAULT`).
-    prompt: &'static str,
+    hist_pos: usize,
+    esc: EscState,
+    csi_param: usize,
 }
 
 impl Ed {
-    fn new(prompt: &'static str) -> Self {
+    fn new(prompt_word: &str) -> Self {
         Ed {
             line: String::new(),
             cursor: 0,
-            echoed: 0,
+            prompt: format!("{} ", prompt_word),
             history: Vec::new(),
-            hist_idx: 0,
-            esc: Esc::Normal,
-            param: 0,
-            prompt,
+            hist_pos: 0,
+            esc: EscState::Normal,
+            csi_param: 0,
         }
+    }
+
+    fn start(&self) {
+        out(&self.prompt);
+    }
+
+    fn feed(&mut self, b: u8) {
+        match self.esc {
+            EscState::Normal => self.feed_normal(b),
+            EscState::Esc => {
+                if b == b'[' {
+                    self.esc = EscState::Csi;
+                    self.csi_param = 0;
+                } else {
+                    self.esc = EscState::Normal;
+                }
+            }
+            EscState::Csi => self.feed_csi(b),
+        }
+    }
+
+    fn feed_normal(&mut self, b: u8) {
+        match b {
+            0x1B => self.esc = EscState::Esc,
+            b'\r' | b'\n' => self.submit(),
+            0x08 | 0x7F => self.backspace(),
+            0x03 => self.cancel(),                          // Ctrl-C
+            0x0C => self.clear_screen(),                    // Ctrl-L
+            0x01 => self.move_home(),                       // Ctrl-A
+            0x05 => self.move_end(),                        // Ctrl-E
+            0x15 => {
+                // Ctrl-U: kill the whole line
+                self.line.clear();
+                self.cursor = 0;
+                self.redraw();
+            }
+            0x20..=0x7E => self.insert(b as char),
+            _ => {}
+        }
+    }
+
+    fn feed_csi(&mut self, b: u8) {
+        if b.is_ascii_digit() {
+            self.csi_param = self.csi_param.saturating_mul(10) + (b - b'0') as usize;
+            return;
+        }
+        match b {
+            b'A' => self.history_prev(),
+            b'B' => self.history_next(),
+            b'C' => self.move_right(),
+            b'D' => self.move_left(),
+            b'H' => self.move_home(),
+            b'F' => self.move_end(),
+            b'~' => match self.csi_param {
+                1 | 7 => self.move_home(),
+                4 | 8 => self.move_end(),
+                3 => self.delete_forward(),
+                _ => {}
+            },
+            _ => {}
+        }
+        self.esc = EscState::Normal;
     }
 
     fn insert(&mut self, c: char) {
-        if self.line.len() >= 256 {
-            return;
-        }
         self.line.insert(self.cursor, c);
-        self.cursor += 1;
-        redraw(&self.line, &mut self.echoed);
+        self.cursor += c.len_utf8();
+        self.redraw();
     }
 
     fn backspace(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        self.cursor -= 1;
-        self.line.remove(self.cursor);
-        redraw(&self.line, &mut self.echoed);
-    }
-
-    fn del_forward(&mut self) {
-        if self.cursor >= self.line.len() {
-            return;
-        }
-        self.line.remove(self.cursor);
-        redraw(&self.line, &mut self.echoed);
-    }
-
-    fn left(&mut self) {
         if self.cursor > 0 {
             self.cursor -= 1;
+            self.line.remove(self.cursor);
+            self.redraw();
         }
     }
 
-    fn right(&mut self) {
+    fn delete_forward(&mut self) {
+        if self.cursor < self.line.len() {
+            self.line.remove(self.cursor);
+            self.redraw();
+        }
+    }
+
+    fn move_left(&mut self) {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+            self.redraw();
+        }
+    }
+
+    fn move_right(&mut self) {
         if self.cursor < self.line.len() {
             self.cursor += 1;
+            self.redraw();
         }
     }
 
-    fn home(&mut self) {
+    fn move_home(&mut self) {
         self.cursor = 0;
+        self.redraw();
     }
 
-    fn end(&mut self) {
+    fn move_end(&mut self) {
         self.cursor = self.line.len();
+        self.redraw();
     }
 
-    fn hist_prev(&mut self) {
-        if self.hist_idx == 0 {
-            return;
+    fn history_prev(&mut self) {
+        if self.hist_pos > 0 {
+            self.hist_pos -= 1;
+            self.line = self.history[self.hist_pos].clone();
+            self.cursor = self.line.len();
+            self.redraw();
         }
-        self.hist_idx -= 1;
-        self.line = self.history[self.hist_idx].clone();
-        self.cursor = self.line.len();
-        redraw(&self.line, &mut self.echoed);
     }
 
-    fn hist_next(&mut self) {
-        if self.hist_idx >= self.history.len() {
-            return;
+    fn history_next(&mut self) {
+        if self.hist_pos < self.history.len() {
+            self.hist_pos += 1;
+            if self.hist_pos == self.history.len() {
+                self.line.clear();
+            } else {
+                self.line = self.history[self.hist_pos].clone();
+            }
+            self.cursor = self.line.len();
+            self.redraw();
         }
-        self.hist_idx += 1;
-        if self.hist_idx == self.history.len() {
-            self.line.clear();
-        } else {
-            self.line = self.history[self.hist_idx].clone();
-        }
-        self.cursor = self.line.len();
-        redraw(&self.line, &mut self.echoed);
     }
 
-    fn ctrl_c(&mut self) {
-        out("^C\n");
+    fn cancel(&mut self) {
+        out("\n");
         self.line.clear();
         self.cursor = 0;
-        self.echoed = 0;
-        self.hist_idx = self.history.len();
-        out(self.prompt);
+        self.hist_pos = self.history.len();
+        out(&self.prompt);
     }
 
     fn clear_screen(&mut self) {
-        out("\x0c"); // form feed: gui_terminal clears the scrollback
-        out(self.prompt);
-        self.echoed = 0;
-        redraw(&self.line, &mut self.echoed);
+        out("\x1b[2J\x1b[H");
+        self.redraw();
     }
 
     fn submit(&mut self) {
         out("\n");
         let entered = core::mem::take(&mut self.line);
         self.cursor = 0;
-        self.echoed = 0;
         let trimmed = entered.trim();
-        if !trimmed.is_empty() && self.history.last().map(|s| s.as_str()) != Some(trimmed) {
-            self.history.push(String::from(trimmed));
+        if !trimmed.is_empty()
+            && self.history.last().map(|s| s.as_str()) != Some(entered.as_str())
+        {
+            self.history.push(entered.clone());
         }
-        self.hist_idx = self.history.len();
+        self.hist_pos = self.history.len();
         run(&entered);
-        out(self.prompt);
+        out(&self.prompt);
     }
 
-    /// Feed one raw byte from the pty through the editor / ESC state machine.
-    fn byte(&mut self, b: u8) {
-        match self.esc {
-            Esc::Esc => {
-                self.esc = if b == b'[' { Esc::Csi } else { Esc::Normal };
-                return;
-            }
-            Esc::Csi => {
-                match b {
-                    b'0'..=b'9' => {
-                        self.param = self.param.saturating_mul(10).saturating_add((b - b'0') as u32);
-                        return; // keep collecting the numeric parameter
-                    }
-                    b'A' => self.hist_prev(),
-                    b'B' => self.hist_next(),
-                    b'C' => self.right(),
-                    b'D' => self.left(),
-                    b'H' => self.home(),
-                    b'F' => self.end(),
-                    b'~' => {
-                        if self.param == 3 {
-                            self.del_forward(); // ESC[3~ = Delete
-                        }
-                    }
-                    _ => {}
-                }
-                self.param = 0;
-                self.esc = Esc::Normal;
-                return;
-            }
-            Esc::Normal => {}
-        }
-        match b {
-            0x1b => self.esc = Esc::Esc,
-            b'\r' | b'\n' => self.submit(),
-            0x08 | 0x7f => self.backspace(),
-            0x03 => self.ctrl_c(),
-            0x04 => {
-                if self.line.is_empty() {
-                    out("\n");
-                    libdunit::exit(0);
-                }
-            }
-            0x0c => self.clear_screen(),
-            0x20..=0x7e => self.insert(b as char),
-            _ => {}
+    fn redraw(&self) {
+        out("\r");
+        out(&self.prompt);
+        out(&self.line);
+        out("\x1b[K");
+        let back = self.line.len() - self.cursor;
+        if back > 0 {
+            out(&format!("\x1b[{}D", back));
         }
     }
 }
@@ -365,32 +621,37 @@ impl Ed {
 #[no_mangle]
 pub extern "C" fn _start(
     argc: usize,
-    argv: libdunit::RawArgv,
-    envp: libdunit::RawEnvp,
+    argv: *const *const u8,
+    envp: *const *const u8,
 ) -> ! {
     libdunit::init_runtime(argc, argv, envp);
-    // The prompt is desktop policy: the terminal passes its `[terminal] prompt`
-    // through the environment (see `pty_spawn_env`). Fall back to the built-in
-    // default when launched without one.
-    let prompt = libdunit::getenv("PROMPT").unwrap_or(PROMPT_DEFAULT);
-    out(prompt);
-    let mut ed = Ed::new(prompt);
+    // The terminal passes its configured `[terminal] prompt` via the pty-spawn
+    // environment; fall back to the built-in default when launched without one.
+    let prompt_word = libdunit::getenv("PROMPT").unwrap_or(PROMPT_DEFAULT);
+    let mut ed = Ed::new(prompt_word);
+    ed.start();
+
     let mut buf = [0u8; 128];
     loop {
         let n = libdunit::read(0, &mut buf);
-        if n == libdunit::EAGAIN {
-            // Block on a short timer instead of spinning on yield: the timer-wake
-            // path reliably re-schedules us, whereas a bare yield can be dropped
-            // from the round-robin under timer preemption.
-            libdunit::sleep_ms(5);
-            continue;
-        }
-        if n <= 0 {
-            // EOF (master gone) or error — nothing more to do.
+        if n > 0 {
+            for i in 0..(n as usize) {
+                ed.feed(buf[i]);
+            }
+        } else if n == 0 {
+            // EOF on stdin: the terminal (pty master) went away — exit cleanly.
             libdunit::exit(0);
-        }
-        for &b in &buf[..n as usize] {
-            ed.byte(b);
+        } else {
+            // EAGAIN or a transient error: nothing to read yet, back off briefly.
+            libdunit::sleep_ms(5);
         }
     }
 }
+
+
+
+
+
+
+
+

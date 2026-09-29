@@ -31,7 +31,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "gui_calc"
+name = "gui_demo"
 version = "0.1.0"
 dependencies = [
  "dunit_render",

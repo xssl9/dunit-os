@@ -561,11 +561,33 @@ pub struct Shortcuts {
     pub switcher: bool,
     /// Modifier that arms the switcher (Tab is the fixed trigger key).
     pub switch_mod: SwitchMod,
+    /// Modifier that arms the global desktop command shortcuts below (the
+    /// tiling-WM `$mod` key). Only the modifier is policy — the action KEYS
+    /// (digits for workspaces, Space/Q/M) are UI invariants, exactly like the
+    /// switcher's Tab. Alt or Super.
+    pub cmd_mod: SwitchMod,
+    /// `cmd_mod`+digit(1..=workspaces) jumps to that virtual workspace.
+    pub ws_switch: bool,
+    /// `cmd_mod`+Space opens the application launcher menu (keyboard-navigable).
+    pub launcher: bool,
+    /// `cmd_mod`+Q closes the focused window (same path as the close chip).
+    pub win_close: bool,
+    /// `cmd_mod`+M toggles maximize on the focused window (same path as the
+    /// maximize chip — a server-push CONFIGURE).
+    pub win_max: bool,
 }
 
 impl Shortcuts {
     pub const fn baseline() -> Self {
-        Shortcuts { switcher: true, switch_mod: SwitchMod::Alt }
+        Shortcuts {
+            switcher: true,
+            switch_mod: SwitchMod::Alt,
+            cmd_mod: SwitchMod::Super,
+            ws_switch: true,
+            launcher: true,
+            win_close: true,
+            win_max: true,
+        }
     }
 
     fn apply(&mut self, key: &str, value: &str) {
@@ -578,6 +600,31 @@ impl Shortcuts {
             "switch_mod" => {
                 if let Some(m) = SwitchMod::parse(value) {
                     self.switch_mod = m;
+                }
+            }
+            "cmd_mod" => {
+                if let Some(m) = SwitchMod::parse(value) {
+                    self.cmd_mod = m;
+                }
+            }
+            "ws_switch" => {
+                if let Some(b) = parse_bool(value) {
+                    self.ws_switch = b;
+                }
+            }
+            "launcher" => {
+                if let Some(b) = parse_bool(value) {
+                    self.launcher = b;
+                }
+            }
+            "win_close" => {
+                if let Some(b) = parse_bool(value) {
+                    self.win_close = b;
+                }
+            }
+            "win_max" => {
+                if let Some(b) = parse_bool(value) {
+                    self.win_max = b;
                 }
             }
             _ => {}
@@ -1401,6 +1448,11 @@ pub fn to_toml(s: &Settings) -> String {
     out.push_str("[shortcuts]\n");
     push_bool(&mut out, "switcher", s.shortcuts.switcher);
     push_string(&mut out, "switch_mod", s.shortcuts.switch_mod.as_str());
+    push_string(&mut out, "cmd_mod", s.shortcuts.cmd_mod.as_str());
+    push_bool(&mut out, "ws_switch", s.shortcuts.ws_switch);
+    push_bool(&mut out, "launcher", s.shortcuts.launcher);
+    push_bool(&mut out, "win_close", s.shortcuts.win_close);
+    push_bool(&mut out, "win_max", s.shortcuts.win_max);
     out.push('\n');
 
     out.push_str("[quicksettings]\n");
@@ -1627,6 +1679,179 @@ impl FilesCfg {
                 "label" => if let Some(c) = parse_color(unquote(rhs)) { self.label = c; },
                 "muted" => if let Some(c) = parse_color(unquote(rhs)) { self.muted = c; },
                 "sel_bg" => if let Some(c) = parse_color(unquote(rhs)) { self.sel_bg = c; },
+                "bg_alpha" => if let Some(n) = parse_uint(rhs) { self.bg_alpha = n.min(255); },
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Per-calculator config (`apps/gui_calc.toml`, table `[calc]`). Mirrors the
+/// palette knobs the calculator used to hardcode as `COLOR_*` consts. `font`
+/// empty means "inherit the desktop `[desktop] font`"; `bg_alpha` 255 keeps the
+/// opaque XRGB fast path (values <255 request a translucent ARGB backdrop, like
+/// the terminal/file-manager). The button-role colors are the single source of
+/// truth for the calculator face — the app reads them, no `const COLOR_*`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct CalcCfg {
+    pub font: ConfigStr,
+    /// Window background (behind the display + button grid).
+    pub bg: u32,
+    /// Result/entry display strip fill.
+    pub display_bg: u32,
+    /// Primary text (display value + button glyphs).
+    pub text: u32,
+    /// Secondary text (the pending-expression line above the result).
+    pub muted: u32,
+    /// Digit + dot buttons.
+    pub btn: u32,
+    /// Function buttons (Clear, backspace, percent, sign).
+    pub btn_fn: u32,
+    /// Operator buttons (÷ × − +).
+    pub btn_op: u32,
+    /// Equals button accent fill.
+    pub btn_eq: u32,
+    pub bg_alpha: u32,
+    /// True when a config file was actually found (diagnostics only).
+    pub from_file: bool,
+}
+
+impl CalcCfg {
+    pub const fn baseline() -> Self {
+        CalcCfg {
+            font: ConfigStr::new(""),
+            bg: 0xFF1E_1E2E,
+            display_bg: 0xFF18_1825,
+            text: 0xFFCD_D6F4,
+            muted: 0xFF8A_94A8,
+            btn: 0xFF31_3244,
+            btn_fn: 0xFF45_475A,
+            btn_op: 0xFF25_6D85,
+            btn_eq: 0xFF2D_7D46,
+            bg_alpha: 255,
+            from_file: false,
+        }
+    }
+
+    /// Load `apps/<app_id>.toml`, overlaying `[calc]` onto the baseline.
+    pub fn load(app_id: &str) -> Self {
+        let mut c = Self::baseline();
+        if let Some(text) = read_file(&config_path(APPS_DIR, app_id)) {
+            c.from_file = true;
+            c.parse(&text);
+        }
+        c
+    }
+
+    fn parse(&mut self, text: &str) {
+        let mut section = String::new();
+        for raw in text.lines() {
+            let line = strip_comment(raw).trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(name) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                section.clear();
+                section.push_str(name.trim());
+                continue;
+            }
+            if section != "calc" {
+                continue;
+            }
+            let Some(eq) = line.find('=') else { continue };
+            let key = line[..eq].trim();
+            let rhs = line[eq + 1..].trim();
+            match key {
+                "font" => self.font.set(unquote(rhs)),
+                "bg" => if let Some(c) = parse_color(unquote(rhs)) { self.bg = c; },
+                "display_bg" => if let Some(c) = parse_color(unquote(rhs)) { self.display_bg = c; },
+                "text" => if let Some(c) = parse_color(unquote(rhs)) { self.text = c; },
+                "muted" => if let Some(c) = parse_color(unquote(rhs)) { self.muted = c; },
+                "btn" => if let Some(c) = parse_color(unquote(rhs)) { self.btn = c; },
+                "btn_fn" => if let Some(c) = parse_color(unquote(rhs)) { self.btn_fn = c; },
+                "btn_op" => if let Some(c) = parse_color(unquote(rhs)) { self.btn_op = c; },
+                "btn_eq" => if let Some(c) = parse_color(unquote(rhs)) { self.btn_eq = c; },
+                "bg_alpha" => if let Some(n) = parse_uint(rhs) { self.bg_alpha = n.min(255); },
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Per-app config for the demo/tests client (`apps/gui_demo.toml`, table
+/// `[demo]`). `gui_demo` is a small showcase app: a column of buttons that post
+/// desktop notifications through the compositor (the NOTIFY control message), so
+/// its palette is the whole config surface. `font` empty inherits the desktop
+/// `[desktop] font`; `bg_alpha` 255 keeps the opaque XRGB fast path (values <255
+/// request a translucent ARGB backdrop). Colors are the single source of truth
+/// for the demo face — the app reads them, no `const COLOR_*`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct DemoCfg {
+    pub font: ConfigStr,
+    /// Window background.
+    pub bg: u32,
+    /// Primary text (title + button labels).
+    pub text: u32,
+    /// Secondary text (the subtitle / hint line).
+    pub muted: u32,
+    /// Button base fill.
+    pub btn: u32,
+    /// Accent fill for the primary action button + title rule.
+    pub accent: u32,
+    pub bg_alpha: u32,
+    /// True when a config file was actually found (diagnostics only).
+    pub from_file: bool,
+}
+
+impl DemoCfg {
+    pub const fn baseline() -> Self {
+        DemoCfg {
+            font: ConfigStr::new(""),
+            bg: 0xFF1E_1E2E,
+            text: 0xFFCD_D6F4,
+            muted: 0xFF8A_94A8,
+            btn: 0xFF31_3244,
+            accent: 0xFF2D_7D46,
+            bg_alpha: 255,
+            from_file: false,
+        }
+    }
+
+    /// Load `apps/<app_id>.toml`, overlaying `[demo]` onto the baseline.
+    pub fn load(app_id: &str) -> Self {
+        let mut c = Self::baseline();
+        if let Some(text) = read_file(&config_path(APPS_DIR, app_id)) {
+            c.from_file = true;
+            c.parse(&text);
+        }
+        c
+    }
+
+    fn parse(&mut self, text: &str) {
+        let mut section = String::new();
+        for raw in text.lines() {
+            let line = strip_comment(raw).trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(name) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                section.clear();
+                section.push_str(name.trim());
+                continue;
+            }
+            if section != "demo" {
+                continue;
+            }
+            let Some(eq) = line.find('=') else { continue };
+            let key = line[..eq].trim();
+            let rhs = line[eq + 1..].trim();
+            match key {
+                "font" => self.font.set(unquote(rhs)),
+                "bg" => if let Some(c) = parse_color(unquote(rhs)) { self.bg = c; },
+                "text" => if let Some(c) = parse_color(unquote(rhs)) { self.text = c; },
+                "muted" => if let Some(c) = parse_color(unquote(rhs)) { self.muted = c; },
+                "btn" => if let Some(c) = parse_color(unquote(rhs)) { self.btn = c; },
+                "accent" => if let Some(c) = parse_color(unquote(rhs)) { self.accent = c; },
                 "bg_alpha" => if let Some(n) = parse_uint(rhs) { self.bg_alpha = n.min(255); },
                 _ => {}
             }

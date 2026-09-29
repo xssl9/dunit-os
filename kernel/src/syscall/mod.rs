@@ -240,6 +240,10 @@ pub struct SystemStats {
     pub net_supported_nics: u64,
     pub net_mmio_ready_nics: u64,
     pub net_mac_ready_nics: u64,
+    /// Timer frequency in Hz (`clock::TICKS_PER_SECOND`). Exposed so userspace
+    /// (e.g. `dsh uptime`) can convert `uptime_ticks` to wall time WITHOUT
+    /// duplicating the kernel's tick-rate invariant — single source of truth.
+    pub uptime_hz: u64,
 }
 
 #[repr(C)]
@@ -1677,6 +1681,7 @@ fn sys_get_system_stats(info: *mut SystemStats) -> i64 {
         net_supported_nics: net.supported_nics as u64,
         net_mmio_ready_nics: net.mmio_ready_nics as u64,
         net_mac_ready_nics: net.mac_ready_nics as u64,
+        uptime_hz: crate::clock::TICKS_PER_SECOND,
     };
     let bytes = unsafe {
         core::slice::from_raw_parts(

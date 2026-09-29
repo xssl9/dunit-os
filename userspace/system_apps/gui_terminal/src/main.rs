@@ -104,7 +104,8 @@ const POLL_MS: u64 = 40;
 // APPEND_MARKER
 
 /// The window's text font, embedded in the ELF (M4 still ships assets in-image).
-static FONT_BYTES: &[u8] = include_bytes!("../../../../assets/fonts/DejaVuSans.ttf");
+/// Monospace so the cell-grid columns line up even on the built-in fallback path.
+static FONT_BYTES: &[u8] = include_bytes!("../../../../assets/fonts/DejaVuSansMono.ttf");
 
 /// Load the terminal's TTF, falling back to the embedded `FONT_BYTES` on any
 /// error. Prefers the per-terminal `[terminal] font` when set; otherwise the
@@ -141,11 +142,26 @@ fn u64_at(p: &[u8], off: usize) -> u64 {
 /// const; the *colors* below are config-driven via `TerminalCfg`.
 const FONT_PX: f32 = 13.0;
 const ROW_PX: i32 = 16;
+/// Padding from the surface edge to the first cell (both axes).
+const PAD_X: i32 = 8;
+const PAD_Y: i32 = 8;
 
 /// Visible text rows that fit in a surface `h` px tall: an 8px top pad, then one
 /// `ROW_PX`-tall row each. At least one row so a tiny surface still paints.
 fn visible_rows_for(h: u32) -> usize {
-    (((h as i32 - 8) / ROW_PX).max(1)) as usize
+    (((h as i32 - PAD_Y) / ROW_PX).max(1)) as usize
+}
+
+/// Columns that fit in a surface `w` px wide at the monospace `cell_w`.
+fn cols_for(w: u32, cell_w: i32) -> usize {
+    (((w as i32 - 2 * PAD_X) / cell_w).max(1)) as usize
+}
+
+/// Monospace cell width in px: the advance of a representative glyph at `FONT_PX`.
+/// For a monospace font every glyph shares this advance, so it defines the grid.
+fn mono_cell_w(font: &Font) -> i32 {
+    let (_g, adv) = font.layout_line("M", FONT_PX);
+    ((adv + 0.5) as i32).max(1)
 }
 
 /// The live text palette, resolved from `[terminal]` config (`fg`, `ansi[8]`,
@@ -169,10 +185,26 @@ fn col(argb: u32) -> Color {
     )
 }
 
-/// One colored run of text within a scrollback line.
-struct Span {
-    text: String,
+/// One screen cell: a glyph plus its SGR foreground color. The background is the
+/// surface-wide `bg` (config `[terminal] bg`/`bg_alpha`), so cells carry only what
+/// the shell actually controls per character.
+#[derive(Clone, Copy)]
+struct Cell {
+    ch: char,
     fg: u32,
+}
+
+impl Cell {
+    fn blank(fg: u32) -> Self {
+        Cell { ch: ' ', fg }
+    }
+}
+
+/// A fresh row of `cols` blank cells in the default foreground.
+fn blank_row(cols: usize, fg: u32) -> Vec<Cell> {
+    let mut r: Vec<Cell> = Vec::new();
+    r.resize(cols, Cell::blank(fg));
+    r
 }
 
 /// ESC-sequence parser state for interpreting the shell's stdout byte stream.
@@ -182,17 +214,24 @@ enum Esc {
     Csi,
 }
 
-/// On-screen terminal model: completed lines (each a run of colored `Span`s)
-/// plus the line currently being assembled. `feed` interprets the byte stream —
-/// printable ASCII appends to the active span, `\n` commits a row, `\f` clears,
-/// `\b` erases, and CSI sequences (`ESC [ … m` etc.) drive SGR colors. `dirty`
-/// gates repaints.
+/// On-screen terminal model: a real character CELL GRID (`rows`×`cols`) with a
+/// cursor at (`crow`, `ccol`), plus a `scrollback` of rows that scrolled off the
+/// top. `feed` interprets the shell's bytes like a VT — printable ASCII writes at
+/// the cursor and advances it (wrapping at the right edge), `\r` returns to column
+/// 0, `\n` is CR+LF, `\t` tabs, `\f`/`ESC[2J` clear, `\b` steps left, and the CSI
+/// cursor/erase finals (`H`/`f`/`A`/`B`/`C`/`D`/`G`/`d`/`J`/`K`/`m`) move the cursor
+/// and blank cells — so `dsh`'s `\r`+text+`ESC[K`+`ESC[nD` line editing renders with
+/// a correct caret, like a raw terminal.
 struct Term {
-    lines: Vec<Vec<Span>>,
-    cur: Vec<Span>,
+    scrollback: Vec<Vec<Cell>>,
+    grid: Vec<Vec<Cell>>,
+    cols: usize,
+    rows: usize,
+    crow: usize,
+    ccol: usize,
     fg: u32,
     dirty: bool,
-    /// Rows scrolled up from the live bottom (0 = following new output).
+    /// Rows the view is lifted above the live bottom (0 = following new output).
     scroll: usize,
     esc: Esc,
     params: [u32; 8],
@@ -201,13 +240,26 @@ struct Term {
     has_param: bool,
     /// Config-resolved colors (default fg + the 16 ANSI slots).
     palette: Palette,
+    /// Monospace cell width in px (grid column pitch).
+    cell_w: i32,
+    /// Logical current-line accumulator for the `[term]` serial echo — tracks the
+    /// shell's line independent of on-screen column wrapping (see `flush_echo`).
+    echo: String,
 }
 
 impl Term {
-    fn new(palette: Palette) -> Self {
+    fn new(palette: Palette, cols: usize, rows: usize, cell_w: i32) -> Self {
+        let mut grid: Vec<Vec<Cell>> = Vec::new();
+        for _ in 0..rows {
+            grid.push(blank_row(cols, palette.fg));
+        }
         Term {
-            lines: Vec::new(),
-            cur: Vec::new(),
+            scrollback: Vec::new(),
+            grid,
+            cols,
+            rows,
+            crow: 0,
+            ccol: 0,
             fg: palette.fg,
             dirty: true,
             scroll: 0,
@@ -217,13 +269,15 @@ impl Term {
             param: 0,
             has_param: false,
             palette,
+            cell_w,
+            echo: String::new(),
         }
     }
 
     /// Move the view up (`up = true`) or down through the scrollback by `rows`,
     /// clamped so it never scrolls past the top or below the live bottom.
     fn scroll_by(&mut self, rows: usize, up: bool) {
-        let max = self.lines.len().saturating_sub(1);
+        let max = self.scrollback.len();
         self.scroll = if up {
             (self.scroll + rows).min(max)
         } else {
@@ -232,47 +286,160 @@ impl Term {
         self.dirty = true;
     }
 
-    /// Append one printable char to the active span, opening a new run when the
-    /// current foreground color differs from the last span's.
-    fn push_char(&mut self, c: char) {
-        let need_new = match self.cur.last() {
-            Some(s) => s.fg != self.fg,
-            None => true,
-        };
-        if need_new {
-            self.cur.push(Span { text: String::new(), fg: self.fg });
+    /// Push the top grid row into scrollback and open a fresh blank bottom row —
+    /// the screen scrolled up by one line.
+    fn scroll_up(&mut self) {
+        let row = self.grid.remove(0);
+        self.scrollback.push(row);
+        if self.scrollback.len() > SCROLL_CAP {
+            let excess = self.scrollback.len() - SCROLL_CAP;
+            self.scrollback.drain(0..excess);
         }
-        self.cur.last_mut().unwrap().text.push(c);
-    }
-
-    fn commit_line(&mut self) {
-        let done = core::mem::take(&mut self.cur);
-        // Echo the row's text to serial so the shell path stays headlessly
-        // verifiable (our own stdout/console, not the pty).
-        libdunit::write(1, b"[term] ");
-        for s in &done {
-            libdunit::write(1, s.text.as_bytes());
-        }
-        libdunit::write(1, b"\n");
-        self.lines.push(done);
-        if self.lines.len() > SCROLL_CAP {
-            let excess = self.lines.len() - SCROLL_CAP;
-            self.lines.drain(0..excess);
-        }
+        self.grid.push(blank_row(self.cols, self.palette.fg));
         self.scroll = 0; // new output snaps the view back to the live bottom
     }
 
-    /// Erase the last char of the active line (crossing span boundaries).
-    fn backspace(&mut self) {
-        while let Some(s) = self.cur.last_mut() {
-            if s.text.pop().is_some() {
-                if s.text.is_empty() {
-                    self.cur.pop();
-                }
-                return;
-            }
-            self.cur.pop();
+    /// Advance to the next row (scrolling at the bottom) and return to column 0.
+    /// `flush` emits the logical echo line for a real `\n`; a column wrap passes
+    /// false so the wrapped text stays one logical `[term]` echo.
+    fn newline(&mut self, flush: bool) {
+        if flush {
+            self.flush_echo();
         }
+        self.crow += 1;
+        if self.crow >= self.rows {
+            self.scroll_up();
+            self.crow = self.rows - 1;
+        }
+        self.ccol = 0;
+    }
+
+    /// Emit the accumulated logical line to fd 1 as `[term] <line>` — the headless
+    /// verification channel (our own stdout, not the pty) — then reset it.
+    fn flush_echo(&mut self) {
+        libdunit::write(1, b"[term] ");
+        libdunit::write(1, self.echo.as_bytes());
+        libdunit::write(1, b"\n");
+        self.echo.clear();
+    }
+
+    /// Write one printable char at the cursor, wrapping at the right edge, and
+    /// advance. The char also appends to the logical echo line.
+    fn put_char(&mut self, c: char) {
+        if self.ccol >= self.cols {
+            self.newline(false);
+        }
+        self.grid[self.crow][self.ccol] = Cell { ch: c, fg: self.fg };
+        self.ccol += 1;
+        self.echo.push(c);
+    }
+
+    /// Move the cursor one column left (non-destructive, like a raw terminal BS).
+    fn backspace(&mut self) {
+        if self.ccol > 0 {
+            self.ccol -= 1;
+        }
+        self.echo.pop();
+    }
+
+    /// Advance to the next 8-column tab stop (clamped inside the row).
+    fn tab(&mut self) {
+        let next = ((self.ccol / 8) + 1) * 8;
+        self.ccol = next.min(self.cols.saturating_sub(1));
+        self.echo.push(' ');
+    }
+
+    /// Blank every cell and home the cursor (`\f` / `ESC[2J`+`ESC[H`).
+    fn clear_screen(&mut self) {
+        let fg = self.palette.fg;
+        for row in self.grid.iter_mut() {
+            for cell in row.iter_mut() {
+                *cell = Cell::blank(fg);
+            }
+        }
+        self.crow = 0;
+        self.ccol = 0;
+        self.echo.clear();
+        self.scroll = 0;
+    }
+
+    /// Erase within the cursor row (EL): 0 = to end, 1 = to start, 2 = whole line.
+    fn erase_line(&mut self, mode: u32) {
+        let (a, b) = match mode {
+            1 => (0, self.ccol + 1),
+            2 => (0, self.cols),
+            _ => (self.ccol, self.cols),
+        };
+        let fg = self.palette.fg;
+        let end = b.min(self.cols);
+        for cell in self.grid[self.crow].iter_mut().take(end).skip(a) {
+            *cell = Cell::blank(fg);
+        }
+        if mode == 2 {
+            self.echo.clear();
+        }
+    }
+    // ERASE_RESIZE_MARKER
+
+    /// Erase within the screen (ED): 0 = cursor→end, 1 = start→cursor, 2 = all.
+    fn erase_display(&mut self, mode: u32) {
+        let fg = self.palette.fg;
+        match mode {
+            2 => {
+                for row in self.grid.iter_mut() {
+                    for cell in row.iter_mut() {
+                        *cell = Cell::blank(fg);
+                    }
+                }
+                self.echo.clear();
+            }
+            1 => {
+                for r in 0..self.crow {
+                    for cell in self.grid[r].iter_mut() {
+                        *cell = Cell::blank(fg);
+                    }
+                }
+                self.erase_line(1);
+            }
+            _ => {
+                self.erase_line(0);
+                for r in (self.crow + 1)..self.rows {
+                    for cell in self.grid[r].iter_mut() {
+                        *cell = Cell::blank(fg);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Resize the grid on a compositor CONFIGURE, keeping what fits: rows pushed
+    /// off the top spill into scrollback; the cursor is clamped into range.
+    fn resize(&mut self, cols: usize, rows: usize) {
+        if cols == self.cols && rows == self.rows {
+            return;
+        }
+        let fg = self.palette.fg;
+        for row in self.grid.iter_mut() {
+            row.resize(cols, Cell::blank(fg));
+        }
+        let mut removed_top = 0usize;
+        while self.grid.len() > rows {
+            let r = self.grid.remove(0);
+            self.scrollback.push(r);
+            removed_top += 1;
+        }
+        while self.grid.len() < rows {
+            self.grid.push(blank_row(cols, fg));
+        }
+        if self.scrollback.len() > SCROLL_CAP {
+            let excess = self.scrollback.len() - SCROLL_CAP;
+            self.scrollback.drain(0..excess);
+        }
+        self.cols = cols;
+        self.rows = rows;
+        self.crow = self.crow.saturating_sub(removed_top).min(rows.saturating_sub(1));
+        self.ccol = self.ccol.min(cols.saturating_sub(1));
+        self.dirty = true;
     }
 
     /// Apply the collected SGR (`ESC [ … m`) params to the live foreground.
@@ -297,6 +464,39 @@ impl Term {
         self.param = 0;
         self.has_param = false;
     }
+
+    /// Parameter `i` with a fallback when absent OR zero (CSI convention: an
+    /// omitted/zero cursor-motion parameter means 1).
+    fn param_or(&self, i: usize, default: u32) -> u32 {
+        let v = if i < self.nparams { self.params[i] } else { 0 };
+        if v == 0 { default } else { v }
+    }
+
+    /// Raw parameter `i` (0 when absent) — for ED/EL, where 0 is a real mode.
+    fn param_raw(&self, i: usize) -> u32 {
+        if i < self.nparams { self.params[i] } else { 0 }
+    }
+
+    /// Handle a CSI final byte: SGR color, cursor motion, and erase.
+    fn dispatch_csi(&mut self, final_byte: u8) {
+        match final_byte {
+            b'm' => self.apply_sgr(),
+            b'A' => self.crow = self.crow.saturating_sub(self.param_or(0, 1) as usize),
+            b'B' => self.crow = (self.crow + self.param_or(0, 1) as usize).min(self.rows - 1),
+            b'C' => self.ccol = (self.ccol + self.param_or(0, 1) as usize).min(self.cols - 1),
+            b'D' => self.ccol = self.ccol.saturating_sub(self.param_or(0, 1) as usize),
+            b'G' => self.ccol = (self.param_or(0, 1) as usize - 1).min(self.cols - 1),
+            b'd' => self.crow = (self.param_or(0, 1) as usize - 1).min(self.rows - 1),
+            b'H' | b'f' => {
+                self.crow = (self.param_or(0, 1) as usize - 1).min(self.rows - 1);
+                self.ccol = (self.param_or(1, 1) as usize - 1).min(self.cols - 1);
+            }
+            b'J' => self.erase_display(self.param_raw(0)),
+            b'K' => self.erase_line(self.param_raw(0)),
+            _ => {} // other finals / private modes: consumed
+        }
+    }
+
     /// Feed one chunk of raw shell stdout through the ESC state machine.
     fn feed(&mut self, bytes: &[u8]) {
         for &b in bytes {
@@ -317,15 +517,7 @@ impl Term {
                             if self.has_param || self.nparams > 0 {
                                 self.push_param();
                             }
-                            if b == b'm' {
-                                self.apply_sgr();
-                            } else if b == b'J' {
-                                // ESC[2J (and bare) — clear the scrollback.
-                                self.lines.clear();
-                                self.cur.clear();
-                            }
-                            // Other finals (H/K/cursor moves, `?` private modes)
-                            // are consumed but not modeled by the scroll view.
+                            self.dispatch_csi(b);
                             self.nparams = 0;
                             self.param = 0;
                             self.has_param = false;
@@ -339,14 +531,15 @@ impl Term {
             }
             match b {
                 0x1b => self.esc = Esc::Esc,
-                b'\n' => self.commit_line(),
-                b'\r' => {}
-                0x0c => {
-                    self.lines.clear();
-                    self.cur.clear();
+                b'\n' => self.newline(true),
+                b'\r' => {
+                    self.ccol = 0;
+                    self.echo.clear();
                 }
+                b'\t' => self.tab(),
+                0x0c => self.clear_screen(),
                 0x08 => self.backspace(),
-                0x20..=0x7e => self.push_char(b as char),
+                0x20..=0x7e => self.put_char(b as char),
                 _ => {}
             }
         }
@@ -373,9 +566,9 @@ fn draw_text(surf: &mut Surface, font: &Font, x: i32, y_top: i32, color: Color, 
     adv
 }
 
-/// Paint the scrollback into the mapped ARGB8888 buffer: fill the background,
-/// then draw the last `visible_rows_for(h)` rows (completed lines plus the
-/// in-progress line) as sequences of colored spans, advancing the pen per span.
+/// Paint the cell grid into the mapped ARGB8888 buffer: fill the background,
+/// then draw the visible window of the document (scrollback rows followed by the
+/// live grid rows) as monospace cells, and finally a block caret at the cursor.
 /// `w`/`h` are the surface's CURRENT size — the compositor can resize us via a
 /// server-pushed CONFIGURE, so paint against the live geometry, not the consts.
 /// `bg` is the config-resolved background as `0xAARRGGBB`: its alpha (from
@@ -388,29 +581,64 @@ fn render(px: *mut u8, font: &Font, term: &Term, w: u32, h: u32, bg: u32) {
     let mut surf = Surface::new(pixels, w as usize, h as usize);
     surf.clear(col(bg));
 
-    // The document is `lines` (completed rows) followed by the in-progress
-    // `cur` row at index `lines.len()`. `scroll` counts how many rows the view
-    // is lifted above the live bottom (0 = pinned to `cur`).
-    let visible = visible_rows_for(h);
-    let total = term.lines.len() + 1; // +1 for the in-progress line
-    let bottom = (total - 1).saturating_sub(term.scroll); // last visible row index
+    // The document is `scrollback` (evicted rows) followed by the live `grid`.
+    // `scroll` counts how many rows the view is lifted above the live bottom
+    // (0 = pinned to the bottom, where the cursor lives).
+    let sb = term.scrollback.len();
+    let total = sb + term.rows;
+    let visible = term.rows.min(total);
+    let bottom = (total - 1).saturating_sub(term.scroll);
     let start = (bottom + 1).saturating_sub(visible);
-    let mut y = 8; // top padding
-    let mut draw_row = |spans: &[Span]| {
-        let mut x = 8; // left padding
-        for s in spans {
-            if !s.text.is_empty() {
-                x += draw_text(&mut surf, font, x, y, col(s.fg), &s.text) as i32;
-            }
-        }
-        y += ROW_PX;
-    };
-    for idx in start..=bottom {
-        if idx < term.lines.len() {
-            draw_row(&term.lines[idx]);
+    for (i, idx) in (start..=bottom).enumerate() {
+        let y = PAD_Y + i as i32 * ROW_PX;
+        let row = if idx < sb {
+            &term.scrollback[idx]
         } else {
-            draw_row(&term.cur);
+            &term.grid[idx - sb]
+        };
+        draw_row(&mut surf, font, term.cell_w, y, row);
+    }
+
+    // Block caret: only when pinned to the bottom (scroll == 0), drawn as a
+    // translucent overlay so it reads as a cursor without re-rendering a glyph.
+    if term.scroll == 0 {
+        let cx = PAD_X + term.ccol as i32 * term.cell_w;
+        let cy = PAD_Y + term.crow as i32 * ROW_PX;
+        let c = col(term.fg);
+        surf.fill_rect(
+            cx as f32,
+            cy as f32,
+            term.cell_w as f32,
+            ROW_PX as f32,
+            Color::rgba(c.r, c.g, c.b, 150),
+        );
+    }
+}
+
+/// Draw one grid row of monospace cells with its top at `y`. Cells are grouped
+/// into runs of identical foreground colour (so a whole colour span is laid out
+/// in one `draw_text`, keeping glyph spacing natural) and each run is placed at
+/// its starting column `c0 * cell_w`, which keeps every cell on the monospace
+/// lattice. Trailing blank cells past the last glyph are skipped.
+fn draw_row(surf: &mut Surface, font: &Font, cell_w: i32, y: i32, row: &[Cell]) {
+    let last = match row.iter().rposition(|c| c.ch != ' ') {
+        Some(i) => i,
+        None => return, // empty row: nothing to paint (background already cleared)
+    };
+    let mut c0 = 0usize;
+    while c0 <= last {
+        let fg = row[c0].fg;
+        let mut c1 = c0;
+        while c1 <= last && row[c1].fg == fg {
+            c1 += 1;
         }
+        let mut run = String::new();
+        for cell in &row[c0..c1] {
+            run.push(cell.ch);
+        }
+        let x = PAD_X + c0 as i32 * cell_w;
+        draw_text(surf, font, x, y, col(fg), &run);
+        c0 = c1;
     }
 }
 
@@ -560,13 +788,13 @@ pub extern "C" fn _start() -> ! {
             libdunit::exit(7);
         }
     };
-    let mut term = Term::new(palette);
+    let cell_w = mono_cell_w(&font);
+    let mut term = Term::new(palette, cols_for(W, cell_w), visible_rows_for(H), cell_w);
     // The surface's live geometry. The compositor may resize us via a
     // server-pushed CONFIGURE, so track it rather than reusing the W/H consts.
     let mut cur_buf = buf;
     let mut cur_w = W;
     let mut cur_h = H;
-    let mut visible_rows = visible_rows_for(H);
     render(px, &font, &term, cur_w, cur_h, bg);
 
     let mut rx = [0u8; 256];
@@ -686,16 +914,21 @@ pub extern "C" fn _start() -> ! {
                 let ack = Request::AckConfigure { configure: tok }.encode(SURFACE, serial);
                 serial += 1;
                 libdunit::ipc_send(compositor, &ack);
-            } else if let Some((nb, npx)) =
-                resize_surface(compositor, cur_buf, &font, &term, nw, nh, next_obj, tok, &mut serial, bg, fmt)
-            {
-                cur_buf = nb;
-                px = npx;
-                cur_w = nw;
-                cur_h = nh;
-                visible_rows = visible_rows_for(nh);
-                next_obj += 1;
-                libdunit::println("gui_terminal: reconfigured OK");
+            } else {
+                // Reflow the grid to the new geometry FIRST — resize_surface
+                // borrows the term immutably to render it into the fresh buffer,
+                // so the cell grid must already match (nw, nh).
+                term.resize(cols_for(nw, cell_w), visible_rows_for(nh));
+                if let Some((nb, npx)) =
+                    resize_surface(compositor, cur_buf, &font, &term, nw, nh, next_obj, tok, &mut serial, bg, fmt)
+                {
+                    cur_buf = nb;
+                    px = npx;
+                    cur_w = nw;
+                    cur_h = nh;
+                    next_obj += 1;
+                    libdunit::println("gui_terminal: reconfigured OK");
+                }
             }
         } else if magic == INPUT_MAGIC && n >= 8 {
             match rx[4] {
@@ -720,9 +953,9 @@ pub extern "C" fn _start() -> ! {
                     // PgUp/PgDn scroll the local view a page at a time and are
                     // never forwarded to the pty.
                     if scancode == SC_PGUP {
-                        term.scroll_by(visible_rows - 1, true);
+                        term.scroll_by(term.rows.saturating_sub(1), true);
                     } else if scancode == SC_PGDN {
-                        term.scroll_by(visible_rows - 1, false);
+                        term.scroll_by(term.rows.saturating_sub(1), false);
                     } else {
                         let mut seq = [0u8; 4];
                         let len = encode_key(scancode, mods, ascii, &mut seq);

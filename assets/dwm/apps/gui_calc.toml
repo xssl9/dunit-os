@@ -1,0 +1,31 @@
+# Dunit DWM per-app config — gui_calc (calculator).
+#
+# Loaded by the calculator at start from /system/share/dwm/apps/gui_calc.toml
+# (embedded in the kernel MemFS, writable). A missing/unparseable file falls
+# back to the calculator's built-in palette (last-known-good). Unknown keys are
+# ignored for forward compatibility.
+#
+# Colors are #RRGGBB or #AARRGGBB (alpha defaults to opaque).
+
+[calc]
+# TrueType font; empty inherits the desktop `[desktop] font`.
+font       = ""
+# Window background behind the display strip and button grid.
+bg         = "#1E1E2E"
+# Result/entry display strip fill.
+display_bg = "#181825"
+# Primary text (display value + button glyphs).
+text       = "#CDD6F4"
+# Secondary text (the pending-expression line above the result).
+muted      = "#8A94A8"
+# Digit + decimal-point buttons.
+btn        = "#313244"
+# Function buttons (Clear, backspace, percent, sign).
+btn_fn     = "#45475A"
+# Operator buttons (divide, multiply, minus, plus).
+btn_op     = "#256D85"
+# Equals button accent fill.
+btn_eq     = "#2D7D46"
+# Background opacity 0-255. 255 keeps the opaque fast path; lower requests a
+# translucent ARGB backdrop (wallpaper shows through, glyphs stay crisp).
+bg_alpha   = 255

@@ -366,6 +366,9 @@ pub struct SystemStats {
     pub net_supported_nics: u64,
     pub net_mmio_ready_nics: u64,
     pub net_mac_ready_nics: u64,
+    /// Timer frequency in Hz (kernel `clock::TICKS_PER_SECOND`), so callers can
+    /// turn `uptime_ticks` into wall time without hardcoding the tick rate.
+    pub uptime_hz: u64,
 }
 
 #[repr(C)]

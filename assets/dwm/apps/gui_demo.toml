@@ -1,0 +1,29 @@
+# Dunit DWM per-app config — gui_demo (demo / self-tests client).
+#
+# Loaded by the demo app at start from /system/share/dwm/apps/gui_demo.toml
+# (embedded in the kernel MemFS, writable). A missing/unparseable file falls
+# back to the app's built-in palette (last-known-good). Unknown keys are ignored
+# for forward compatibility.
+#
+# gui_demo is the showcase app pinned to the dock in place of the bare gui_client
+# test window: a column of buttons that each post a desktop notification (a
+# toast) through the compositor. Editing the colors here re-skins it live.
+#
+# Colors are #RRGGBB or #AARRGGBB (alpha defaults to opaque).
+
+[demo]
+# TrueType font; empty inherits the desktop `[desktop] font`.
+font     = ""
+# Window background behind the title band and button column.
+bg       = "#1E1E2E"
+# Primary text (title + button labels).
+text     = "#CDD6F4"
+# Secondary text (the subtitle / hint line under the title).
+muted    = "#8A94A8"
+# Secondary buttons (rows 2..N).
+btn      = "#313244"
+# Accent fill for the primary action button + the title rule.
+accent   = "#2D7D46"
+# Background opacity 0-255. 255 keeps the opaque fast path; lower requests a
+# translucent ARGB backdrop (wallpaper shows through, glyphs stay crisp).
+bg_alpha = 255
