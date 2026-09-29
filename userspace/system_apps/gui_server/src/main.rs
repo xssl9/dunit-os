@@ -688,6 +688,14 @@ const IN_KEY: u8 = 5;
 const IN_SCROLL: u8 = 6;
 const IN_QUIT: u8 = 9;
 
+/// How long the maximize/restore self-test waits for a client to re-import the
+/// work-area-sized buffer before advancing anyway (in desktop ticks; ~60/s, so
+/// ~4s). A resizable client grows well within this; a fixed-size client that
+/// declines the server-pushed resize is force-settled here so the self-test —
+/// and the recycle proof gated on every window reaching `st_step == 2` — never
+/// stalls on a client exercising its right to keep its own size.
+const ST_SETTLE_TICKS: u32 = 240;
+
 /// Send one input control message to a client.
 fn send_input(pid: u32, kind: u8, lx: i32, ly: i32, button: u32) {
     let mut msg = [0u8; 20];
@@ -2477,6 +2485,13 @@ struct Win {
     /// Lets the headless harness drive a full maximize->restore round trip without a
     /// mouse. Always 0 on the real desktop (`self_test` is false in `default.toml`).
     st_step: u8,
+    /// Desktop tick when this window entered `st_step == 1` (maximize pushed).
+    /// The restore leg normally waits for the client to re-import the work-area
+    /// buffer (`sw >= ww`); a client that DECLINES the server-pushed resize (a
+    /// fixed-size dialog like gui_settings never grows) would otherwise stall the
+    /// self-test forever, so after `ST_SETTLE_TICKS` we advance anyway — the
+    /// compositor must never deadlock on a client's right to keep its own size.
+    st_since: u32,
     /// Pixel format the owning client imported its buffer with (mirrored from
     /// `ClientState.format` in the per-frame sync). `FORMAT_ARGB8888` selects the
     /// per-pixel src-over blit in `blit_surface` so a translucent client (e.g. a
@@ -3201,6 +3216,7 @@ fn run_desktop_session(
             state: WinState::Floating,
             restore: None,
             st_step: 0,
+            st_since: 0,
             format: clients[i].format,
         });
         clients[i].ready = true;
@@ -3609,6 +3625,7 @@ fn run_desktop_session(
                 state: WinState::Floating,
                 restore: None,
                 st_step: 0,
+                st_since: 0,
                 format: clients[i].format,
             });
             clients[i].win_created = true;
@@ -3646,16 +3663,24 @@ fn run_desktop_session(
                 if wins[wi].st_step == 0 && wins[wi].state == WinState::Floating {
                     set_window_state(server, clients, &mut wins[wi], WinState::Maximized, bw, bh, &ly, &ins);
                     wins[wi].st_step = 1;
+                    wins[wi].st_since = ticks;
                     libdunit::println(&alloc::format!(
                         "gui_server: reconfigure w={} h={} acked (self-test)",
                         ww, wh
                     ));
-                } else if wins[wi].st_step == 1 && wins[wi].sw >= ww {
+                } else if wins[wi].st_step == 1
+                    && (wins[wi].sw >= ww
+                        || ticks.saturating_sub(wins[wi].st_since) >= ST_SETTLE_TICKS)
+                {
                     // The client has observably re-imported the work-area-sized
                     // buffer (its synced surface reached the maximize width), so the
                     // maximize round trip is complete. Now prove the reverse leg —
                     // the user-visible un-maximize — via the SAME
                     // `set_window_state(Floating)` the chip and drag-to-restore call.
+                    // A fixed-size client that never grew (declined the resize) falls
+                    // through here on the ST_SETTLE_TICKS timeout so the self-test
+                    // (and the recycle proof gated on it) can't stall on it.
+                    let grew = wins[wi].sw >= ww;
                     let (rw, rh) = wins[wi]
                         .restore
                         .map(|(_, _, w, h)| (w, h))
@@ -3663,8 +3688,9 @@ fn run_desktop_session(
                     set_window_state(server, clients, &mut wins[wi], WinState::Floating, bw, bh, &ly, &ins);
                     wins[wi].st_step = 2;
                     libdunit::println(&alloc::format!(
-                        "gui_server: reconfigure w={} h={} restored (self-test)",
-                        rw, rh
+                        "gui_server: reconfigure w={} h={} {} (self-test)",
+                        rw, rh,
+                        if grew { "restored" } else { "settled (client kept size)" }
                     ));
                 }
             }

@@ -954,6 +954,7 @@ fn extra_sections(text: &str) -> String {
                     | "effects"
                     | "desktop"
                     | "widgets"
+                    | "display"
                     | "panel"
                     | "tray"
                     | "meta"

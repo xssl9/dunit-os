@@ -235,12 +235,15 @@ entries = ["gui_demo", "gui_calc", "gui_stat", "gui_files", "gui_terminal", "gui
 # cross-process isolation invariant (two untrusted clients composited at once);
 # gui_terminal + gui_files + gui_calc then autostart so their per-app config
 # (apps/*.toml) is exercised and its resolved-config diagnostic is observable
-# headless. gui_demo autostarts last and posts its startup toast, exercising the
-# client→compositor NOTIFY path (the compositor prints `client notify …`). The
-# isolation marker fires off the two gui_clients — the heavier apps come up later
-# as runtime-pumped windows and do not gate it.
+# headless. gui_demo autostarts next and posts its startup toast, exercising the
+# client→compositor NOTIFY path (the compositor prints `client notify …`).
+# gui_settings autostarts LAST: with self_test on it drives its resolution picker
+# once (feature #2 proof — actuates the `>` stepper, saves `[display]` and pings
+# reload), so the compositor re-enters the session and mode-sets to the picked
+# resolution live. The isolation marker fires off the two gui_clients — the
+# heavier apps come up later as runtime-pumped windows and do not gate it.
 [startup]
-entries = ["gui_client", "gui_client", "gui_terminal", "gui_files", "gui_calc", "gui_demo"]
+entries = ["gui_client", "gui_client", "gui_terminal", "gui_files", "gui_calc", "gui_demo", "gui_settings"]
 # Phase 3 headless resize proof: the automated harness has no mouse, so the
 # title-bar maximize chip can't be clicked. With this set, the compositor drives
 # each runtime-pumped window (terminal + files) through the SAME maximize path

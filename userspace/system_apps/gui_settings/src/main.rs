@@ -35,7 +35,7 @@ const IN_QUIT: u8 = 9;
 const SURFACE: u64 = 1;
 const BUFFER: u64 = 2;
 const W: u32 = 600;
-const H: u32 = 540;
+const H: u32 = 600;
 const FMT_XRGB8888: u32 = 1;
 
 /// The window's text font, embedded in the ELF (M4 still ships assets in-image).
@@ -91,6 +91,21 @@ const INT_SPECS: [IntSpec; NINTS] = [
     IntSpec { label: "corner_radius", step: 2, min: 0, max: 32 },
     IntSpec { label: "shadow", step: 1, min: 0, max: 24 },
     IntSpec { label: "anim_ms", step: 20, min: 0, max: 600 },
+];
+
+/// Preset display modes offered by the resolution stepper. Index 0 is the
+/// baseline `0/0` = "keep the boot resolution" (what the desktop does today); the
+/// rest are common 16:9 modes the Bochs/DISPI mode-set backend accepts. Cycling
+/// `<`/`>` walks this list; the CHOSEN mode is policy that lands in `[display]`
+/// (single source of truth) — the compositor applies it on the next session
+/// re-entry, and on a fixed GOP framebuffer the request degrades to a no-op.
+const NRES: usize = 5;
+const RES_PRESETS: [(u32, u32); NRES] = [
+    (0, 0),
+    (1280, 720),
+    (1366, 768),
+    (1600, 900),
+    (1920, 1080),
 ];
 
 // --- Settings field accessors (index -> field), read + mutable variants ------
@@ -161,6 +176,8 @@ enum Action {
     ColorNext(usize),
     Toggle(usize),
     IntDelta(usize, i32),
+    ResPrev,
+    ResNext,
 }
 
 /// A clickable region and the action it fires.
@@ -181,6 +198,7 @@ impl Hotspot {
 struct App {
     s: Settings,
     color_idx: [usize; NCOLORS],
+    res_idx: usize,
 }
 
 // APPEND_MARKER3
@@ -193,7 +211,11 @@ impl App {
             let cur = color_get(&s.theme, i);
             *slot = PALETTE.iter().position(|&p| p == cur).unwrap_or(0);
         }
-        App { s, color_idx }
+        let res_idx = RES_PRESETS
+            .iter()
+            .position(|&(w, h)| w == s.display.width && h == s.display.height)
+            .unwrap_or(0);
+        App { s, color_idx, res_idx }
     }
 
     fn apply(&mut self, act: Action) {
@@ -211,6 +233,18 @@ impl App {
                 let (min, max) = (INT_SPECS[i].min, INT_SPECS[i].max);
                 let r = int_ref(&mut self.s, i);
                 *r = (*r + d).clamp(min, max);
+            }
+            Action::ResPrev => {
+                self.res_idx = (self.res_idx + NRES - 1) % NRES;
+                let (w, h) = RES_PRESETS[self.res_idx];
+                self.s.display.width = w;
+                self.s.display.height = h;
+            }
+            Action::ResNext => {
+                self.res_idx = (self.res_idx + 1) % NRES;
+                let (w, h) = RES_PRESETS[self.res_idx];
+                self.s.display.width = w;
+                self.s.display.height = h;
             }
         }
     }
@@ -360,6 +394,27 @@ fn render(px_ptr: *mut u8, font: &Font, app: &App) -> Vec<Hotspot> {
         y += ROW_H;
     }
 
+    // ---- Display resolution -------------------------------------------
+    y += 4;
+    draw_text(&mut surf, font, 16, y, 14.0, col(0xFF89DCEB), "Display resolution");
+    y += ROW_H;
+    button(&mut surf, font, 16, y, 22, "<");
+    spots.push(Hotspot { x: 16, y, w: 22, h: ROW_H - 4, act: Action::ResPrev });
+    button(&mut surf, font, 92, y, 22, ">");
+    spots.push(Hotspot { x: 92, y, w: 22, h: ROW_H - 4, act: Action::ResNext });
+    let (rw, rh) = RES_PRESETS[app.res_idx];
+    let mut rlbl = String::new();
+    if rw == 0 || rh == 0 {
+        rlbl.push_str("boot (keep)");
+    } else {
+        push_int(&mut rlbl, rw as i32);
+        rlbl.push('x');
+        push_int(&mut rlbl, rh as i32);
+    }
+    rlbl.push_str("   (applied on desktop reload)");
+    draw_text(&mut surf, font, 124, y + 2, 14.0, col(0xFFF9E2AF), &rlbl);
+    y += ROW_H;
+
     // ---- Status -------------------------------------------------------
     y += 6;
     draw_text(
@@ -497,6 +552,37 @@ pub extern "C" fn _start() -> ! {
         libdunit::println("gui_settings: FAIL no frame done");
         libdunit::handle_close(buf);
         libdunit::exit(6);
+    }
+
+    // 8.5) Headless resolution-picker proof (config-gated `[startup] self_test`,
+    //      true only in test.toml — NEVER on the real desktop). The automated
+    //      harness has no mouse, so we actuate the SAME `apply(ResNext)` path a
+    //      `>` click drives, walking the picker to a concrete non-boot mode, then
+    //      persist it (`dwm_settings::save`) and ping the compositor to reload —
+    //      exactly what a click does. This drives the full GUI -> [display] ->
+    //      live-resolution round trip: the compositor diffs the new `[display]`,
+    //      re-enters its session and asks the kernel backend to mode-set. One-shot
+    //      (fires once before the input loop), so the compositor re-enters exactly
+    //      once — no reload storm.
+    if dwm_settings::load_config().apps.self_test {
+        let target = (1600u32, 900u32);
+        let mut guard = 0;
+        while RES_PRESETS[app.res_idx] != target && guard < NRES {
+            app.apply(Action::ResNext);
+            guard += 1;
+        }
+        dwm_settings::save(&app.s);
+        let mut sig = [0u8; 8];
+        sig[0..4].copy_from_slice(&RELOAD_MAGIC.to_le_bytes());
+        libdunit::ipc_send(compositor, &sig);
+        spots = render(px, &font, &app);
+        let (tw, th) = RES_PRESETS[app.res_idx];
+        let mut msg = String::from("gui_settings: res picker self-test picked ");
+        push_int(&mut msg, tw as i32);
+        msg.push('x');
+        push_int(&mut msg, th as i32);
+        msg.push_str(" (saved, reload pinged)");
+        libdunit::println(&msg);
     }
 
     // 9) Interactive loop: a pointer-down inside a hotspot mutates the working
