@@ -1520,6 +1520,57 @@ fn raise_window(z: &mut Vec<usize>, wi: usize) {
     z.push(wi);
 }
 
+/// Repair the three `Option<wins index>` cursors after the `Win` at `wi` was
+/// removed from `wins`. An index equal to the removed slot is cleared; any index
+/// above it shifts down by one to track the `Vec::remove` compaction. `drag`
+/// carries a `(win, off_x, off_y)` tuple; the other two are bare indices.
+fn adjust_indices_after_removal(
+    drag: &mut Option<(usize, i32, i32)>,
+    pressed_win: &mut Option<usize>,
+    input_focus: &mut Option<usize>,
+    wi: usize,
+) {
+    match *drag {
+        Some((i, ..)) if i == wi => *drag = None,
+        Some((i, ox, oy)) if i > wi => *drag = Some((i - 1, ox, oy)),
+        _ => {}
+    }
+    for opt in [pressed_win, input_focus] {
+        match *opt {
+            Some(i) if i == wi => *opt = None,
+            Some(i) if i > wi => *opt = Some(i - 1),
+            _ => {}
+        }
+    }
+}
+
+/// Remove every `Win` owned by `pid` and repair ALL stored `wins` indices — the
+/// z-order (`z`), the drag capture, and the pressed/hover cursors. Iterates the
+/// victims high→low so an earlier `Vec::remove` never shifts an index still to be
+/// visited. Called once a client process has been reaped, so leaving its window
+/// model behind (as the old close path did) would both leak and desync indices.
+fn reap_windows_of(
+    pid: u32,
+    wins: &mut Vec<Win>,
+    z: &mut Vec<usize>,
+    drag: &mut Option<(usize, i32, i32)>,
+    pressed_win: &mut Option<usize>,
+    input_focus: &mut Option<usize>,
+) {
+    let mut victims: Vec<usize> = (0..wins.len()).filter(|&i| wins[i].pid == pid).collect();
+    victims.sort_unstable();
+    for &wi in victims.iter().rev() {
+        wins.remove(wi);
+        z.retain(|&i| i != wi);
+        for i in z.iter_mut() {
+            if *i > wi {
+                *i -= 1;
+            }
+        }
+        adjust_indices_after_removal(drag, pressed_win, input_focus, wi);
+    }
+}
+
 /// A transient desktop notification (M4, `[notifications]`). `born`/`expire` are
 /// frame ticks (~16 ms each); the compositor prunes a toast once `expire` passes.
 /// Purely runtime UI feedback — the policy (on/off, timeout, corner) lives in the
@@ -3269,6 +3320,16 @@ fn run_desktop_session(
     }
     // One-shot flag for the global keyboard-shortcut self-test (below).
     let mut shortcut_st_done = false;
+    // Config-gated client-recycle self-test (`test.toml` `[startup] self_test`).
+    // Proves the "close many windows, then open new ones" bug is fixed: once all
+    // startup windows have been through the maximize/restore self-test, close them
+    // ALL, wait for the per-frame reaper to prune the `clients` Vec (which is what
+    // frees spawn slots), then relaunch — the ceiling must be lifted. A tiny state
+    // machine because close→exit→reap→relaunch spans several frames. Never runs on
+    // the real desktop (`self_test` is false in `default.toml`).
+    let mut recycle_phase: u8 = 0; // 0=wait 1=draining 2=done
+    let mut recycle_pre: usize = 0; // clients present when we closed them
+    let mut recycle_deadline: u32 = 0; // tick budget for the drain to finish
     // Animation length in frames (~16ms/frame); 0 when animations are off, so
     // every ramp/reveal collapses to instant (the flat look).
     let mut anim_frames = if fx.anim { (fx.anim_ms / 16).max(1) as u32 } else { 0 };
@@ -3420,6 +3481,61 @@ fn run_desktop_session(
                 notifs.len(),
                 notifications.enabled as u32,
             ));
+        }
+
+        // Per-frame client reaper. A window closed via the title-bar chip or
+        // Cmd-Q sets `alive=false` and sends IN_QUIT; the client then exits. A
+        // client can also exit on its own (crash / voluntary quit). Either way its
+        // resources must be reclaimed, or they leak: BEFORE this the `clients` Vec
+        // was never pruned, so after `max_windows` cumulative windows the spawn
+        // gate (`clients.len() >= max_windows`) blocked every new window — the
+        // "close a bunch of windows, then can't open new ones" bug. And the
+        // protocol `Server` caps connections (MAX_CONNECTIONS), so an un-dropped
+        // `ConnId` per closed window would eventually starve `server.connect()`
+        // too. Poll every already-presented client with the non-blocking `wait`
+        // (the kernel reaps only a truly-terminated child and returns an error for
+        // a live one, so a running window is never touched; a not-yet-`ready`
+        // client is skipped so a still-spawning child is never reaped early). On a
+        // reap, free ALL of it: the protocol connection + its surfaces/buffers
+        // (`disconnect_peer`), the compositor's shared-buffer mapping
+        // (`handle_close`), the `ClientState` (this is what lifts the spawn
+        // ceiling), and the `Win` with full z/drag/focus index fixup.
+        {
+            let mut ci = 0;
+            while ci < clients.len() {
+                if !clients[ci].ready {
+                    ci += 1;
+                    continue;
+                }
+                let pid = clients[ci].pid;
+                let mut st = libdunit::WaitStatus::empty();
+                if libdunit::wait(pid, &mut st) != pid as isize {
+                    ci += 1; // still running (or not reapable yet)
+                    continue;
+                }
+                server.disconnect_peer(clients[ci].conn);
+                if clients[ci].mapped_handle != 0 {
+                    libdunit::handle_close(clients[ci].mapped_handle);
+                }
+                clients.remove(ci);
+                reap_windows_of(
+                    pid,
+                    &mut wins,
+                    &mut z,
+                    &mut drag,
+                    &mut pressed_win,
+                    &mut input_focus,
+                );
+                // The switcher's MRU snapshot holds `wins` indices; a mid-flight
+                // reap would leave them stale, so drop any active overlay.
+                switcher.cancel();
+                libdunit::println(&alloc::format!(
+                    "gui_server: reaped client pid={} clients={} (spawn slot freed)",
+                    pid,
+                    clients.len(),
+                ));
+                // `ci` not advanced: the compacted next client now sits at `ci`.
+            }
         }
 
         // Per-frame Win<->ClientState reconciliation. A client that re-imported a
@@ -3703,6 +3819,85 @@ fn run_desktop_session(
                 if effect_ok { "ok" } else { "FAIL" },
             ));
             shortcut_st_done = true;
+        }
+
+        // Config-gated client-recycle self-test (see the state decls above). The
+        // reported scheduler bug was that after closing enough windows no new one
+        // could open, because the `clients` Vec was never pruned. This proves the
+        // fix end-to-end across a real process boundary: close every window, let
+        // the per-frame reaper drain the `clients` Vec, then relaunch and confirm
+        // spawning succeeds again. Starts only after the maximize/restore self-test
+        // has finished on every startup window, so it never disturbs the earlier
+        // one-shot proofs.
+        if apps.self_test {
+            match recycle_phase {
+                0 => {
+                    let live: Vec<usize> =
+                        (0..wins.len()).filter(|&i| wins[i].alive).collect();
+                    let all_settled =
+                        !live.is_empty() && live.iter().all(|&i| wins[i].st_step == 2);
+                    // Wait for the ARGB steady-state composite proof (`argb blit`)
+                    // to have fired first — otherwise closing every window would
+                    // preempt the frame in which the translucent terminal finally
+                    // composites at full reveal. Recycle is deliberately the LAST
+                    // self-test, so it must not race the earlier ones.
+                    if all_settled && argb_blit_logged && !clients.is_empty() {
+                        recycle_pre = clients.len();
+                        for &wi in &live {
+                            wins[wi].alive = false;
+                            send_input(wins[wi].pid, IN_QUIT, 0, 0, 0);
+                        }
+                        recycle_deadline = ticks.saturating_add(600); // ~10s budget
+                        recycle_phase = 1;
+                        libdunit::println(&alloc::format!(
+                            "gui_server: recycle self-test closing {} windows (clients={})",
+                            live.len(),
+                            recycle_pre,
+                        ));
+                    }
+                }
+                1 => {
+                    // The reaper prunes `clients` as each closed client exits. Once
+                    // at least one slot is freed, relaunch to prove the ceiling is
+                    // lifted; fill until the (now reachable) cap and report.
+                    if clients.len() < recycle_pre {
+                        let free_before = clients.len();
+                        let mut reopened = 0usize;
+                        while try_launch(
+                            server,
+                            clients,
+                            &apps,
+                            0, // first registered app (config order, not a hardcoded id)
+                            current_ws,
+                            &mut next_id,
+                            ly.max_windows,
+                            &mut notifs,
+                            &notifications,
+                            ticks,
+                        ) {
+                            reopened += 1;
+                            if reopened >= ly.max_windows {
+                                break; // safety: never loop past the cap
+                            }
+                        }
+                        libdunit::println(&alloc::format!(
+                            "gui_server: recycle self-test reaped_to={} reopened={} {} (ceiling lifted)",
+                            free_before,
+                            reopened,
+                            if reopened > 0 { "ok" } else { "FAIL" },
+                        ));
+                        recycle_phase = 2;
+                    } else if ticks >= recycle_deadline {
+                        libdunit::println(&alloc::format!(
+                            "gui_server: FAIL recycle self-test drain stalled clients={} pre={}",
+                            clients.len(),
+                            recycle_pre,
+                        ));
+                        recycle_phase = 2;
+                    }
+                }
+                _ => {}
+            }
         }
 
         let m = libdunit::get_mouse_state();
