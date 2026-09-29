@@ -969,7 +969,11 @@ fn serve_two_clients() -> bool {
         // No startup apps (or none spawnable): still raise the shell so the
         // panel/dock/launcher are usable and can spawn apps on demand.
         libdunit::println("gui_server: no startup apps to autostart");
-        run_desktop_session(&mut server, &mut clients, pending_notifies);
+        // Loop so a live `[display]` change (which returns `true`) re-enters the
+        // session at the new resolution; `take` hands the notifies over once, then
+        // empties so re-entries start clean.
+        let mut pn = pending_notifies;
+        while run_desktop_session(&mut server, &mut clients, core::mem::take(&mut pn)) {}
         return false;
     }
 
@@ -1061,7 +1065,10 @@ fn serve_two_clients() -> bool {
         // id), which the in-process compositor self-test cannot cover.
         resize_one_client(&mut server, &mut clients, &mut pending_notifies);
     }
-    run_desktop_session(&mut server, &mut clients, pending_notifies);
+    // Loop so a live `[display]` change re-enters the session at the new
+    // resolution (rebuilding all buffers); the notifies are handed over once.
+    let mut pn = pending_notifies;
+    while run_desktop_session(&mut server, &mut clients, core::mem::take(&mut pn)) {}
 
     for c in clients.iter() {
         if c.mapped_handle != 0 {
@@ -2850,24 +2857,44 @@ fn resolve_desk_widgets(default_corner: i32) -> Vec<DeskWidget> {
     v
 }
 
+/// Apply the configured `[display]` resolution via the kernel display backend.
+/// `0/0` (baseline) keeps the current/boot resolution. A fixed backend (Limine/
+/// GOP) reports EOPNOTSUPP (-95) — the desktop simply stays at the boot mode.
+/// This is the compositor's mechanism→policy seam: the KERNEL owns the mode-set,
+/// the CONFIG owns which mode (CLAUDE.md §6-10).
+fn apply_display_mode(d: &settings::Display) {
+    if d.width == 0 || d.height == 0 {
+        return;
+    }
+    let r = libdunit::set_video_mode(d.width, d.height);
+    if r == 0 {
+        libdunit::println(&alloc::format!(
+            "gui_server: [display] resolution set to {}x{}",
+            d.width, d.height
+        ));
+    } else if r == -95 {
+        libdunit::println("gui_server: [display] fixed backend — boot resolution kept");
+    } else {
+        libdunit::println(&alloc::format!(
+            "gui_server: [display] set_video_mode {}x{} rejected ({})",
+            d.width, d.height, r
+        ));
+    }
+}
+
+/// Run one interactive desktop session. Returns `true` when the session asked to
+/// be RE-ENTERED (a live `[display]` change: the caller loops and this function's
+/// head re-applies the new mode, re-queries the framebuffer and rebuilds every
+/// buffer at the new size — cleaner than mutating bw/bh across the live loop).
+/// Returns `false` (or diverges via the compositor loop) otherwise.
 fn run_desktop_session(
     server: &mut Server,
     clients: &mut Vec<ClientState>,
     pending_notifies: Vec<alloc::string::String>,
-) {
-    let mut fb = libdunit::FbInfo {
-        addr: 0,
-        width: 0,
-        height: 0,
-        pitch: 0,
-    };
-    if !libdunit::get_framebuffer(&mut fb) || fb.width == 0 || fb.height == 0 {
-        libdunit::println("gui_server: no framebuffer for desktop session");
-        return;
-    }
-    let bw = fb.width as usize;
-    let bh = fb.height as usize;
-
+) -> bool {
+    // Load config FIRST: `[display]` must program the video mode BEFORE we query
+    // the framebuffer, so bw/bh and every buffer derived from them size to the
+    // chosen resolution from the start (no mid-loop buffer surgery).
     // Slice 9: the palette is data. Overlay /system/share/dwm/default.toml on the
     // Green Tea baseline; a missing/garbage file keeps the baseline (last-known-good).
     // Slice C: `theme`/`ly`/`fx` are `mut` because a gui_settings "reload" signal
@@ -2885,6 +2912,25 @@ fn run_desktop_session(
         libdunit::println("gui_server: boot config invalid (schema/shape) — using baseline");
         settings::Config::defaults()
     };
+
+    // Config-driven runtime resolution: apply BEFORE `get_framebuffer` so the
+    // query below returns the chosen mode's geometry. `applied_display` is the
+    // baseline the live-reload block diffs against to detect a GUI resolution edit.
+    apply_display_mode(&cfg.settings.display);
+    let applied_display = cfg.settings.display;
+
+    let mut fb = libdunit::FbInfo {
+        addr: 0,
+        width: 0,
+        height: 0,
+        pitch: 0,
+    };
+    if !libdunit::get_framebuffer(&mut fb) || fb.width == 0 || fb.height == 0 {
+        libdunit::println("gui_server: no framebuffer for desktop session");
+        return false;
+    }
+    let bw = fb.width as usize;
+    let bh = fb.height as usize;
     let mut theme: Theme = cfg.settings.theme;
     let mut ly: Layout = cfg.settings.layout;
     // The application registry (id/name/exec/icon/label), the dock/launcher/
@@ -3284,6 +3330,21 @@ fn run_desktop_session(
                 // reload must not blank the dock or drop the registry.
                 libdunit::println("gui_server: settings reload rejected (invalid config) — keeping last good");
             } else {
+                // Live resolution change (GUI edited `[display]`): a runtime mode-
+                // set would strand bw/bh and every buffer sized from them. Instead
+                // RE-ENTER the session — the head re-applies the mode, re-queries the
+                // framebuffer and rebuilds all buffers at the new size. Windows
+                // survive because they are rebuilt from the persistent `clients`.
+                // 0/0 means "keep current", so only an explicit new mode re-enters.
+                if ncfg.settings.display != applied_display
+                    && ncfg.settings.display.width != 0
+                    && ncfg.settings.display.height != 0
+                {
+                    libdunit::println(
+                        "gui_server: [display] changed on reload — re-entering session",
+                    );
+                    return true;
+                }
                 theme = ncfg.settings.theme;
                 ly = ncfg.settings.layout;
                 fx = ncfg.settings.effects;
@@ -4772,4 +4833,6 @@ fn run_desktop_session(
     for w in wins.iter() {
         send_input(w.pid, IN_QUIT, 0, 0, 0);
     }
+    // Natural session end (not a live-resolution re-enter): caller does not loop.
+    false
 }

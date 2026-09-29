@@ -77,6 +77,7 @@ pub const SYSCALL_GET_KEY_EVENT: usize = 67;
 pub const SYSCALL_UNLINK: usize = 68;
 pub const SYSCALL_RENAME: usize = 69;
 pub const SYSCALL_MKDIR: usize = 70;
+pub const SYSCALL_SET_VIDEO_MODE: usize = 71;
 
 /// Права хэндлов (capabilities). Совпадают с битами в ядре (kernel/src/handle.rs).
 pub const RIGHT_READ: u32 = 1 << 0;
@@ -1211,6 +1212,14 @@ pub fn fb_present(src: &[u8], width: u32, height: u32, x: u32, y: u32) -> isize 
         x as usize,
         y as usize,
     )
+}
+
+/// Просит ядро переключить разрешение scanout на `w`×`h`. Только владелец
+/// дисплея (compositor). Возвращает 0 при успехе; EOPNOTSUPP (-95), когда
+/// активный бэкенд не умеет менять режим (фиксированный фреймбуфер Limine/GOP);
+/// EINVAL (-22) при недопустимом размере.
+pub fn set_video_mode(w: u32, h: u32) -> isize {
+    syscall2(SYSCALL_SET_VIDEO_MODE, w as usize, h as usize)
 }
 
 /// Передаёт хэндл процессу `target_pid` (нужно право TRANSFER). Возвращает новый

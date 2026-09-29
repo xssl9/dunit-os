@@ -380,6 +380,39 @@ impl Widgets {
     }
 }
 
+/// Runtime display mode. `0/0` means "keep the boot (Limine) resolution": the
+/// compositor only asks the kernel to switch scanout when both are non-zero, and
+/// on a fixed GOP framebuffer the request is ignored (EOPNOTSUPP). Backend-
+/// agnostic — the resolution is user-facing policy, the kernel only supplies the
+/// mode-set mechanism.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Display {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Display {
+    /// Baseline `0/0` = keep boot resolution (behaves exactly as today).
+    pub const fn baseline() -> Self {
+        Display {
+            width: 0,
+            height: 0,
+        }
+    }
+
+    /// Apply one `key`/`value` pair from the `[display]` table. `width`/`height`
+    /// are non-negative integers; unknown keys and malformed values are ignored.
+    fn apply(&mut self, key: &str, value: &str) {
+        if let Some(n) = parse_uint(value) {
+            match key {
+                "width" => self.width = n,
+                "height" => self.height = n,
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Screen edge a shell strip (panel / tray) docks to. Fieldless, so it stays
 /// `Copy` and `Settings` with it. Serialized as its lowercase name.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -728,6 +761,7 @@ pub struct Settings {
     pub effects: Effects,
     pub desktop: Desktop,
     pub widgets: Widgets,
+    pub display: Display,
     pub panel: Panel,
     pub tray: Tray,
     pub shortcuts: Shortcuts,
@@ -749,6 +783,7 @@ impl Settings {
             effects: Effects::baseline(),
             desktop: Desktop::baseline(),
             widgets: Widgets::baseline(),
+            display: Display::baseline(),
             panel: Panel::baseline(),
             tray: Tray::baseline(),
             shortcuts: Shortcuts::baseline(),
@@ -980,6 +1015,9 @@ pub fn parse_into(text: &str, settings: &mut Settings) {
             settings.applied += 1;
         } else if section == "widgets" {
             settings.widgets.apply(key, value);
+            settings.applied += 1;
+        } else if section == "display" {
+            settings.display.apply(key, value);
             settings.applied += 1;
         } else if section == "panel" {
             settings.panel.apply(key, value);
@@ -1436,6 +1474,11 @@ pub fn to_toml(s: &Settings) -> String {
     push_int(&mut out, "corner", s.widgets.corner as i64);
     out.push('\n');
 
+    out.push_str("[display]\n");
+    push_int(&mut out, "width", s.display.width as i64);
+    push_int(&mut out, "height", s.display.height as i64);
+    out.push('\n');
+
     out.push_str("[panel]\n");
     push_string(&mut out, "pos", s.panel.pos.as_str());
     out.push('\n');
@@ -1485,6 +1528,7 @@ pub fn roundtrip_ok(s: &Settings) -> bool {
         && back.effects == s.effects
         && back.desktop == s.desktop
         && back.widgets == s.widgets
+        && back.display == s.display
         && back.panel == s.panel
         && back.tray == s.tray
         && back.shortcuts == s.shortcuts

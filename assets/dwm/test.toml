@@ -115,6 +115,14 @@ logo             = "/assets/images/logo.rgba"
 enabled = true
 corner  = 1
 
+# Runtime display resolution (Bochs/DISPI backend on `-vga std`). The smoke kernel
+# requests 1280x720 at desktop bring-up — a NON-boot size (boot is 1920x1080) — so
+# the automated screenshot proves the compositor mode-set really changed scanout.
+# 0/0 would keep the boot resolution.
+[display]
+width  = 1280
+height = 720
+
 # Panel placement. `pos`: which screen edge the panel (wordmark + workspace pips +
 # focused-window title + tray) docks to — "top" | "bottom" | "left" | "right".
 # Top/bottom are full text bars; left/right are narrow icon + pip bars. The dock

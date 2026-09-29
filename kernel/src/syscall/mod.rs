@@ -80,6 +80,7 @@ pub enum Syscall {
     Unlink = 68,
     Rename = 69,
     Mkdir = 70,
+    SetVideoMode = 71,
 }
 
 impl Syscall {
@@ -157,6 +158,7 @@ impl Syscall {
             68 => Some(Syscall::Unlink),
             69 => Some(Syscall::Rename),
             70 => Some(Syscall::Mkdir),
+            71 => Some(Syscall::SetVideoMode),
             _ => None,
         }
     }
@@ -681,6 +683,7 @@ pub extern "C" fn syscall_handler(
             arg3 as usize,
         ),
         Syscall::Mkdir => sys_mkdir(arg0 as *const u8, arg1 as usize),
+        Syscall::SetVideoMode => sys_set_video_mode(arg0 as u32, arg1 as u32),
     }
 }
 
@@ -1789,7 +1792,33 @@ fn sys_fb_present(src: *const u8, width: u32, height: u32, dst_x: u32, dst_y: u3
             }
         }
     }
+    // Вытолкнуть кадр на физический дисплей. Для сканаут-прямых бэкендов
+    // (Limine/Bochs) — no-op; для virtio-gpu — TRANSFER_TO_HOST_2D + FLUSH.
+    let _ = crate::drivers::display::present(None);
     0
+}
+
+/// Смена видеорежима на ходу. Только владелец дисплея (userspace-compositor).
+/// Возвращает 0 при успехе, EOPNOTSUPP если активный бэкенд не умеет менять
+/// режим (фиксированный фреймбуфер Limine/GOP), EINVAL при недопустимом размере,
+/// EIO при аппаратной ошибке.
+fn sys_set_video_mode(width: u32, height: u32) -> i64 {
+    let pid = match crate::process::current_process() {
+        Some(process) => process.pid.0,
+        None => return EINVAL,
+    };
+    if pid == 0 || crate::handle::display_owner() != pid {
+        return EACCES;
+    }
+    if !crate::drivers::display::can_modeset() {
+        return EOPNOTSUPP;
+    }
+    match crate::drivers::display::set_mode(width, height) {
+        Ok(()) => 0,
+        Err(crate::drivers::display::DisplayError::InvalidMode) => EINVAL,
+        Err(crate::drivers::display::DisplayError::Unsupported) => EOPNOTSUPP,
+        Err(crate::drivers::display::DisplayError::Io) => EIO,
+    }
 }
 
 fn sys_get_key() -> i64 {

@@ -105,6 +105,15 @@ logo             = "/assets/images/logo.rgba"
 enabled = true
 corner  = 1
 
+# Runtime display resolution. `0/0` keeps the boot (Limine) resolution — the
+# default, so nothing changes unless you set a real size. When both are non-zero
+# the compositor asks the kernel to switch scanout to width×height at session
+# start and on live reload; on a fixed GOP framebuffer (no mode-set backend) the
+# request is ignored and the boot resolution stays.
+[display]
+width  = 0
+height = 0
+
 # Panel placement. `pos`: which screen edge the panel (wordmark + workspace pips +
 # focused-window title + tray) docks to — "top" | "bottom" | "left" | "right".
 # Top/bottom are full text bars; left/right are narrow icon + pip bars. The dock
