@@ -1,0 +1,11 @@
+# Test-only init fixture. Shipped to /system/services ONLY for the smoke configs
+# (limine_test_terminal.conf / limine_test_gui.conf) via tools/pack_initrd.py; the
+# production desktop never sees it. /app/init_probe exits with a failure code on
+# every run, so init's on-failure restart policy and restart-budget exhaustion are
+# exercised deterministically and verified by tools/qemu_test.py serial markers:
+#   [INIT] init-probe: restart (1/2) ... (2/2) ... restart budget exhausted
+name = "init-probe"
+exec = "/app/init_probe"
+restart = "on-failure"
+critical = false
+max_restarts = 2

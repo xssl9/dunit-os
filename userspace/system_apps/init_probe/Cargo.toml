@@ -1,0 +1,11 @@
+[package]
+name = "init_probe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libdunit = { path = "../../libdunit" }
+
+[[bin]]
+name = "init_probe"
+path = "src/main.rs"

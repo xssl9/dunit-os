@@ -1205,25 +1205,30 @@ pub extern "C" fn kernel_main(
         serial_write("[GUI] Starting built-in desktop loop\r\n");
         {
             let _ = (fb_addr, width, height, pitch);
-            // Userspace desktop: launch /app/gui_server as the compositor. It owns
-            // the display/input master, spawns its clients, and runs the desktop
-            // session forever. run_foreground_exec drives the scheduler (its
-            // enter_user_process loop) so gui_server and every child it spawns get
-            // CPU via PIT preemption — this is the M4 userspace DWM as the desktop.
-            serial_write("[GUI] launching userspace gui_server desktop\r\n");
+            // Userspace session: launch /app/init as PID 1 — the userspace service
+            // manager. init is desktop *policy*: it reads /system/services/*.toml,
+            // spawns the listed services (the compositor gui_server among them) and
+            // supervises them with its restart policy. The kernel knows nothing
+            // about which services exist — it only starts init. gui_server, spawned
+            // as init's child, still acquires the display/input master via its own
+            // syscalls (ownership is syscall-acquired, not foreground-tied), so the
+            // desktop comes up exactly as before. run_foreground_exec drives the
+            // scheduler (its enter_user_process loop) so init AND every process it
+            // spawns get CPU via PIT preemption.
+            serial_write("[GUI] launching /app/init (userspace service manager)\r\n");
             let mut input = command::NoExecInput;
             match command::run_foreground_exec(
                 "/",
-                "gui_server",
+                "init",
                 process::ProcessOutputSink::SerialOnly,
                 &mut input,
             ) {
                 Ok((_path, _exit)) => {
-                    serial_write("[GUI] gui_server desktop exited\r\n");
+                    serial_write("[GUI] init exited\r\n");
                 }
-                Err(_) => serial_write("[GUI] gui_server failed to launch\r\n"),
+                Err(_) => serial_write("[GUI] init failed to launch\r\n"),
             }
-            // The desktop server should not return; idle if it ever does.
+            // init is PID 1 and should never return; idle if it ever does.
             loop {
                 unsafe {
                     core::arch::asm!("hlt");

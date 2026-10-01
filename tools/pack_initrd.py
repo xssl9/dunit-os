@@ -74,6 +74,23 @@ def collect(args: argparse.Namespace) -> list[tuple[str, bytes]]:
             for host_path in sorted(src_dir.glob("*.toml")):
                 add(f"/system/share/dwm/{sub}/{host_path.name}", host_path)
 
+    # init service manifests read by /app/init at /system/services. The top-level
+    # services/*.toml are the production services (e.g. gui-server.toml); they ship
+    # on EVERY config. services/test/*.toml are test-only fixtures (e.g.
+    # init-probe.toml, which exits non-zero to exercise init's restart policy) and
+    # ship ONLY for the smoke configs, mirroring the SMOKE_CONFIGS test/default
+    # selection used for the DWM toml above — the production desktop never sees them.
+    if args.services_dir is not None:
+        services = Path(args.services_dir)
+        for host_path in sorted(services.glob("*.toml")):
+            add(f"/system/services/{host_path.name}", host_path)
+        smoke = args.config is not None and os.path.basename(args.config) in SMOKE_CONFIGS
+        if smoke:
+            test_dir = services / "test"
+            if test_dir.is_dir():
+                for host_path in sorted(test_dir.glob("*.toml")):
+                    add(f"/system/services/{host_path.name}", host_path)
+
     return sorted(entries.items())
 
 
@@ -94,6 +111,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--userspace-dir", type=Path, required=True)
     parser.add_argument("--assets-dir", type=Path, required=True)
+    parser.add_argument("--services-dir", type=Path, default=None,
+                        help="dir of init service manifests packed to /system/services")
     parser.add_argument("--config", type=str, default=None,
                         help="limine config path; selects default vs test DWM toml")
     parser.add_argument("--exclude", action="append", default=[],

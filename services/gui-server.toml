@@ -1,0 +1,16 @@
+# Dunit desktop session service — the userspace compositor.
+#
+# init (PID 1, /app/init) reads every /system/services/*.toml at boot, spawns the
+# listed services and supervises them. This is desktop *policy* expressed as data:
+# the kernel knows nothing about gui_server; init only reads this manifest.
+#
+# restart = on-failure  -> respawn only if the process faults or exits non-zero
+#                          (a clean exit code 0 is treated as an intentional
+#                          session end and is NOT restarted).
+# critical = true        -> if it goes down permanently init logs a CRITICAL marker.
+# max_restarts           -> cap on consecutive restart attempts before giving up.
+name = "gui-server"
+exec = "/app/gui_server"
+restart = "on-failure"
+critical = true
+max_restarts = 3

@@ -1,0 +1,28 @@
+{
+  "description": "M5 item 3 — real userspace init/service manager + first-boot provisioning. Boots the GUI smoke config (limine_test_gui.conf): the kernel launches /app/init as PID 1 instead of gui_server directly. init provisions /persist on first boot, reads /system/services/*.toml, and supervises the listed services. For the smoke config pack_initrd ships BOTH the production gui-server.toml AND the test-only services/test/init-probe.toml. These markers prove: (1) init came up as PID 1; (2) first-boot provisioning ran and wrote /persist/.provisioned (on the Live ISO /persist is a fresh MemFS, so every boot is a first boot — deterministic); (3) init discovered+registered both manifests and reported it supervises 2 services; (4) init spawned gui-server, and gui_server — running as init's CHILD — still acquired the display/input master and reached 'desktop ready', proving the init indirection did NOT regress the desktop (ownership is syscall-acquired, not foreground-tied); (5) the restart policy is real: /app/init_probe exits code 7 on every run, so init restarted it (1/2) then (2/2) then declared the restart budget exhausted (max_restarts=2, critical=false → NO CRITICAL marker). Run: tools/qemu_test.py --build --config limine_test_gui.conf --markers-file tools/init_markers.json --ready-marker 'gui_server: desktop ready' --timeout 300 --linger 8. The GUI kernel never prints [TERM-007], so --ready-marker MUST be overridden; --linger keeps collecting serial past 'desktop ready' so the probe restart cycle (a few 40ms init ticks) is captured even if it trails the ready milestone.",
+  "run": {
+    "config": "limine_test_gui.conf"
+  },
+  "required": [
+    { "marker": "[INIT] start: PID 1 userspace service manager", "claim": "the kernel launched /app/init as the foreground PID-1 service manager instead of gui_server directly", "source": "userspace/system_apps/init/src/main.rs" },
+    { "marker": "[INIT] first boot: provisioning /persist", "claim": "first-boot provisioning ran: /persist had no .provisioned marker so init started provisioning", "source": "userspace/system_apps/init/src/main.rs" },
+    { "marker": "[INIT] provisioning complete; wrote /persist/.provisioned", "claim": "provisioning finished: init created /persist/config and wrote the /persist/.provisioned marker", "source": "userspace/system_apps/init/src/main.rs" },
+    { "marker": "[INIT] gui-server: registered", "claim": "init discovered and parsed the production /system/services/gui-server.toml manifest", "source": "userspace/system_apps/init/src/main.rs" },
+    { "marker": "[INIT] init-probe: registered", "claim": "init discovered and parsed the smoke-only /system/services/init-probe.toml fixture", "source": "userspace/system_apps/init/src/main.rs" },
+    { "marker": "[INIT] supervising 2 service(s)", "claim": "init loaded exactly the two manifests shipped for the smoke config and entered its supervision loop", "source": "userspace/system_apps/init/src/main.rs" },
+    { "marker": "[INIT] gui-server: spawn pid=", "claim": "init spawned the compositor as a child process from the gui-server manifest's exec path", "source": "userspace/system_apps/init/src/main.rs" },
+    { "marker": "gui_server: desktop ready", "claim": "gui_server, running as init's CHILD, acquired the display/input master and reached an interactive presenting state — the init indirection did not regress the desktop", "source": "userspace/system_apps/gui_server/src/main.rs" },
+    { "marker": "[PROBE] init-probe run; exiting with failure to exercise restart", "claim": "the test probe actually executed as a supervised service (init really spawned it, not just parsed its manifest)", "source": "userspace/system_apps/init_probe/src/main.rs" },
+    { "marker": "[INIT] init-probe: restart (1/2)", "claim": "restart policy is real: after the probe exited non-zero, init applied restart=on-failure and respawned it (attempt 1 of the max_restarts=2 budget)", "source": "userspace/system_apps/init/src/main.rs" },
+    { "marker": "[INIT] init-probe: restart (2/2)", "claim": "the probe failed again and init respawned it a second time, consuming the restart budget", "source": "userspace/system_apps/init/src/main.rs" },
+    { "marker": "[INIT] init-probe: restart budget exhausted", "claim": "after max_restarts failures init stopped respawning the probe — the restart budget is enforced, not unbounded", "source": "userspace/system_apps/init/src/main.rs" }
+  ],
+  "forbidden": [
+    { "marker": "[PANIC]", "why": "kernel panic during init bring-up or desktop session", "source": "kernel/src/lib.rs" },
+    { "marker": "[INIT] PANIC in init", "why": "init (PID 1) panicked", "source": "userspace/system_apps/init/src/main.rs" },
+    { "marker": "[INIT] gui-server: faulted", "why": "the compositor crashed under init supervision (desktop regression)", "source": "userspace/system_apps/init/src/main.rs" },
+    { "marker": "[INIT] gui-server: CRITICAL service is down", "why": "the critical compositor service stayed down — the desktop session failed", "source": "userspace/system_apps/init/src/main.rs" },
+    { "marker": "[INIT] init-probe: CRITICAL service is down", "why": "init-probe is critical=false; a CRITICAL marker for it means the critical flag was mis-parsed", "source": "userspace/system_apps/init/src/main.rs" },
+    { "marker": "gui_server: FAIL", "why": "any gui_server self-test failure during bring-up", "source": "userspace/system_apps/gui_server/src/main.rs" }
+  ]
+}

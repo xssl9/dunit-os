@@ -118,6 +118,7 @@ def build_initrd(root: Path, config: Path) -> Path:
         "--out", str(out),
         "--userspace-dir", str(root / "build/userspace"),
         "--assets-dir", str(root / "assets"),
+        "--services-dir", str(root / "services"),
         "--config", str(config),
         "--exclude", "gui/boot_blur.bmp",
     ])
