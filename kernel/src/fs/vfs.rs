@@ -6,93 +6,12 @@ use core::fmt;
 
 use super::memfs::MemFs;
 
-static ELF_DEMO_BYTES: &[u8] = include_bytes!("../../../build/userspace/elf_demo");
-static FS_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/fs_test");
-static EXIT_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/exit_test");
-static ARGS_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/args_test");
-static COLOR_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/color_test");static CWD_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/cwd_test");
-static PATH_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/path_test");
-static IMAGE_DEMO_BYTES: &[u8] = include_bytes!("../../../build/userspace/image_demo");
-static BMP_VIEWER_BYTES: &[u8] = include_bytes!("../../../build/userspace/bmp_viewer");
-static SCHEDULER_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/scheduler_test");
-static SPAWN_READY_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/spawn_ready_test");
-static YIELD_CHILD_BYTES: &[u8] = include_bytes!("../../../build/userspace/yield_child");
-static YIELD_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/yield_test");
-static RESUMABLE_CHILD_BYTES: &[u8] = include_bytes!("../../../build/userspace/resumable_child");
-static RESUMABLE_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/resumable_test");
-static IPC_CHILD_BYTES: &[u8] = include_bytes!("../../../build/userspace/ipc_child");
-static IPC_PARENT_BYTES: &[u8] = include_bytes!("../../../build/userspace/ipc_parent");
-static RUNTIME_STRESS_BYTES: &[u8] = include_bytes!("../../../build/userspace/runtime_stress");
-static INPUT_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/input_test");
-static FILE_API_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/file_api_test");
-static ENV_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/env_test");
-static CALC_BYTES: &[u8] = include_bytes!("../../../build/userspace/calc");
-static STDIN_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/stdin_test");
-static DTOP_BYTES: &[u8] = include_bytes!("../../../build/userspace/dtop");
-static FAULT_PF_BYTES: &[u8] = include_bytes!("../../../build/userspace/fault_pf");
-static FAULT_UD_BYTES: &[u8] = include_bytes!("../../../build/userspace/fault_ud");
-static PREEMPT_CHILD_BYTES: &[u8] = include_bytes!("../../../build/userspace/preempt_child");
-static PREEMPT_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/preempt_test");
-static KILL_TARGET_BYTES: &[u8] = include_bytes!("../../../build/userspace/kill_target");
-static THREAD_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/thread_test");
-static WAIT_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/wait_test");
-static VM_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/vm_test");
-static VM_PEER_BYTES: &[u8] = include_bytes!("../../../build/userspace/vm_peer");
-static VM_GUARD_FAULT_BYTES: &[u8] = include_bytes!("../../../build/userspace/vm_guard_fault");
-static VM_PROTECT_FAULT_BYTES: &[u8] = include_bytes!("../../../build/userspace/vm_protect_fault");
-static TLS_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/tls_test");
-static FUTEX_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/futex_test");
-static HANDLE_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/handle_test");
-static GUI_SERVER_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_server");
-static GUI_SHBUF_PEER_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_shbuf_peer");
-static GUI_CLIENT_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_client");
-static GUI_DEMO_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_demo");
-static GUI_CALC_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_calc");
-static GUI_STAT_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_stat");
-static GUI_FILES_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_files");
-static PTY_ECHO_BYTES: &[u8] = include_bytes!("../../../build/userspace/pty_echo");
-static PTY_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/pty_test");
-static DSH_CALC_TEST_BYTES: &[u8] = include_bytes!("../../../build/userspace/dsh_calc_test");
-static DSH_BYTES: &[u8] = include_bytes!("../../../build/userspace/dsh");
-static GUI_TERMINAL_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_terminal");
-static GUI_SETTINGS_BYTES: &[u8] = include_bytes!("../../../build/userspace/gui_settings");
-
-/// DWM system settings (TOML), read at desktop start by gui_server. Not an ELF —
-/// a plain text asset embedded in the MemFS at /system/share/dwm/default.toml.
-///
-/// The SOURCE blob is a compile-time choice on the existing `boot-smoke-tests`
-/// feature (the ONLY thing that differs per limine config; userspace is built
-/// once for all ISOs, so gui_server itself cannot know which desktop it is). The
-/// plain desktop kernel (limine_dwm.conf) embeds `default.toml`, which boots
-/// clean with no windows; the smoke kernels (limine_test_gui.conf /
-/// limine_test_terminal.conf) embed `test.toml`, whose `[startup]` autostarts two
-/// gui_clients for the M3 isolation invariant. The mount PATH is identical, so
-/// the kernel stays app-agnostic — it only picks an opaque data blob.
-#[cfg(not(feature = "boot-smoke-tests"))]
-static DWM_DEFAULT_TOML: &[u8] = include_bytes!("../../../assets/dwm/default.toml");
-#[cfg(feature = "boot-smoke-tests")]
-static DWM_DEFAULT_TOML: &[u8] = include_bytes!("../../../assets/dwm/test.toml");
-
-/// Per-app and per-widget DWM config (TOML). Layered beside `default.toml`: each
-/// desktop app/widget owns a small file under /system/share/dwm/{apps,widgets}/,
-/// so its user-facing knobs (terminal palette/prompt, file-manager colors,
-/// per-widget toggle) live in config, not baked into the app ELF. These blobs are
-/// identical for every ISO (unlike `DWM_DEFAULT_TOML`, they carry no startup
-/// policy), so they are NOT feature-gated. Mounted writable; a missing file makes
-/// the owning app fall back to its built-in baseline.
-static DWM_APP_TERMINAL_TOML: &[u8] = include_bytes!("../../../assets/dwm/apps/gui_terminal.toml");
-static DWM_APP_FILES_TOML: &[u8] = include_bytes!("../../../assets/dwm/apps/gui_files.toml");
-static DWM_APP_CALC_TOML: &[u8] = include_bytes!("../../../assets/dwm/apps/gui_calc.toml");
-static DWM_APP_DEMO_TOML: &[u8] = include_bytes!("../../../assets/dwm/apps/gui_demo.toml");
-static DWM_WIDGET_CLOCK_TOML: &[u8] = include_bytes!("../../../assets/dwm/widgets/clock.toml");
-static DWM_WIDGET_MONITOR_TOML: &[u8] = include_bytes!("../../../assets/dwm/widgets/monitor.toml");
-
-pub struct AssetEntry {
-    pub path: &'static str,
-    pub data: &'static [u8],
-}
-
-include!(concat!(env!("OUT_DIR"), "/assets_manifest.rs"));
+// Applications (/app/*), desktop assets (/assets/**) and the DWM system config
+// tree (/system/share/dwm/**) are NO LONGER embedded in the kernel via
+// `include_bytes!`. They ship in a Limine-loaded initrd archive (tools/
+// pack_initrd.py -> kernel/src/initrd.rs); `init()` below populates the root
+// MemFS from `crate::initrd::get_initrd().entries()`, so the kernel knows no app
+// or asset name at compile time — every path comes from the archive at runtime.
 
 pub type FileDescriptor = u32;
 pub type FileHandle = usize;
@@ -561,15 +480,22 @@ fn serial_log(msg: &str) {
     crate::serial::serial_write(msg);
 }
 
-fn register_assets() {
-    unsafe {
-        for dir in ASSET_DIRS.iter() {
-            let _ = (*ROOT_MEMFS.0.get()).mkdir(dir);
+/// Create every intermediate directory for `path` (all components except the
+/// last) in the root MemFS, idempotently. MemFS `mkdir` is not recursive and
+/// rejects an existing or base directory with `AlreadyExists`, so each level is
+/// created top-down and errors are ignored. The archive ships files in
+/// path-sorted order, but this routine does not rely on that.
+fn ensure_parent_dirs(memfs: &mut MemFs, path: &str) {
+    let trimmed = path.trim_matches('/');
+    let mut parts = trimmed.split('/').peekable();
+    let mut prefix = String::new();
+    while let Some(part) = parts.next() {
+        if parts.peek().is_none() {
+            break; // the last component is the file itself, not a directory
         }
-
-        for asset in ASSETS.iter() {
-            (*ROOT_MEMFS.0.get()).add_static_file(asset.path, asset.data);
-        }
+        prefix.push('/');
+        prefix.push_str(part);
+        let _ = memfs.mkdir(&prefix);
     }
 }
 
@@ -577,190 +503,44 @@ pub fn init() -> Result<()> {
     serial_log("[VFS] init START\r\n");
     unsafe {
         let mut vfs = VirtualFileSystem::new();
+        let memfs: &'static mut MemFs = &mut *ROOT_MEMFS.0.get();
 
-        let mut elf_demo = Vec::new();
-        elf_demo.extend_from_slice(ELF_DEMO_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/elf_demo", elf_demo);
+        // Populate /app and /assets entirely from the Limine-loaded initrd
+        // archive (kernel/src/initrd.rs). The kernel embeds no application
+        // binaries or desktop assets; every path comes from the archive. Asset
+        // files are mounted zero-copy read-only (they reference module memory,
+        // which Limine never reclaims); everything else is copied into a
+        // writable MemFS node.
+        match crate::initrd::get_initrd() {
+            Some(initrd) => {
+                for entry in initrd.entries() {
+                    ensure_parent_dirs(memfs, &entry.name);
+                    if entry.name.starts_with("/assets/") {
+                        memfs.add_static_file(&entry.name, entry.data);
+                    } else {
+                        memfs.add_file(&entry.name, entry.data.to_vec());
+                    }
+                }
+            }
+            None => serial_log("[VFS] WARN: no initrd archive; /app and /assets are empty\r\n"),
+        }
 
-        let mut fs_test = Vec::new();
-        fs_test.extend_from_slice(FS_TEST_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/fs_test", fs_test);
+        // Kernel-seeded writable nodes that are not shipped in the archive.
+        let _ = memfs.mkdir("/persist");
+        ensure_parent_dirs(memfs, "/cfg/gui/shortcuts.conf");
+        memfs.add_file("/cfg/gui/shortcuts.conf", GUI_SHORTCUTS_CONFIG.to_vec());
 
-        let mut exit_test = Vec::new();
-        exit_test.extend_from_slice(EXIT_TEST_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/exit_test", exit_test);
-
-        let mut args_test = Vec::new();
-        args_test.extend_from_slice(ARGS_TEST_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/args_test", args_test);
-
-        let mut color_test = Vec::new();
-        color_test.extend_from_slice(COLOR_TEST_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/color_test", color_test);
-
-        let mut cwd_test = Vec::new();
-        cwd_test.extend_from_slice(CWD_TEST_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/cwd_test", cwd_test);
-
-        let mut path_test = Vec::new();
-        path_test.extend_from_slice(PATH_TEST_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/path_test", path_test);
-
-        let mut image_demo = Vec::new();
-        image_demo.extend_from_slice(IMAGE_DEMO_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/image_demo", image_demo);
-
-        let mut bmp_viewer = Vec::new();
-        bmp_viewer.extend_from_slice(BMP_VIEWER_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/bmp_viewer", bmp_viewer);
-
-        register_assets();
-        let _ = (*ROOT_MEMFS.0.get()).mkdir("/cfg/gui");
-        let _ = (*ROOT_MEMFS.0.get()).mkdir("/persist");
-        let mut gui_shortcuts = Vec::new();
-        gui_shortcuts.extend_from_slice(GUI_SHORTCUTS_CONFIG);
-        (*ROOT_MEMFS.0.get()).add_file("/cfg/gui/shortcuts.conf", gui_shortcuts);
-
-        let mut scheduler_test = Vec::new();
-        scheduler_test.extend_from_slice(SCHEDULER_TEST_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/scheduler_test", scheduler_test);
-
-        let mut spawn_ready_test = Vec::new();
-        spawn_ready_test.extend_from_slice(SPAWN_READY_TEST_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/spawn_ready_test", spawn_ready_test);
-
-        let mut yield_child = Vec::new();
-        yield_child.extend_from_slice(YIELD_CHILD_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/yield_child", yield_child);
-
-        let mut yield_test = Vec::new();
-        yield_test.extend_from_slice(YIELD_TEST_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/yield_test", yield_test);
-
-        let mut resumable_child = Vec::new();
-        resumable_child.extend_from_slice(RESUMABLE_CHILD_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/resumable_child", resumable_child);
-
-        let mut resumable_test = Vec::new();
-        resumable_test.extend_from_slice(RESUMABLE_TEST_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/resumable_test", resumable_test);
-
-        let mut ipc_child = Vec::new();
-        ipc_child.extend_from_slice(IPC_CHILD_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/ipc_child", ipc_child);
-
-        let mut ipc_parent = Vec::new();
-        ipc_parent.extend_from_slice(IPC_PARENT_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/ipc_parent", ipc_parent);
-
-        let mut runtime_stress = Vec::new();
-        runtime_stress.extend_from_slice(RUNTIME_STRESS_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/runtime_stress", runtime_stress);
-
-        let mut input_test = Vec::new();
-        input_test.extend_from_slice(INPUT_TEST_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/input_test", input_test);
-
-        let mut file_api_test = Vec::new();
-        file_api_test.extend_from_slice(FILE_API_TEST_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/file_api_test", file_api_test);
-
-        let mut env_test = Vec::new();
-        env_test.extend_from_slice(ENV_TEST_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/env_test", env_test);
-
-        let mut calc = Vec::new();
-        calc.extend_from_slice(CALC_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/calc", calc);
-
-        let mut stdin_test = Vec::new();
-        stdin_test.extend_from_slice(STDIN_TEST_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/stdin_test", stdin_test);
-
-        let mut dtop = Vec::new();
-        dtop.extend_from_slice(DTOP_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/dtop", dtop);
-
-        let mut fault_pf = Vec::new();
-        fault_pf.extend_from_slice(FAULT_PF_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/fault_pf", fault_pf);
-
-        let mut fault_ud = Vec::new();
-        fault_ud.extend_from_slice(FAULT_UD_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/fault_ud", fault_ud);
-
-        let mut preempt_child = Vec::new();
-        preempt_child.extend_from_slice(PREEMPT_CHILD_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/preempt_child", preempt_child);
-
-        let mut preempt_test = Vec::new();
-        preempt_test.extend_from_slice(PREEMPT_TEST_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/preempt_test", preempt_test);
-
-        let mut kill_target = Vec::new();
-        kill_target.extend_from_slice(KILL_TARGET_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/kill_target", kill_target);
-
-        let mut thread_test = Vec::new();
-        thread_test.extend_from_slice(THREAD_TEST_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/thread_test", thread_test);
-
-        let mut wait_test = Vec::new();
-        wait_test.extend_from_slice(WAIT_TEST_BYTES);
-        (*ROOT_MEMFS.0.get()).add_file("/app/wait_test", wait_test);
-
-        (*ROOT_MEMFS.0.get()).add_file("/app/vm_test", VM_TEST_BYTES.to_vec());
-        (*ROOT_MEMFS.0.get()).add_file("/app/vm_peer", VM_PEER_BYTES.to_vec());
-        (*ROOT_MEMFS.0.get()).add_file("/app/vm_guard_fault", VM_GUARD_FAULT_BYTES.to_vec());
-        (*ROOT_MEMFS.0.get()).add_file("/app/vm_protect_fault", VM_PROTECT_FAULT_BYTES.to_vec());
-        (*ROOT_MEMFS.0.get()).add_file("/app/tls_test", TLS_TEST_BYTES.to_vec());
-        (*ROOT_MEMFS.0.get()).add_file("/app/futex_test", FUTEX_TEST_BYTES.to_vec());
-        (*ROOT_MEMFS.0.get()).add_file("/app/handle_test", HANDLE_TEST_BYTES.to_vec());
-        (*ROOT_MEMFS.0.get()).add_file("/app/gui_server", GUI_SERVER_BYTES.to_vec());
-        (*ROOT_MEMFS.0.get()).add_file("/app/gui_shbuf_peer", GUI_SHBUF_PEER_BYTES.to_vec());
-        (*ROOT_MEMFS.0.get()).add_file("/app/gui_client", GUI_CLIENT_BYTES.to_vec());
-        (*ROOT_MEMFS.0.get()).add_file("/app/gui_demo", GUI_DEMO_BYTES.to_vec());
-        (*ROOT_MEMFS.0.get()).add_file("/app/gui_calc", GUI_CALC_BYTES.to_vec());
-        (*ROOT_MEMFS.0.get()).add_file("/app/gui_stat", GUI_STAT_BYTES.to_vec());
-        (*ROOT_MEMFS.0.get()).add_file("/app/gui_files", GUI_FILES_BYTES.to_vec());
-        (*ROOT_MEMFS.0.get()).add_file("/app/pty_echo", PTY_ECHO_BYTES.to_vec());
-        (*ROOT_MEMFS.0.get()).add_file("/app/pty_test", PTY_TEST_BYTES.to_vec());
-        (*ROOT_MEMFS.0.get()).add_file("/app/dsh_calc_test", DSH_CALC_TEST_BYTES.to_vec());
-        (*ROOT_MEMFS.0.get()).add_file("/app/dsh", DSH_BYTES.to_vec());
-        (*ROOT_MEMFS.0.get()).add_file("/app/gui_terminal", GUI_TERMINAL_BYTES.to_vec());
-        (*ROOT_MEMFS.0.get()).add_file("/app/gui_settings", GUI_SETTINGS_BYTES.to_vec());
-
-        // DWM system settings tree (slice 9): read-only defaults for gui_server.
-        // MemFS mkdir is not recursive and `/system` is not a base dir, so each
-        // level must be created in order before the leaf file is added.
-        let _ = (*ROOT_MEMFS.0.get()).mkdir("/system");
-        let _ = (*ROOT_MEMFS.0.get()).mkdir("/system/share");
-        let _ = (*ROOT_MEMFS.0.get()).mkdir("/system/share/dwm");
-        (*ROOT_MEMFS.0.get()).add_file("/system/share/dwm/default.toml", DWM_DEFAULT_TOML.to_vec());
-
-        // Layered per-app / per-widget config (slice 9b). Subdirs are pre-created
-        // here because PROTECTED_ROOTS blocks runtime mkdir under /system; the leaf
-        // files are writable, so an app may still open+edit them at runtime.
-        let _ = (*ROOT_MEMFS.0.get()).mkdir("/system/share/dwm/apps");
-        let _ = (*ROOT_MEMFS.0.get()).mkdir("/system/share/dwm/widgets");
-        (*ROOT_MEMFS.0.get()).add_file("/system/share/dwm/apps/gui_terminal.toml", DWM_APP_TERMINAL_TOML.to_vec());
-        (*ROOT_MEMFS.0.get()).add_file("/system/share/dwm/apps/gui_files.toml", DWM_APP_FILES_TOML.to_vec());
-        (*ROOT_MEMFS.0.get()).add_file("/system/share/dwm/apps/gui_calc.toml", DWM_APP_CALC_TOML.to_vec());
-        (*ROOT_MEMFS.0.get()).add_file("/system/share/dwm/apps/gui_demo.toml", DWM_APP_DEMO_TOML.to_vec());
-        (*ROOT_MEMFS.0.get()).add_file("/system/share/dwm/widgets/clock.toml", DWM_WIDGET_CLOCK_TOML.to_vec());
-        (*ROOT_MEMFS.0.get()).add_file("/system/share/dwm/widgets/monitor.toml", DWM_WIDGET_MONITOR_TOML.to_vec());
-
-        // Writable window/session store (M4). Pre-created empty so gui_server can
-        // rewrite it at runtime: PROTECTED_ROOTS blocks runtime mkdir under
-        // /system but permits open+write of a file that already exists. RAM-only
-        // (MemFS) until DunitFS v2 gives a persistent user-config partition, so
-        // geometry survives a reload/reconnect within a boot, not across boots.
-        (*ROOT_MEMFS.0.get()).add_file(
+        // Writable window/session store (M4): pre-created empty so gui_server
+        // can rewrite it at runtime. RAM-only until DunitFS v2 provides a
+        // persistent user-config partition, so geometry survives a
+        // reload/reconnect within a boot, not across boots.
+        ensure_parent_dirs(memfs, "/system/share/dwm/session.toml");
+        memfs.add_file(
             "/system/share/dwm/session.toml",
             b"# DWM window session store (auto-written by gui_server).\n".to_vec(),
         );
 
-        vfs.mount("/", &mut *ROOT_MEMFS.0.get())?;
+        vfs.mount("/", memfs)?;
         serial_log("[MEMFS] mounted as /\r\n");
 
         *VFS_INSTANCE.0.get() = Some(vfs);

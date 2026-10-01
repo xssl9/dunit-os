@@ -557,21 +557,21 @@ fn report_ipc_state(screen_log: &impl Fn(&str, bool), stats: ipc::IpcStats) {
     screen_log(buf.as_str(), false);
 }
 
-/// Report the measured initrd file count. No initrd archive is wired into the
-/// boot path yet, so this normally reports that none was provided and that the
-/// embedded `/app` and `/assets` trees are used instead of falsely claiming an
-/// archive was located and unpacked.
+/// Report the measured initrd file count. Applications and assets no longer have
+/// an embedded fallback — they live entirely in the Limine-loaded initrd archive
+/// — so a zero count is a hard failure (no apps/assets are available), not a
+/// benign "fall back to embedded" condition.
 fn report_initrd_state(screen_log: &impl Fn(&str, bool), file_count: usize) {
     if file_count == 0 {
         screen_log(
-            "[ .. ] Initrd: no archive provided; using embedded /app and /assets",
-            false,
+            "[FAIL] Initrd: no archive loaded; /app and /assets are unavailable",
+            true,
         );
     } else {
         let mut buf = FmtBuf::new();
         buf.push_str("[ OK ] Initrd: ");
         buf.push_u64(file_count as u64);
-        buf.push_str(" file(s) available");
+        buf.push_str(" file(s) loaded");
         screen_log(buf.as_str(), false);
     }
 }
@@ -586,6 +586,8 @@ pub extern "C" fn kernel_main(
     installer_payload_size: u64,
     bios_payload: *const u8,
     bios_payload_size: u64,
+    initrd_payload: *const u8,
+    initrd_payload_size: u64,
 ) -> ! {
     serial_write("[KERNEL] START\r\n");
 
@@ -593,6 +595,7 @@ pub extern "C" fn kernel_main(
         storage::installer::set_payload(installer_payload, installer_payload_size as usize);
         storage::installer::set_bios_payload(bios_payload, bios_payload_size as usize);
     }
+    initrd::set_module(initrd_payload, initrd_payload_size as usize);
 
     unsafe {
         cpu::init_fpu();
@@ -722,6 +725,12 @@ pub extern "C" fn kernel_main(
         serial_write("[IPC] ipc::init() returned\r\n");
         report_ipc_state(&screen_log, ipc_stats);
 
+        screen_log("[ .. ] Loading initial ramdisk", false);
+        serial_write("[INITRD] Calling initrd::init()...\r\n");
+        let initrd_files = initrd::init();
+        serial_write("[INITRD] initrd::init() returned\r\n");
+        report_initrd_state(&screen_log, initrd_files);
+
         screen_log("[ .. ] Initializing Virtual File System", false);
         screen_log("[ .. ] Mounting root filesystem", false);
         serial_write("[VFS] Calling vfs::init()...\r\n");
@@ -736,12 +745,6 @@ pub extern "C" fn kernel_main(
                 screen_log("[FAIL] Virtual filesystem initialization failed", true);
             }
         }
-
-        screen_log("[ .. ] Loading initial ramdisk", false);
-        serial_write("[INITRD] Calling initrd::init()...\r\n");
-        let initrd_files = initrd::init();
-        serial_write("[INITRD] initrd::init() returned\r\n");
-        report_initrd_state(&screen_log, initrd_files);
 
         screen_log("[ .. ] Initializing input drivers", false);
         screen_log("[ .. ] Initializing PS/2 controller", false);
@@ -764,15 +767,15 @@ pub extern "C" fn kernel_main(
         let ipc_stats = ipc::init();
         report_ipc_state(&screen_log, ipc_stats);
 
+        screen_log("[ .. ] Loading initial ramdisk", false);
+        let initrd_files = initrd::init();
+        report_initrd_state(&screen_log, initrd_files);
+
         screen_log("[ .. ] Initializing VFS", false);
         match fs::vfs::init() {
             Ok(()) => screen_log("[ OK ] VFS ready", false),
             Err(_) => screen_log("[FAIL] VFS initialization failed", true),
         }
-
-        screen_log("[ .. ] Loading initial ramdisk", false);
-        let initrd_files = initrd::init();
-        report_initrd_state(&screen_log, initrd_files);
 
         screen_log("[ .. ] Initializing input drivers", false);
         serial_write("[DRV] Calling drivers::init()...\r\n");

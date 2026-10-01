@@ -20,7 +20,7 @@
     { "marker": "[IPC] manager ready: bounded byte message queues (lazy per-PID)", "claim": "byte message queues", "source": "kernel/src/ipc/mod.rs" },
     { "marker": "[MEMFS] mounted as /", "claim": "VFS + MemFS as /", "source": "kernel/src/fs" },
     { "marker": "[VFS] init OK", "claim": "VFS ready", "source": "kernel/src/fs/vfs.rs" },
-    { "marker": "Initrd: no archive provided; using embedded /app and /assets", "claim": "initrd honest status (MISSING archive)", "source": "kernel/src/initrd.rs" },
+    { "marker": "[ OK ] Initrd:", "claim": "initrd archive loaded from the Limine module (apps/assets no longer embedded in the kernel)", "source": "kernel/src/initrd.rs" },
     { "marker": "Keyboard driver ready", "claim": "PS/2 keyboard", "source": "kernel/src/drivers" },
     { "marker": "Mouse input driver ready", "claim": "PS/2 mouse", "source": "kernel/src/drivers" },
     { "marker": "IRQ 0: PIT timer enabled (~100 Hz)", "claim": "PIT timer", "source": "kernel/src/lib.rs" },

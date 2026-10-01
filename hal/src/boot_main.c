@@ -156,7 +156,9 @@ extern void kernel_main(
     const void *installer_payload,
     uint64_t installer_payload_size,
     const void *bios_payload,
-    uint64_t bios_payload_size
+    uint64_t bios_payload_size,
+    const void *initrd_payload,
+    uint64_t initrd_payload_size
 );
 
 void boot_main(void) {
@@ -218,27 +220,40 @@ void boot_main(void) {
         serial_write("[BOOT] framebuffer FAIL\r\n");
     }
 
+    // Boot modules are matched by basename substring, not by position: the Live
+    // ISO ships three (initrd.img + installer-esp.img + installer-bios.bin) while
+    // an installed system ships only initrd.img. Positional indexing would bind
+    // the wrong bytes to the wrong consumer whenever a module is absent.
     const void *installer_payload = NULL;
     uint64_t installer_payload_size = 0;
-    if (module_resp && module_resp->module_count > 0 && module_resp->modules
-        && module_resp->modules[0]) {
-        installer_payload = module_resp->modules[0]->address;
-        installer_payload_size = module_resp->modules[0]->size;
-        serial_write("[BOOT] installer payload OK\r\n");
-    } else {
-        serial_write("[BOOT] installer payload unavailable\r\n");
-    }
-
     const void *bios_payload = NULL;
     uint64_t bios_payload_size = 0;
-    if (module_resp && module_resp->module_count > 1 && module_resp->modules
-        && module_resp->modules[1]) {
-        bios_payload = module_resp->modules[1]->address;
-        bios_payload_size = module_resp->modules[1]->size;
-        serial_write("[BOOT] BIOS payload OK\r\n");
-    } else {
-        serial_write("[BOOT] BIOS payload unavailable\r\n");
+    const void *initrd_payload = NULL;
+    uint64_t initrd_payload_size = 0;
+    if (module_resp && module_resp->modules) {
+        for (uint64_t i = 0; i < module_resp->module_count; i++) {
+            struct limine_kernel_file *m = module_resp->modules[i];
+            if (!m || !m->path) {
+                continue;
+            }
+            if (strstr_contains(m->path, "initrd.img")) {
+                initrd_payload = m->address;
+                initrd_payload_size = m->size;
+            } else if (strstr_contains(m->path, "installer-esp.img")) {
+                installer_payload = m->address;
+                installer_payload_size = m->size;
+            } else if (strstr_contains(m->path, "installer-bios.bin")) {
+                bios_payload = m->address;
+                bios_payload_size = m->size;
+            }
+        }
     }
+    serial_write(initrd_payload ? "[BOOT] initrd payload OK\r\n"
+                                : "[BOOT] initrd payload unavailable\r\n");
+    serial_write(installer_payload ? "[BOOT] installer payload OK\r\n"
+                                   : "[BOOT] installer payload unavailable\r\n");
+    serial_write(bios_payload ? "[BOOT] BIOS payload OK\r\n"
+                              : "[BOOT] BIOS payload unavailable\r\n");
 
     serial_write("[BOOT] kernel handoff START\r\n");
     kernel_main(
@@ -249,7 +264,9 @@ void boot_main(void) {
         installer_payload,
         installer_payload_size,
         bios_payload,
-        bios_payload_size
+        bios_payload_size,
+        initrd_payload,
+        initrd_payload_size
     );
     serial_write("[BOOT] kernel handoff FAIL\r\n");
 

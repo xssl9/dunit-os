@@ -41,15 +41,15 @@ KERNEL_FEATURES =
 ifneq ($(filter limine_test_terminal.conf limine_test_gui.conf,$(notdir $(LIMINE_CONFIG))),)
 KERNEL_FEATURES = --features boot-smoke-tests
 endif
-# `boot-smoke-tests` is enabled ONLY for the two smoke ISOs above. Besides the
-# in-kernel smoke assertions, it now also swaps the embedded DWM config blob
-# (kernel/src/fs/vfs.rs): the plain desktop kernel embeds assets/dwm/default.toml
-# (clean, windowless boot), while the smoke kernels embed assets/dwm/test.toml
-# (its [startup] autostarts two gui_clients for the M3 isolation invariant). The
-# userspace side is built ONCE for every ISO; only this kernel data blob differs,
-# so the choice stays a compile-time kernel concern and gui_server learns nothing
-# about which desktop it serves. The in-kernel legacy GUI has been removed
-# entirely; the default build is the userspace-DWM kernel.
+# `boot-smoke-tests` is enabled ONLY for the two smoke ISOs above; it switches on
+# the in-kernel smoke assertions. The DWM config that ships as default.toml is NO
+# LONGER an embedded kernel blob: tools/pack_initrd.py selects assets/dwm/test.toml
+# (its [startup] autostarts two gui_clients for the M3 isolation invariant) vs
+# assets/dwm/default.toml (clean, windowless boot) by the SAME config basename and
+# ships it in the initrd archive. The userspace side is built ONCE for every ISO;
+# gui_server still learns nothing about which desktop it serves. The in-kernel
+# legacy GUI has been removed entirely; the default build is the userspace-DWM
+# kernel, and the kernel embeds no application binaries or desktop assets.
 
 HAL_OBJS = $(BUILD_DIR)/boot.o $(BUILD_DIR)/boot_main.o $(BUILD_DIR)/limine.o $(BUILD_DIR)/hal.o $(BUILD_DIR)/ports.o \
            $(BUILD_DIR)/gdt.o $(BUILD_DIR)/gdt_asm.o \
@@ -130,14 +130,13 @@ iso: $(BUILD_DIR)/kernel.elf userspace
 	test -f $(LIMINE_CONFIG)
 	python3 tools/install_disk.py $(BUILD_DIR)/installer-esp.img --esp-image-only --no-build --config $(LIMINE_CONFIG) --yes-i-know-this-erases-the-disk
 	mkdir -p $(ISO_DIR)/boot/limine
-	mkdir -p $(ISO_DIR)/boot/userspace
 	cp $(BUILD_DIR)/kernel.elf $(ISO_DIR)/boot/
+	cp $(BUILD_DIR)/initrd.img $(ISO_DIR)/boot/
 	cp $(BUILD_DIR)/installer-esp.img $(ISO_DIR)/boot/
 	cp $(BUILD_DIR)/installer-bios.bin $(ISO_DIR)/boot/
 	cp $(LIMINE_CONFIG) $(ISO_DIR)/boot/limine/limine.conf
 	test -f assets/gui/background.png && cp assets/gui/background.png $(ISO_DIR)/boot/background.png || true
 	test -f assets/boot/limine.png && cp assets/boot/limine.png $(ISO_DIR)/boot/limine.png || true
-	cp $(USERSPACE_BUILD_DIR)/* $(ISO_DIR)/boot/userspace/ 2>/dev/null || true
 	cp limine/limine-bios.sys $(ISO_DIR)/boot/limine/
 	cp limine/limine-bios-cd.bin $(ISO_DIR)/boot/limine/
 	cp limine/limine-uefi-cd.bin $(ISO_DIR)/boot/limine/

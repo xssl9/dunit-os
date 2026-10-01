@@ -102,6 +102,28 @@ def validate_payload(root: Path, config: Path) -> None:
         raise RuntimeError(f"missing install payload: {', '.join(missing)}")
 
 
+def build_initrd(root: Path, config: Path) -> Path:
+    """Pack userspace ELFs + assets + DWM config into build/initrd.img.
+
+    The kernel embeds no application binaries or desktop assets; they ship in
+    this Limine-module archive (tools/pack_initrd.py -> kernel/src/initrd.rs).
+    gui/boot_blur.bmp is excluded: it is the one asset still embedded in the
+    kernel (the boot-background pre-allocator needs it before the VFS exists),
+    so shipping it in the archive too would only waste image space.
+    """
+    out = root / "build/initrd.img"
+    run([
+        sys.executable,
+        str(root / "tools/pack_initrd.py"),
+        "--out", str(out),
+        "--userspace-dir", str(root / "build/userspace"),
+        "--assets-dir", str(root / "assets"),
+        "--config", str(config),
+        "--exclude", "gui/boot_blur.bmp",
+    ])
+    return out
+
+
 def partition_disk(path: Path) -> None:
     run(["parted", "-s", str(path), "mklabel", "gpt"])
     run(
@@ -256,21 +278,32 @@ def build_esp_image(path: Path, root: Path, config: Path) -> None:
 def copy_boot_files(root: Path, fat_image: str, config: Path) -> None:
     env = os.environ.copy()
     env["MTOOLS_SKIP_CHECK"] = "1"
-    for directory in ("EFI", "EFI/BOOT", "boot", "boot/limine", "boot/userspace"):
+    for directory in ("EFI", "EFI/BOOT", "boot", "boot/limine"):
         run(["mmd", "-i", fat_image, f"::/{directory}"], env=env)
+
+    # The installed system boots from its own ESP, which carries only the initrd
+    # module (apps + assets); the installer-only payloads (installer-esp.img and
+    # installer-bios.bin) are not copied to the target, so their module_path
+    # lines are stripped while the initrd module_path line is preserved.
+    def keep_config_line(line: str) -> bool:
+        stripped = line.lstrip()
+        if not stripped.startswith("module_path:"):
+            return True
+        return "initrd.img" in stripped
 
     installed_config = root / "build/installed-limine.conf"
     installed_config.write_text(
         "".join(
             line
             for line in config.read_text(encoding="utf-8").splitlines(keepends=True)
-            if not line.lstrip().startswith("module_path:")
+            if keep_config_line(line)
         ),
         encoding="utf-8",
     )
     files = [
         (root / "limine/BOOTX64.EFI", "::/EFI/BOOT/BOOTX64.EFI"),
         (root / "build/kernel.elf", "::/boot/kernel.elf"),
+        (root / "build/initrd.img", "::/boot/initrd.img"),
         (installed_config, "::/boot/limine/limine.conf"),
         (root / "limine/limine-bios.sys", "::/boot/limine/limine-bios.sys"),
     ]
@@ -282,11 +315,6 @@ def copy_boot_files(root: Path, fat_image: str, config: Path) -> None:
         if not source.is_file():
             raise RuntimeError(f"missing install payload: {source}")
         run(["mcopy", "-o", "-i", fat_image, str(source), destination], env=env)
-
-    userspace = root / "build/userspace"
-    for source in sorted(userspace.iterdir()):
-        if source.is_file():
-            run(["mcopy", "-o", "-i", fat_image, str(source), "::/boot/userspace/"], env=env)
 
 
 def format_dunitfs(path: Path, start: int, sectors: int) -> None:
@@ -346,6 +374,7 @@ def main() -> int:
     if not args.no_build:
         subprocess.run(["make", "all", "userspace"], cwd=root, check=True)
     validate_payload(root, config)
+    build_initrd(root, config)
     if args.esp_image_only:
         if block_device:
             raise RuntimeError("ESP payload target must be a regular image file")
