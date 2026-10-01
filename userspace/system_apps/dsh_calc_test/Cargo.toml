@@ -1,0 +1,20 @@
+# dsh ⇄ calc cooked-bridge smoke driver (M4 Subtask 4).
+#
+# Stands in for gui_terminal: becomes dsh's pty MASTER, launches `calc` through
+# dsh's command dispatch, feeds an expression, and asserts BOTH that dsh echoed
+# the keystrokes back (the cooked line discipline — the fix under test, since
+# calc never echoes its own input) AND that calc evaluated and answered. This
+# proves a classic terminal-mode program runs under the GUI terminal exactly as
+# it does in kernel Terminal Mode. Exits 0 on a verified session, 1 otherwise;
+# the kernel smoke harness checks that exit code.
+[package]
+name = "dsh_calc_test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libdunit = { path = "../../libdunit" }
+
+[[bin]]
+name = "dsh_calc_test"
+path = "src/main.rs"

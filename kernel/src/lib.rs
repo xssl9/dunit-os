@@ -873,6 +873,12 @@ pub extern "C" fn kernel_main(
         } else {
             screen_log("[FAIL] PTY endpoint smoke failed", true);
         }
+        screen_log("[ .. ] Running dsh/calc terminal-program smoke test", false);
+        if command::run_dsh_calc_smoke() {
+            screen_log("[ OK ] dsh/calc terminal-program smoke passed", false);
+        } else {
+            screen_log("[FAIL] dsh/calc terminal-program smoke failed", true);
+        }
     }
 
     screen_log("[ OK ] System initialization complete", false);

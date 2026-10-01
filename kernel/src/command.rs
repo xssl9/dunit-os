@@ -317,6 +317,29 @@ pub fn run_pty_smoke() -> bool {
     ok
 }
 
+/// Exercise the GUI-terminal program path end to end: `dsh_calc_test` (master)
+/// `pty_spawn`s `dsh` as its slave, drives the prompt to launch `calc` through
+/// `dsh`'s `spawn_external` bridge, feeds an expression, and verifies BOTH that
+/// dsh echoed the keystrokes back (its cooked line discipline — calc never
+/// echoes) and that calc evaluated the result — proving a classic terminal-mode
+/// program runs under the GUI terminal exactly as it does in kernel Terminal
+/// Mode. The driver exits 0 only on a fully verified session.
+#[cfg(feature = "boot-smoke-tests")]
+pub fn run_dsh_calc_smoke() -> bool {
+    crate::serial_write("[DSH-CALC-TEST] START\r\n");
+    let mut input = NoExecInput;
+    let result = run_foreground_exec("/", "dsh_calc_test", ProcessOutputSink::SerialOnly, &mut input);
+    let ok = match result {
+        Ok((_, exit)) => {
+            let _ = process::autoreap_process(exit.pid, "dsh-calc-smoke");
+            matches!(exit.status, process::ProcessExitStatus::Exited(0))
+        }
+        Err(_) => false,
+    };
+    crate::serial_write(if ok { "[DSH-CALC-TEST] OK\r\n" } else { "[DSH-CALC-TEST] FAIL\r\n" });
+    ok
+}
+
 fn serial_write_i32(value: i32) {
     if value < 0 {
         crate::serial_write("-");

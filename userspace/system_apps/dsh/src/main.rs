@@ -139,6 +139,19 @@ fn run(line: &str) {
         "free" => cmd_free(),
         "ps" => cmd_ps(),
         "exit" => libdunit::exit(0),
+        // `exec <name>` runs /app/<name> — the same verb kernel Terminal Mode
+        // uses to launch a program, so muscle memory carries over 1:1.
+        "exec" => {
+            let (name, _) = split_cmd(rest);
+            if name.is_empty() {
+                out("exec: missing operand\n");
+            } else {
+                let path = format!("/app/{}", name);
+                if !spawn_external(&path) {
+                    out(&format!("dsh: command not found: {}\n", name));
+                }
+            }
+        }
         _ => {
             let path = format!("/app/{}", cmd);
             if !spawn_external(&path) {
@@ -154,7 +167,7 @@ fn cmd_help() {
     out("text:       echo <text> [> file | >> file]\n");
     out("system:     uname [-a]  whoami  date  uptime  free  ps\n");
     out("control:    clear  help  exit\n");
-    out("any other name runs /app/<name> on a bridged pty\n");
+    out("any other name (or `exec <name>`) runs /app/<name> on a bridged pty\n");
 }
 
 fn cmd_echo(rest: &str) {
@@ -365,10 +378,19 @@ fn cmd_ps() {
 
 /// Run an external program `path` (typically `/app/<name>`) on a private inner
 /// pty and bridge its stdio to ours until it exits. dsh becomes the MASTER of
-/// the inner pty; the child's stdout is forwarded to our stdout (the terminal)
-/// and keystrokes from our stdin are forwarded to the child's stdin. Ctrl-C
-/// (0x03) on our stdin kills the child. Returns false if the program could not
-/// be spawned (so the caller can print "command not found").
+/// the inner pty; the child's stdout is forwarded to our stdout (the terminal).
+///
+/// On the input side dsh applies a COOKED LINE DISCIPLINE identical to kernel
+/// Terminal Mode (`kernel/src/lib.rs::terminal_collect_foreground_input`):
+/// classic terminal-mode programs (e.g. `calc`) do NOT echo their own keystrokes
+/// and expect to receive whole lines terminated by '\n'. So dsh echoes printable
+/// keystrokes back to our stdout, erases on Backspace, swallows ESC/CSI cursor
+/// sequences, and only forwards a complete line (plus the terminating '\n') to
+/// the child when Enter is pressed. Ctrl-C (0x03) kills the child and drops the
+/// pending line. Keeping this discipline in dsh (userspace policy) is what makes
+/// the GUI terminal behave "just like a clean terminal" WITHOUT the kernel pty
+/// (a raw byte mechanism) growing any line discipline of its own. Returns false
+/// if the program could not be spawned (so the caller can print "not found").
 fn spawn_external(path: &str) -> bool {
     let inner = libdunit::pty_create();
     if inner < 0 {
@@ -383,6 +405,12 @@ fn spawn_external(path: &str) -> bool {
     let child = child as u32;
     let mut out_buf = [0u8; 512];
     let mut in_buf = [0u8; 256];
+    // Cooked line buffer: accumulates one input line; the last slot is reserved
+    // for the '\n' appended on Enter, so printables fill at most line.len()-1.
+    let mut line = [0u8; 256];
+    let mut llen = 0usize;
+    // ESC-sequence state: 0 = normal, 1 = saw ESC (0x1B), 2 = inside CSI (ESC [).
+    let mut esc = 0u8;
     loop {
         let mut progressed = false;
         // Child stdout -> our stdout (the terminal). EPIPE => child exited and
@@ -394,14 +422,60 @@ fn spawn_external(path: &str) -> bool {
         } else if n == libdunit::EPIPE {
             break;
         }
-        // Our stdin (terminal keystrokes) -> child stdin.
+        // Our stdin (terminal keystrokes) -> cooked line discipline -> child.
         let m = libdunit::read(0, &mut in_buf);
         if m > 0 {
-            let slice = &in_buf[..m as usize];
-            if slice.contains(&0x03) {
-                libdunit::kill(child);
+            for &b in &in_buf[..m as usize] {
+                match esc {
+                    1 => {
+                        esc = if b == b'[' { 2 } else { 0 };
+                        continue;
+                    }
+                    2 => {
+                        // A CSI final byte (0x40..=0x7E) ends the sequence.
+                        if (0x40..=0x7e).contains(&b) {
+                            esc = 0;
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+                match b {
+                    0x1B => esc = 1, // begin an escape sequence (arrows etc.)
+                    0x03 => {
+                        // Ctrl-C: interrupt the child, discard the pending line.
+                        libdunit::kill(child);
+                        llen = 0;
+                    }
+                    b'\n' => {
+                        out("\n"); // echo the newline the way Terminal Mode does
+                        if llen < line.len() {
+                            line[llen] = b'\n';
+                            llen += 1;
+                        }
+                        libdunit::pty_write(inner, &line[..llen]);
+                        llen = 0;
+                    }
+                    b'\r' => {}  // Enter arrives as '\n'; ignore bare CR
+                    b'\t' => {}  // ignore Tab (matches Terminal Mode)
+                    0x08 | 0x7F => {
+                        if llen > 0 {
+                            llen -= 1;
+                            // Destructive erase (the Term treats 0x08 as a plain
+                            // non-destructive cursor-left), so blank + back up.
+                            out("\x08 \x08");
+                        }
+                    }
+                    0x20..=0x7E => {
+                        if llen < line.len() - 1 {
+                            line[llen] = b;
+                            llen += 1;
+                            libdunit::write(1, &[b]); // echo the typed character
+                        }
+                    }
+                    _ => {}
+                }
             }
-            libdunit::pty_write(inner, slice);
             progressed = true;
         }
         if !progressed {

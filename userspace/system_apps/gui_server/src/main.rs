@@ -946,6 +946,11 @@ fn try_launch(
 /// two clients present at once (the baseline config autostarts three).
 fn serve_two_clients() -> bool {
     let cfg = settings::load_config();
+    // The display mode as configured at boot, captured BEFORE any client is spawned
+    // — so a settings client that rewrites `[display]` during bring-up cannot move
+    // this baseline. Threaded into the first `run_desktop_session` so a bring-up
+    // resolution edit is diffed against the true boot mode (see that fn's head).
+    let boot_display = cfg.settings.display;
     let mut server = Server::new();
     let mut clients: Vec<ClientState> = Vec::new();
     // Notification texts a client posts (NOTIFY_MAGIC) DURING bring-up — before the
@@ -957,6 +962,10 @@ fn serve_two_clients() -> bool {
     // path once its toast queue exists (single source of truth; nothing is lost to a
     // bring-up race).
     let mut pending_notifies: Vec<alloc::string::String> = Vec::new();
+    // A reload pinged by a client (e.g. gui_settings' resolution self-test) while it
+    // presents during bring-up — captured here instead of dropped, then handed to
+    // the first interactive session so the edited `[display]` actually re-applies.
+    let mut bringup_reload = false;
 
     // Autostart the configured startup apps. Each entry is a registry index; a
     // stale/out-of-range index is skipped rather than trusted. Initial slots
@@ -981,7 +990,14 @@ fn serve_two_clients() -> bool {
         // session at the new resolution; `take` hands the notifies over once, then
         // empties so re-entries start clean.
         let mut pn = pending_notifies;
-        while run_desktop_session(&mut server, &mut clients, core::mem::take(&mut pn)) {}
+        let mut baseline = Some(boot_display);
+        while run_desktop_session(
+            &mut server,
+            &mut clients,
+            core::mem::take(&mut pn),
+            baseline.take(),
+            core::mem::take(&mut bringup_reload),
+        ) {}
         return false;
     }
 
@@ -1011,11 +1027,12 @@ fn serve_two_clients() -> bool {
             Some(idx) => idx,
             None => continue, // message from an unknown pid — ignore
         };
-        // Startup smoke: no live-reload here, so discard that signal. A client
-        // NOTIFY posted this early is preserved in `pending_notifies` and shown once
-        // the desktop session's toast queue exists (bring-up race safety).
-        let mut _reload = false;
-        handle_client_payload(&mut server, &mut clients[idx], &rx[..n], &mut _reload, &mut pending_notifies);
+        // A settings client can present and run its resolution self-test here (a
+        // bring-up race): capture its reload ping into `bringup_reload` instead of
+        // dropping it, so the first interactive session re-applies the edited
+        // `[display]` (see run_desktop_session's first-entry baseline). NOTIFYs
+        // posted this early are still preserved in `pending_notifies`.
+        handle_client_payload(&mut server, &mut clients[idx], &rx[..n], &mut bringup_reload, &mut pending_notifies);
 
         // A composition tick: route each FRAME_DONE to its client and blit that
         // client's committed buffer into its own slot.
@@ -1071,12 +1088,22 @@ fn serve_two_clients() -> bool {
         // the maximize/fullscreen mechanism across a REAL process boundary (the
         // client re-allocates its buffer and re-imports it with a fresh object
         // id), which the in-process compositor self-test cannot cover.
-        resize_one_client(&mut server, &mut clients, &mut pending_notifies);
+        resize_one_client(&mut server, &mut clients, &mut pending_notifies, &mut bringup_reload);
     }
     // Loop so a live `[display]` change re-enters the session at the new
     // resolution (rebuilding all buffers); the notifies are handed over once.
     let mut pn = pending_notifies;
-    while run_desktop_session(&mut server, &mut clients, core::mem::take(&mut pn)) {}
+    // The first session carries the boot display baseline + any reload pinged during
+    // bring-up (serve_two_clients / resize_one_client); re-entries pass None/false
+    // because the config file is authoritative by then.
+    let mut baseline = Some(boot_display);
+    while run_desktop_session(
+        &mut server,
+        &mut clients,
+        core::mem::take(&mut pn),
+        baseline.take(),
+        core::mem::take(&mut bringup_reload),
+    ) {}
 
     for c in clients.iter() {
         if c.mapped_handle != 0 {
@@ -1104,6 +1131,7 @@ fn resize_one_client(
     server: &mut Server,
     clients: &mut [ClientState],
     pending_notifies: &mut Vec<alloc::string::String>,
+    reload_seen: &mut bool,
 ) {
     const NEWW: u32 = 320;
     const NEWH: u32 = 160;
@@ -1134,11 +1162,11 @@ fn resize_one_client(
             Some(i) => i,
             None => continue,
         };
-        // Live-reload is not driven during this resize proof; a NOTIFY posted by any
-        // client mid-resize is preserved (bring-up race safety) and shown once the
-        // desktop session's toast queue exists.
-        let mut _reload = false;
-        handle_client_payload(server, &mut clients[idx], &rx[..n], &mut _reload, pending_notifies);
+        // A settings client's resolution self-test can present during this resize
+        // proof: capture its reload ping into `reload_seen` so the first interactive
+        // session re-applies the edited `[display]` rather than dropping the signal.
+        // A NOTIFY posted mid-resize is still preserved (bring-up race safety).
+        handle_client_payload(server, &mut clients[idx], &rx[..n], reload_seen, pending_notifies);
         // Route every frame callback to its owner (keeps the other clients live).
         // Mirror `pump_clients`: a client that completes its handshake here (a
         // slower startup app such as the terminal or file manager, which finishes
@@ -2957,6 +2985,8 @@ fn run_desktop_session(
     server: &mut Server,
     clients: &mut Vec<ClientState>,
     pending_notifies: Vec<alloc::string::String>,
+    first_baseline: Option<settings::Display>,
+    pending_reload: bool,
 ) -> bool {
     // Load config FIRST: `[display]` must program the video mode BEFORE we query
     // the framebuffer, so bw/bh and every buffer derived from them size to the
@@ -2982,8 +3012,27 @@ fn run_desktop_session(
     // Config-driven runtime resolution: apply BEFORE `get_framebuffer` so the
     // query below returns the chosen mode's geometry. `applied_display` is the
     // baseline the live-reload block diffs against to detect a GUI resolution edit.
-    apply_display_mode(&cfg.settings.display);
-    let applied_display = cfg.settings.display;
+    //
+    // On the FIRST session entry we apply (and baseline against) `first_baseline` —
+    // the display mode captured at boot, BEFORE any client could run. A settings
+    // client's resolution self-test can present during bring-up (serve_two_clients
+    // / resize_one_client) and rewrite `[display]` + ping reload THERE; that ping is
+    // carried over as `pending_reload`. Baselining against the boot mode (not the
+    // already-rewritten config file) means the carried-over reload is diffed as a
+    // real change and drives the SAME re-entry a purely-runtime edit would — so the
+    // GUI<->[display] round trip is proven deterministically, independent of exactly
+    // when the settings client happened to present. Re-entries pass `None` and apply
+    // whatever the (now authoritative) config requests.
+    let applied_display = match first_baseline {
+        Some(boot) => {
+            apply_display_mode(&boot);
+            boot
+        }
+        None => {
+            apply_display_mode(&cfg.settings.display);
+            cfg.settings.display
+        }
+    };
 
     let mut fb = libdunit::FbInfo {
         addr: 0,
@@ -3382,7 +3431,10 @@ fn run_desktop_session(
     // Slice C: raised by a gui_settings "reload" control message (see
     // `handle_client_payload`); drained at the top of the frame to re-read the
     // config and re-seed live theme/layout/effects state.
-    let mut reload_requested = false;
+    // Seed with any reload pinged during bring-up (a settings client that presented
+    // in serve_two_clients/resize_one_client). The loop's reload block processes it
+    // on the first tick, diffing the edited config against `applied_display` above.
+    let mut reload_requested = pending_reload;
     // Client-posted notification texts collected by `pump_clients` this tick
     // (NOTIFY_MAGIC), turned into config-gated toasts right after the pump. Reused
     // across frames (cleared each tick) so no per-frame allocation in the hot path.

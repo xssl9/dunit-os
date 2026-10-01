@@ -48,7 +48,8 @@
     { "marker": "[THREAD-TEST] OK", "claim": "schedulable TIDs, shared process address space, per-thread XMM and lifecycle", "source": "kernel/src/command.rs" },
     { "marker": "[WAIT-TEST] OK", "claim": "timer and IPC wait queues with blocked thread wakeup", "source": "kernel/src/command.rs" },
     { "marker": "[VM-TEST] OK", "claim": "munmap/mprotect, shared VM frames, guard pages and frame reclamation", "source": "kernel/src/command.rs" },
-    { "marker": "[TLS-TEST] OK", "claim": "FS.base thread pointer, PT_TLS initialization and per-thread TLS isolation", "source": "kernel/src/command.rs" }
+    { "marker": "[TLS-TEST] OK", "claim": "FS.base thread pointer, PT_TLS initialization and per-thread TLS isolation", "source": "kernel/src/command.rs" },
+    { "marker": "[DSH-CALC-TEST] OK", "claim": "GUI-terminal program path: dsh's cooked line discipline runs a classic terminal-mode program (calc) under spawn_external exactly like kernel Terminal Mode — echoes keystrokes, delivers whole lines, child evaluates and exits cleanly", "source": "kernel/src/command.rs" }
   ],
   "forbidden": [
     { "marker": "[PANIC]", "why": "kernel panic (covers double-fault/invalid-TSS, which panic!)", "source": "kernel/src/lib.rs" },
@@ -58,6 +59,7 @@
     { "marker": "[THREAD-TEST] FAIL", "why": "thread lifecycle or state isolation failed", "source": "kernel/src/command.rs" },
     { "marker": "[WAIT-TEST] FAIL", "why": "blocked sleep or IPC/event wakeup failed", "source": "kernel/src/command.rs" },
     { "marker": "[VM-TEST] FAIL", "why": "VM mapping lifecycle failed", "source": "kernel/src/command.rs" },
-    { "marker": "[TLS-TEST] FAIL", "why": "TLS initialization or thread isolation failed", "source": "kernel/src/command.rs" }
+    { "marker": "[TLS-TEST] FAIL", "why": "TLS initialization or thread isolation failed", "source": "kernel/src/command.rs" },
+    { "marker": "[DSH-CALC-TEST] FAIL", "why": "a terminal-mode program (calc) failed to run under dsh's cooked bridge — the GUI terminal would not behave like Terminal Mode", "source": "kernel/src/command.rs" }
   ]
 }
