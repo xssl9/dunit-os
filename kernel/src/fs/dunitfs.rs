@@ -148,6 +148,14 @@ pub fn auto_mount(vfs: &mut VirtualFileSystem) -> bool {
             continue;
         };
         for partition in table.partitions.iter().flatten() {
+            // GPT policy (M5 item 1): only Dunit-owned partitions (System/Data) are
+            // candidates for the DunitFS root. Foreign partitions (ESP, unknown) are
+            // skipped by type GUID BEFORE probing a superblock, so auto-mount is driven
+            // by the single-source-of-truth policy, not by blind superblock matching.
+            let kind = crate::storage::policy::classify(&partition.type_guid);
+            if !kind.is_dunitfs() {
+                continue;
+            }
             if mount_global(
                 vfs,
                 "/persist",
@@ -157,8 +165,13 @@ pub fn auto_mount(vfs: &mut VirtualFileSystem) -> bool {
             )
             .is_ok()
             {
+                crate::serial_write("[GPT-POLICY] matched kind=");
+                crate::serial_write(kind.as_str());
+                crate::serial_write("\r\n");
                 crate::serial_write("[DUNITFS] auto-mounted ");
                 crate::serial_write(device.name);
+                crate::serial_write(" kind=");
+                crate::serial_write(kind.as_str());
                 crate::serial_write(" at /persist\r\n");
                 return true;
             }

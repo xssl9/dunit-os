@@ -1,0 +1,16 @@
+{
+  "description": "M5 item 1 — Dunit GPT partition policy. Proof that a disk built by tools/install_disk.py per the Dunit GPT policy (kernel/src/storage/policy.rs) presents a DUNIT-SYSTEM partition whose type GUID the kernel recognises, and that dunitfs::auto_mount selects the root BY that policy GUID (kind=system) rather than by blind superblock probing. Run with: tools/qemu_test.py --build-disk --config limine_test_terminal.conf --markers-file tools/m5_gpt_policy_markers.json",
+  "run": {
+    "config": "limine_test_terminal.conf",
+    "cmd": []
+  },
+  "required": [
+    { "marker": "[AHCI] controllers found=1 initialized=1", "claim": "writable AHCI target disk present", "source": "kernel/src/drivers/ahci.rs" },
+    { "marker": "[GPT-POLICY] matched kind=system", "claim": "auto_mount selected the DunitFS root BY the Dunit System policy type GUID (single source of truth: kernel/src/storage/policy.rs)", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[DUNITFS] auto-mounted", "claim": "installed DunitFS root mounted from disk at /persist", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[TERM-007] Starting main loop", "claim": "the installed disk boots to the terminal", "source": "kernel/src/lib.rs" }
+  ],
+  "forbidden": [
+    { "marker": "[PANIC]", "why": "kernel panic", "source": "kernel/src/lib.rs" }
+  ]
+}

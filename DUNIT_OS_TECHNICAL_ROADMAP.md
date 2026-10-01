@@ -82,7 +82,8 @@ Dunit уже больше, чем boot-screen: она загружается ч�
 ```text
 [AHCI] SATA disk port=0 sectors=524288
 [AHCI] controllers found=1 initialized=1 disks=1
-[DUNITFS] auto-mounted sda at /persist
+[GPT-POLICY] matched kind=system
+[DUNITFS] auto-mounted sda kind=system at /persist
 [ OK ] Dunit OS (Green Tea) ready
 [TERM-007] Starting main loop
 ```
@@ -90,7 +91,8 @@ Dunit уже больше, чем boot-screen: она загружается ч�
 Persistence после reboot:
 
 ```text
-[DUNITFS] auto-mounted sda at /persist
+[GPT-POLICY] matched kind=system
+[DUNITFS] auto-mounted sda kind=system at /persist
 root@dunit:~# cat /persist/probe.txt
 
 root@dunit:~#
@@ -147,14 +149,14 @@ root@dunit:~#
 - **Частично:** DevFS/ProcFS существуют, но не являются полноценными независимыми mounts/device interfaces.
 - **Работает как prototype:** DunitFS v1 superblock + CRC, 64 fixed metadata nodes, files/directories, persistent read/write и auto-mount (`kernel/src/fs/dunitfs.rs:10`, `:13`, `:75`, `:132`).
 - **Ограничения DunitFS:** нет free-space bitmap, generations, journal/COW, atomic rename, unlink directory, permissions, ownership, timestamps, symlinks, hardlinks, fsync contract, fsck/repair. Contiguous relocation в `ensure_capacity` (`:393`) создаёт write-amplification и слабую crash consistency.
-- **Баг проектирования:** `auto_mount` пробует каждую GPT partition, не сверяя DunitFS type GUID; invalid superblock лишь фильтрует результат.
+- **Исправлено (M5 item 1):** `auto_mount` теперь сверяет GPT type GUID по политике (`kernel/src/storage/policy.rs`) и монтирует только Dunit-owned partition (System/Data); foreign partition отсекается до проверки superblock.
 
 ### 4.7 Block storage, GPT и установка
 
 - **Работает в QEMU:** PCI discovery, AHCI DMA read/write/flush, SATA registration; legacy VirtIO block polling; generic block registry; GPT primary/backup read/write with CRC.
-- **Работает:** host image path создаёт ESP + DUNIT-ROOT; installed boot и `/persist` подтверждены.
+- **Работает:** host image path создаёт ESP + DUNIT-SYSTEM (Dunit System type GUID); installed boot и `/persist` подтверждены.
 - **Частично:** in-system installer зависит от ISO modules и только AHCI; нет transactional install, rollback, upgrade slots или post-install first-boot state.
-- **Ключевой разрыв:** установленная система загружает kernel с ESP, но root и `/app` остаются embedded MemFS. DUNIT-ROOT — только data volume.
+- **Ключевой разрыв:** установленная система загружает kernel с ESP, но root и `/app` остаются embedded MemFS. DUNIT-SYSTEM — только data volume.
 
 ### 4.8 Terminal Mode и GUI Mode
 
@@ -395,7 +397,7 @@ Dunit DWM — отдельный policy shell поверх GUI Server:
 
 ### M5 — normal installed system и persistence (must-have; storage foundation можно параллельно M1-M3)
 
-- [ ] Определить GPT policy: ESP + Dunit System + Dunit Data; для v1 допустимы ESP + единый DunitFS root, но `/system` должен быть read-mostly.
+- [x] Определить GPT policy: ESP + Dunit System + Dunit Data; для v1 допустимы ESP + единый DunitFS root, но `/system` должен быть read-mostly.
 - [ ] Убрать `include_bytes!` applications/assets; загрузить init и app manifests с disk root.
 - [ ] Реализовать real init/service manager и first-boot provisioning.
 - [ ] Расширить DunitFS: allocation bitmap/extents, directories, rename, unlink, timestamps, permissions, fsync, superblock generations, journal или metadata COW.

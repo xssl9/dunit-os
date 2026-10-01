@@ -25,6 +25,15 @@ DUNITFS_VERSION = 1
 DUNITFS_METADATA_BLOCKS = 16
 DUNITFS_DATA_START = 17
 
+# Dunit GPT partition policy — single source of truth is kernel/src/storage/policy.rs.
+# These on-disk bytes MUST stay identical to policy::DUNIT_SYSTEM_TYPE_GUID so the kernel's
+# dunitfs::auto_mount recognises the installed root by its Dunit System type GUID. The bytes
+# spell "DUNIT\0SYSTEM\0\0\0\x01"; they replace the generic Linux-data GUID that parted would
+# otherwise assign (which the kernel policy no longer treats as a DunitFS root).
+DUNIT_SYSTEM_TYPE_GUID = bytes(
+    [0x44, 0x55, 0x4E, 0x49, 0x54, 0x00, 0x53, 0x59, 0x53, 0x54, 0x45, 0x4D, 0x00, 0x00, 0x00, 0x01]
+)
+
 
 def run(command: list[str], *, env: dict[str, str] | None = None) -> None:
     print("[INSTALL]", " ".join(command))
@@ -114,7 +123,7 @@ def partition_disk(path: Path) -> None:
             "-s",
             str(path),
             "mkpart",
-            "DUNIT-ROOT",
+            "DUNIT-SYSTEM",
             f"{ESP_END_MIB}MiB",
             "100%",
         ]
@@ -140,6 +149,62 @@ def partition_ranges(path: Path) -> dict[int, tuple[int, int]]:
     if 1 not in ranges or 2 not in ranges:
         raise RuntimeError("failed to read the new GPT partition table")
     return ranges
+
+
+def set_partition_type_guid(path: Path, part_number: int, type_guid: bytes) -> None:
+    """Overwrite partition `part_number`'s GPT type GUID and fix every affected CRC.
+
+    parted assigns a generic type GUID to a bare `mkpart`; the Dunit GPT policy
+    (kernel/src/storage/policy.rs) requires the installed root to carry the Dunit System
+    type GUID so the kernel auto-mounts it by identity. We rewrite the type GUID in both
+    the primary and backup partition-entry arrays and recompute the entry-array CRC and
+    both GPT header CRCs, exactly like the in-kernel installer's patch path.
+    """
+    if len(type_guid) != 16:
+        raise RuntimeError("GPT type GUID must be 16 bytes")
+
+    def read_header(disk, lba: int) -> bytearray:
+        disk.seek(lba * SECTOR_SIZE)
+        header = bytearray(disk.read(SECTOR_SIZE))
+        if header[:8] != b"EFI PART":
+            raise RuntimeError(f"missing GPT header at LBA {lba}")
+        return header
+
+    def patch_entry_array(disk, entries_lba: int, count: int, size: int) -> int:
+        disk.seek(entries_lba * SECTOR_SIZE)
+        entries = bytearray(disk.read(count * size))
+        offset = (part_number - 1) * size
+        entries[offset : offset + 16] = type_guid
+        disk.seek(entries_lba * SECTOR_SIZE)
+        disk.write(entries)
+        return zlib.crc32(entries) & 0xFFFFFFFF
+
+    def rewrite_header(disk, header: bytearray, lba: int, entries_crc: int) -> None:
+        header_size = struct.unpack_from("<I", header, 12)[0]
+        struct.pack_into("<I", header, 88, entries_crc)
+        struct.pack_into("<I", header, 16, 0)
+        header_crc = zlib.crc32(header[:header_size]) & 0xFFFFFFFF
+        struct.pack_into("<I", header, 16, header_crc)
+        disk.seek(lba * SECTOR_SIZE)
+        disk.write(header)
+
+    with path.open("r+b", buffering=0) as disk:
+        primary = read_header(disk, 1)
+        primary_entries_lba = struct.unpack_from("<Q", primary, 72)[0]
+        backup_header_lba = struct.unpack_from("<Q", primary, 32)[0]
+        entry_count = struct.unpack_from("<I", primary, 80)[0]
+        entry_size = struct.unpack_from("<I", primary, 84)[0]
+        if part_number < 1 or part_number > entry_count or entry_size < 128:
+            raise RuntimeError("invalid GPT geometry for type-GUID patch")
+
+        backup = read_header(disk, backup_header_lba)
+        backup_entries_lba = struct.unpack_from("<Q", backup, 72)[0]
+
+        entries_crc = patch_entry_array(disk, primary_entries_lba, entry_count, entry_size)
+        patch_entry_array(disk, backup_entries_lba, entry_count, entry_size)
+        rewrite_header(disk, primary, 1, entries_crc)
+        rewrite_header(disk, backup, backup_header_lba, entries_crc)
+        os.fsync(disk.fileno())
 
 
 def format_esp(path: Path, start: int, sectors: int) -> str:
@@ -290,6 +355,7 @@ def main() -> int:
     prepare_target(target, args.image_size_mib, block_device)
     partition_disk(target)
     ranges = partition_ranges(target)
+    set_partition_type_guid(target, 2, DUNIT_SYSTEM_TYPE_GUID)
     fat_image = format_esp(target, *ranges[1])
     copy_boot_files(root, fat_image, config)
     format_dunitfs(target, *ranges[2])

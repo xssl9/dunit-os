@@ -6,6 +6,7 @@ use crate::drivers::block::{self, BlockDeviceInfo};
 use crate::fs::dunitfs;
 use crate::fs::vfs::VirtualFileSystem;
 use crate::storage::gpt::{self, PartitionSpec};
+use crate::storage::policy;
 
 const BLOCK_SIZE: usize = 512;
 const ESP_START: u64 = 2048;
@@ -13,13 +14,6 @@ const GPT_TRAILING_BLOCKS: u64 = 34;
 const GPT_ENTRY_SIZE: usize = 128;
 const GPT_PRIMARY_ENTRIES_LBA: u64 = 2;
 const GPT_FULL_ENTRY_BLOCKS: u64 = 32;
-
-const ESP_TYPE_GUID: [u8; 16] = [
-    0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11, 0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b,
-];
-const DUNITFS_TYPE_GUID: [u8; 16] = [
-    0xaf, 0x3d, 0xc6, 0x0f, 0x83, 0x84, 0x72, 0x47, 0x8e, 0x79, 0x3d, 0x69, 0xd8, 0x47, 0x7d, 0xe4,
-];
 
 static PAYLOAD_ADDRESS: AtomicUsize = AtomicUsize::new(0);
 static PAYLOAD_SIZE: AtomicUsize = AtomicUsize::new(0);
@@ -107,7 +101,7 @@ pub fn install(device: BlockDeviceInfo, vfs: &mut VirtualFileSystem) -> Result<(
     let disk_guid = make_guid(seed, 0);
     let partitions = [
         PartitionSpec {
-            type_guid: ESP_TYPE_GUID,
+            type_guid: policy::ESP_TYPE_GUID,
             unique_guid: make_guid(seed, 1),
             first_lba: ESP_START,
             last_lba: root_start - 1,
@@ -115,12 +109,12 @@ pub fn install(device: BlockDeviceInfo, vfs: &mut VirtualFileSystem) -> Result<(
             name: "DUNIT-ESP",
         },
         PartitionSpec {
-            type_guid: DUNITFS_TYPE_GUID,
+            type_guid: policy::DUNIT_SYSTEM_TYPE_GUID,
             unique_guid: make_guid(seed, 2),
             first_lba: root_start,
             last_lba: root_end,
             attributes: 0,
-            name: "DUNIT-ROOT",
+            name: "DUNIT-SYSTEM",
         },
     ];
     gpt::write(device, disk_guid, &partitions).map_err(|_| InstallError::Partitioning)?;
