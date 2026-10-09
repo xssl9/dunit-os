@@ -178,6 +178,13 @@ pub trait FileSystem: Send {
     fn rename(&mut self, _old: &str, _new: &str) -> Result<()> {
         Err(VfsError::Unsupported)
     }
+
+    /// Flush any buffered metadata/data for an open handle to stable storage.
+    /// In-memory and mechanism filesystems have nothing to flush and inherit
+    /// this no-op; persistent backends (DunitFS) override it to commit.
+    fn fsync(&mut self, _handle: FileHandle) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub struct OpenFile {
@@ -196,6 +203,10 @@ impl OpenFile {
 
     pub fn write(&mut self, buf: &[u8]) -> Result<usize> {
         unsafe { (&mut *self.fs).write(self.handle, buf) }
+    }
+
+    pub fn fsync(&mut self) -> Result<()> {
+        unsafe { (&mut *self.fs).fsync(self.handle) }
     }
 }
 
@@ -314,6 +325,14 @@ impl VirtualFileSystem {
             .remove(&fd)
             .ok_or(VfsError::InvalidDescriptor)?;
         Ok(())
+    }
+
+    pub fn fsync(&mut self, fd: FileDescriptor) -> Result<()> {
+        let open_file = self
+            .open_files
+            .get_mut(&fd)
+            .ok_or(VfsError::InvalidDescriptor)?;
+        open_file.fsync()
     }
 
     pub fn open_file_count(&self) -> usize {

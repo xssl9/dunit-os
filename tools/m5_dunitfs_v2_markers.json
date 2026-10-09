@@ -1,0 +1,30 @@
+{
+  "description": "M5 item 4 — DunitFS v2 (allocation bitmap + extents, timestamps, mode, rename, unlink, fsync, superblock generations, metadata COW). First-boot acceptance on a freshly provisioned disk: the in-kernel smoke self-test (feature boot-smoke-tests) runs BEFORE auto_mount on a throwaway FS instance, then (1) formats a clean v2, (2) seeds a file, stages a metadata-only change and simulates a TORN commit, reloads and proves the loader rolls back to the last good superblock generation with file content intact, and (3) reformats and writes a persistence sentinel to be verified after reboot. auto_mount then still mounts the provisioned root at /persist, proving the format the installer wrote is the format the kernel loads. The reboot-persistence half is a separate --disk reuse run that must show '[DUNITFS-V2] persist reboot verified content=DUNIT-PERSIST-V2'. Run: tools/qemu_test.py --build-disk --config limine_test_terminal.conf --markers-file tools/m5_dunitfs_v2_markers.json",
+  "run": {
+    "config": "limine_test_terminal.conf",
+    "cmd": []
+  },
+  "required": [
+    { "marker": "[AHCI] controllers found=1 initialized=1", "claim": "writable AHCI target disk present for the self-test", "source": "kernel/src/drivers/ahci.rs" },
+    { "marker": "[DUNITFS-V2] format ok", "claim": "clean empty v2 format succeeded (geometry + superblocks + slot bitmap)", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[DUNITFS-V2] torn-commit recovered gen=", "claim": "an interrupted metadata commit was rejected by CRC and the loader rolled back to the last good superblock generation", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "content=durable-A", "claim": "the committed file content survived the torn metadata commit unchanged", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[DUNITFS-V2] persist first-boot wrote content=DUNIT-PERSIST-V2", "claim": "persistence sentinel provisioned and committed for the reboot check", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[DUNITFS] auto-mounted", "claim": "the installer-written v2 root is the format the kernel loads and mounts at /persist", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[TERM-007] Starting main loop", "claim": "the installed disk boots to the terminal after the self-test", "source": "kernel/src/lib.rs" }
+  ],
+  "forbidden": [
+    { "marker": "[PANIC]", "why": "kernel panic", "source": "kernel/src/lib.rs" },
+    { "marker": "[DUNITFS-V2] smoke skipped: no Dunit partition", "why": "self-test could not find the disk — acceptance unproven", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "recovery format FAIL", "why": "clean v2 format failed", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "recovery load FAIL", "why": "freshly formatted v2 did not load", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "recovery seed FAIL", "why": "could not create/commit the seed file", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "recovery torn-stage FAIL", "why": "could not stage the simulated torn commit", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "torn-commit recovery FAIL", "why": "wrong generation or corrupted content after a torn commit", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "torn-commit recovery load FAIL", "why": "FS unrecoverable after a torn commit", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "persist reformat FAIL", "why": "post-recovery clean reformat failed", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "persist first-boot write FAIL", "why": "could not write the persistence sentinel", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "persist post-format load FAIL", "why": "reformatted v2 did not load before writing the sentinel", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "persist reboot MISMATCH", "why": "sentinel survived reboot but with wrong content", "source": "kernel/src/fs/dunitfs.rs" }
+  ]
+}

@@ -20,10 +20,19 @@ ESP_START_MIB = 1
 ESP_END_MIB = 129
 MIN_DISK_MIB = 128
 ESP_SIZE_MIB = ESP_END_MIB - ESP_START_MIB
-DUNITFS_MAGIC = b"DUNITFS1"
-DUNITFS_VERSION = 1
-DUNITFS_METADATA_BLOCKS = 16
-DUNITFS_DATA_START = 17
+# DunitFS v2 on-disk format — single source of truth is kernel/src/fs/dunitfs.rs.
+# These constants and the empty-image geometry below MUST stay byte-identical to
+# the kernel's `format()`/`Geometry::derive`, so a disk provisioned here mounts
+# and the kernel's `load()` accepts it. See format_dunitfs() for the layout.
+DUNITFS_MAGIC = b"DUNITFS2"
+DUNITFS_VERSION = 2
+DUNITFS_MAX_NODES = 64
+DUNITFS_NODE_SIZE = 256
+DUNITFS_PATH_SIZE = 120
+DUNITFS_MAX_EXTENTS = 6
+DUNITFS_NODE_TABLE_BLOCKS = DUNITFS_MAX_NODES * DUNITFS_NODE_SIZE // SECTOR_SIZE  # 32
+DUNITFS_FIRST_SLOT_START = 2
+DUNITFS_SB_CRC_OFFSET = 508
 
 # Dunit GPT partition policy — single source of truth is kernel/src/storage/policy.rs.
 # These on-disk bytes MUST stay identical to policy::DUNIT_SYSTEM_TYPE_GUID so the kernel's
@@ -318,24 +327,74 @@ def copy_boot_files(root: Path, fat_image: str, config: Path) -> None:
         run(["mcopy", "-o", "-i", fat_image, str(source), destination], env=env)
 
 
-def format_dunitfs(path: Path, start: int, sectors: int) -> None:
-    if sectors <= DUNITFS_DATA_START:
-        raise RuntimeError("DunitFS partition is too small")
+def _dunitfs_geometry(total_blocks: int) -> dict:
+    """Mirror of kernel Geometry::derive — the single geometry formula."""
+    bitmap_bytes = (total_blocks + 7) // 8
+    bitmap_blocks = (bitmap_bytes + SECTOR_SIZE - 1) // SECTOR_SIZE
+    slot_blocks = bitmap_blocks + DUNITFS_NODE_TABLE_BLOCKS
+    slot0_start = DUNITFS_FIRST_SLOT_START
+    slot1_start = slot0_start + slot_blocks
+    data_start = slot1_start + slot_blocks
+    return {
+        "total_blocks": total_blocks,
+        "bitmap_blocks": bitmap_blocks,
+        "slot_blocks": slot_blocks,
+        "slot0_start": slot0_start,
+        "slot1_start": slot1_start,
+        "data_start": data_start,
+    }
+def _dunitfs_superblock(geom: dict, generation: int, active_slot: int,
+                        slot_crc: int) -> bytes:
+    """Mirror of kernel SuperBlock::encode (little-endian, CRC over [..508])."""
     block = bytearray(SECTOR_SIZE)
+    block[:8] = DUNITFS_MAGIC
+    struct.pack_into("<I", block, 8, DUNITFS_VERSION)
+    struct.pack_into("<I", block, 12, SECTOR_SIZE)
+    struct.pack_into("<Q", block, 16, geom["total_blocks"])
+    struct.pack_into("<Q", block, 24, generation)
+    struct.pack_into("<I", block, 32, active_slot)
+    struct.pack_into("<I", block, 36, DUNITFS_MAX_NODES)
+    struct.pack_into("<I", block, 40, DUNITFS_NODE_SIZE)
+    struct.pack_into("<I", block, 44, geom["bitmap_blocks"])
+    struct.pack_into("<I", block, 48, geom["slot_blocks"])
+    struct.pack_into("<I", block, 52, DUNITFS_MAX_EXTENTS)
+    struct.pack_into("<I", block, 56, DUNITFS_PATH_SIZE)
+    struct.pack_into("<Q", block, 64, geom["slot0_start"])
+    struct.pack_into("<Q", block, 72, geom["slot1_start"])
+    struct.pack_into("<Q", block, 80, geom["data_start"])
+    struct.pack_into("<I", block, 88, slot_crc)
+    struct.pack_into("<I", block, DUNITFS_SB_CRC_OFFSET,
+                     zlib.crc32(bytes(block[:DUNITFS_SB_CRC_OFFSET])) & 0xFFFFFFFF)
+    return bytes(block)
+def format_dunitfs(path: Path, start: int, sectors: int) -> None:
+    """Write an empty DunitFS v2 (gen=1, active slot 0), mirroring the kernel.
+
+    Builds the whole metadata region [0..data_start) in memory: primary +
+    backup superblocks, slot 0 (allocation bitmap with the metadata region
+    marked used + an empty node table), slot 1 left zeroed. Byte-for-byte the
+    image the kernel's `format()` produces, so its `load()` recovers it.
+    """
+    geom = _dunitfs_geometry(sectors)
+    if sectors <= geom["data_start"]:
+        raise RuntimeError("DunitFS partition is too small")
+
+    # Slot 0: [allocation bitmap | node table]. Mark blocks [0..data_start) used
+    # (LSB-first: byte[b // 8] |= 1 << (b % 8)); the node table stays all-zero.
+    slot = bytearray(geom["slot_blocks"] * SECTOR_SIZE)
+    for block in range(geom["data_start"]):
+        slot[block // 8] |= 1 << (block % 8)
+    slot_crc = zlib.crc32(bytes(slot)) & 0xFFFFFFFF
+
+    meta = bytearray(geom["data_start"] * SECTOR_SIZE)
+    slot0_off = geom["slot0_start"] * SECTOR_SIZE
+    meta[slot0_off:slot0_off + len(slot)] = slot
+    sb = _dunitfs_superblock(geom, 1, 0, slot_crc)
+    meta[0:SECTOR_SIZE] = sb                       # primary superblock
+    meta[SECTOR_SIZE:2 * SECTOR_SIZE] = sb         # backup superblock
+
     with path.open("r+b", buffering=0) as disk:
         disk.seek(start * SECTOR_SIZE)
-        disk.write(block)
-        disk.seek((start + 1) * SECTOR_SIZE)
-        disk.write(block * DUNITFS_METADATA_BLOCKS)
-
-        block[:8] = DUNITFS_MAGIC
-        struct.pack_into("<II", block, 8, DUNITFS_VERSION, SECTOR_SIZE)
-        struct.pack_into("<QQ", block, 16, sectors, 1)
-        struct.pack_into("<II", block, 32, DUNITFS_METADATA_BLOCKS, 64)
-        struct.pack_into("<QQ", block, 40, DUNITFS_DATA_START, 1)
-        struct.pack_into("<I", block, 56, zlib.crc32(block[:56]))
-        disk.seek(start * SECTOR_SIZE)
-        disk.write(block)
+        disk.write(meta)
         os.fsync(disk.fileno())
 
 

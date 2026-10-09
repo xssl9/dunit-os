@@ -81,6 +81,7 @@ pub enum Syscall {
     Rename = 69,
     Mkdir = 70,
     SetVideoMode = 71,
+    Fsync = 72,
 }
 
 impl Syscall {
@@ -159,6 +160,7 @@ impl Syscall {
             69 => Some(Syscall::Rename),
             70 => Some(Syscall::Mkdir),
             71 => Some(Syscall::SetVideoMode),
+            72 => Some(Syscall::Fsync),
             _ => None,
         }
     }
@@ -684,6 +686,7 @@ pub extern "C" fn syscall_handler(
         ),
         Syscall::Mkdir => sys_mkdir(arg0 as *const u8, arg1 as usize),
         Syscall::SetVideoMode => sys_set_video_mode(arg0 as u32, arg1 as u32),
+        Syscall::Fsync => sys_fsync(arg0 as u32),
     }
 }
 
@@ -1219,6 +1222,33 @@ fn sys_close(fd: u32) -> i64 {
             match crate::process::close_fd(fd) {
                 Ok(_) => 0,
                 Err(error) => process_error_to_errno(error),
+            }
+        }
+    }
+}
+
+fn sys_fsync(fd: u32) -> i64 {
+    if !is_valid_fd_number(fd) {
+        return EBADF;
+    }
+
+    let entry = match crate::process::get_fd(fd) {
+        Some(entry) => *entry,
+        None => return EBADF,
+    };
+
+    match entry.target {
+        // The standard streams have no persistent backing to flush.
+        crate::process::FdTarget::Stdin
+        | crate::process::FdTarget::Stdout
+        | crate::process::FdTarget::Stderr => 0,
+        crate::process::FdTarget::Vfs(vfs_fd) => {
+            match crate::fs::vfs::get_vfs()
+                .ok_or(EIO)
+                .and_then(|vfs| vfs.fsync(vfs_fd).map_err(vfs_error_to_errno))
+            {
+                Ok(()) => 0,
+                Err(error) => error,
             }
         }
     }

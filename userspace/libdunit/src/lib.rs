@@ -78,6 +78,7 @@ pub const SYSCALL_UNLINK: usize = 68;
 pub const SYSCALL_RENAME: usize = 69;
 pub const SYSCALL_MKDIR: usize = 70;
 pub const SYSCALL_SET_VIDEO_MODE: usize = 71;
+pub const SYSCALL_FSYNC: usize = 72;
 
 /// Права хэндлов (capabilities). Совпадают с битами в ядре (kernel/src/handle.rs).
 pub const RIGHT_READ: u32 = 1 << 0;
@@ -635,6 +636,14 @@ pub fn rename(old: &str, new: &str) -> isize {
 /// protected system paths).
 pub fn mkdir(path: &str) -> isize {
     syscall2(SYSCALL_MKDIR, path.as_ptr() as usize, path.len())
+}
+
+/// Flush a file descriptor's pending data and metadata to stable storage.
+/// On DunitFS this commits the deferred metadata (node table + allocation
+/// bitmap) via the superblock generation ping-pong. Returns 0 on success or
+/// a negative errno. For the standard streams it is a no-op (returns 0).
+pub fn fsync(fd: usize) -> isize {
+    syscall1(SYSCALL_FSYNC, fd)
 }
 
 pub fn print(s: &str) {

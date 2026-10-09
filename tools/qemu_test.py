@@ -318,8 +318,18 @@ def build_disk(config: str, workdir: Path) -> Path:
     if shutil.which("make") is None:
         raise RuntimeError("`make` not found; cannot --build-disk")
     print(f"[qemu_test] building disk image (config={config}) ...", file=sys.stderr)
-    # Compile kernel + userspace artifacts the installer consumes.
-    subprocess.run(["make", "all", "userspace"], cwd=REPO_ROOT, check=True)
+    # Compile kernel + userspace artifacts the installer consumes. Pass the
+    # config through to `make` so the kernel honours the boot-smoke-tests
+    # feature gate for the test configs (the Makefile keys KERNEL_FEATURES off
+    # the LIMINE_CONFIG basename). Without this the disk kernel would always be
+    # built from the default limine.conf (feature OFF) and the in-kernel
+    # DunitFS self-tests — which only run on the disk boot, since /persist is
+    # mounted only from a real partition — would never be present.
+    subprocess.run(
+        ["make", "all", "userspace", f"LIMINE_CONFIG={config}"],
+        cwd=REPO_ROOT,
+        check=True,
+    )
     workdir.mkdir(parents=True, exist_ok=True)
     image = workdir / "dunit-test-disk.img"
     subprocess.run(

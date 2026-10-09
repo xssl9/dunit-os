@@ -398,9 +398,9 @@ Dunit DWM — отдельный policy shell поверх GUI Server:
 ### M5 — normal installed system и persistence (must-have; storage foundation можно параллельно M1-M3)
 
 - [x] Определить GPT policy: ESP + Dunit System + Dunit Data; для v1 допустимы ESP + единый DunitFS root, но `/system` должен быть read-mostly.
-- [ ] Убрать `include_bytes!` applications/assets; загрузить init и app manifests с disk root.
-- [ ] Реализовать real init/service manager и first-boot provisioning.
-- [ ] Расширить DunitFS: allocation bitmap/extents, directories, rename, unlink, timestamps, permissions, fsync, superblock generations, journal или metadata COW.
+- [x] Убрать `include_bytes!` applications/assets; загрузить init и app manifests с disk root.
+- [x] Реализовать real init/service manager и first-boot provisioning.
+- [x] Расширить DunitFS: allocation bitmap/extents, directories, rename, unlink, timestamps, permissions, fsync, superblock generations, journal или metadata COW.
 - [ ] Добавить `fsck.dunit`, read-only degraded mount и recovery report.
 - [ ] Сделать installer transactional: validate -> partition -> format -> copy -> verify -> boot config -> sync.
 - [ ] Поддержать AHCI и VirtIO target; отдельно тестировать BIOS и UEFI.
