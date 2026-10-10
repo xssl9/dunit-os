@@ -287,6 +287,10 @@ pub struct Process {
     pub fpu_state: FpuState,
     /// x86_64 userspace thread pointer installed in IA32_FS_BASE.
     pub fs_base: u64,
+    /// User word to zero + futex-wake when this thread exits (0 = none).
+    /// Native CLONE_CHILD_CLEARTID / set_tid_address; musl uses it to release
+    /// the thread-list lock on thread death.
+    pub clear_child_tid: u64,
     pub is_kernel: bool,
     pub cwd: String,
     pub status: Option<ProcessExitStatus>,
@@ -348,6 +352,7 @@ impl Process {
             context: CpuContext::new(),
             fpu_state: FpuState::new(),
             fs_base: 0,
+            clear_child_tid: 0,
             is_kernel,
             cwd: String::from("/"),
             status: None,
@@ -387,6 +392,7 @@ impl Process {
             context: CpuContext::new(),
             fpu_state: FpuState::new(),
             fs_base: 0,
+            clear_child_tid: 0,
             is_kernel: false,
             cwd: String::from("/"),
             status: None,
@@ -1886,6 +1892,53 @@ fn read_user_u32(owner: ProcessId, addr: u64) -> Option<u32> {
     // addr is 4-byte aligned and 4 bytes never cross a page boundary.
     let virt = crate::memory::vmm::phys_to_virt(phys.as_usize()) as *const u32;
     Some(unsafe { virt.read_unaligned() })
+}
+
+fn write_user_u32(owner: ProcessId, addr: u64, value: u32) -> bool {
+    use crate::memory::vmm::PageFlags;
+    let table = process_table_mut();
+    let Some(index) = process_record_index(table, owner) else { return false; };
+    let Some(process) = table[index].process.as_ref() else { return false; };
+    let Some(address_space) = process.address_space() else { return false; };
+    let Ok(Some((phys, flags))) =
+        address_space.user_page_mapping(VirtualAddress(addr as usize))
+    else {
+        return false;
+    };
+    if !flags.contains(PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE) {
+        return false;
+    }
+    // addr is 4-byte aligned and 4 bytes never cross a page boundary.
+    let virt = crate::memory::vmm::phys_to_virt(phys.as_usize()) as *mut u32;
+    unsafe { virt.write_unaligned(value); }
+    true
+}
+
+/// Record the calling thread's clear-child-tid word (0 clears it).
+pub fn set_current_clear_child_tid(addr: u64) {
+    if let Some(thread) = current_thread_mut() {
+        thread.clear_child_tid = addr;
+    }
+}
+
+/// On thread exit: if a clear-child-tid word was registered, zero it in the
+/// owner's address space and wake futex waiters on it. Called from sys_exit
+/// before teardown while the exiting thread is still current.
+pub fn run_clear_child_tid_on_exit() {
+    let addr = match current_thread() {
+        Some(thread) => thread.clear_child_tid,
+        None => return,
+    };
+    if addr == 0 {
+        return;
+    }
+    let owner = match current_pid() {
+        Some(owner) => owner,
+        None => return,
+    };
+    if write_user_u32(owner, addr, 0) {
+        futex_wake(addr, 0); // wake all waiters on the word
+    }
 }
 
 /// Compare-and-block on a futex word. Under a single IRQ guard + WAIT_QUEUE

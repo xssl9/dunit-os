@@ -82,3 +82,4 @@
 72	Fsync
 73	Fsck
 74	AbiQuery
+75	SetTidAddress

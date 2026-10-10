@@ -1,16 +1,11 @@
 /* Static musl threads test for Dunit OS — the thread: port target.
  *
- * WIP: pthread_create (Dunit __clone + per-thread SetThreadPointer), the mutex
- * fast path, and each thread's body all run correctly, but TWO threads exiting
- * concurrently hang. Root cause: musl's __pthread_exit holds the thread-list
- * lock (__thread_list_lock) across its final SYS_exit and relies on the Linux
- * CLONE_CHILD_CLEARTID contract — the kernel clearing *ctid and futex-waking it
- * on thread death — to release that lock. Dunit has no clear-child-tid yet, so
- * the lock is never released and the other exiting thread blocks forever.
- *
- * Fix (next): give the kernel a set_tid_address-style "clear this word and
- * futex-wake it on thread exit" and have __clone's trampoline register ctid.
- * See toolchains/dunit-musl/PORTING.md.
+ * Two pthreads each do 5000 mutex-protected increments of a shared counter,
+ * then main joins both and checks the total (10000) and the return values.
+ * Exercises pthread_create (Dunit __clone + per-thread SetThreadPointer), a
+ * contended pthread_mutex (the futex wait/wake dispatcher), pthread_join, and
+ * the kernel clear-child-tid primitive (SetTidAddress) that releases musl's
+ * thread-list lock on thread exit.
  */
 #include <pthread.h>
 #include <stdio.h>

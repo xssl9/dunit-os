@@ -84,6 +84,7 @@ pub enum Syscall {
     Fsync = 72,
     Fsck = 73,
     AbiQuery = 74,
+    SetTidAddress = 75,
 }
 
 impl Syscall {
@@ -165,6 +166,7 @@ impl Syscall {
             72 => Some(Syscall::Fsync),
             73 => Some(Syscall::Fsck),
             74 => Some(Syscall::AbiQuery),
+            75 => Some(Syscall::SetTidAddress),
             _ => None,
         }
     }
@@ -716,6 +718,7 @@ pub extern "C" fn syscall_handler(
         Syscall::Fsync => sys_fsync(arg0 as u32),
         Syscall::Fsck => sys_fsck(arg0 as *mut UserFsckReport),
         Syscall::AbiQuery => sys_abi_query(arg0 as usize, arg1 as usize),
+        Syscall::SetTidAddress => sys_set_tid_address(arg0),
     }
 }
 
@@ -911,6 +914,10 @@ fn sys_handle_transfer(handle: u32, target_pid: u64) -> i64 {
 }
 
 fn sys_exit(code: i32) -> i64 {
+    // clear-child-tid: if this thread registered a word via SetTidAddress, zero
+    // it and wake futex waiters before teardown. musl relies on this (Linux
+    // CLONE_CHILD_CLEARTID) to release __thread_list_lock when a thread dies.
+    crate::process::run_clear_child_tid_on_exit();
     if let Some(pid) = crate::process::request_current_user_exit(code) {
         let tid = crate::process::current_tid().map(|id| id.0).unwrap_or(pid.0);
         if tid == pid.0 {
@@ -1544,6 +1551,18 @@ fn sys_set_thread_pointer(base: u64) -> i64 {
         Ok(()) => 0,
         Err(error) => process_error_to_errno(error),
     }
+}
+
+/// Register (or clear, when `addr == 0`) the calling thread's clear-child-tid
+/// word and return its tid. On thread exit the kernel writes 0 to the word and
+/// wakes futex waiters — the native equivalent of Linux `set_tid_address` /
+/// `CLONE_CHILD_CLEARTID`, which musl uses to release `__thread_list_lock`.
+fn sys_set_tid_address(addr: u64) -> i64 {
+    if addr != 0 && (addr % 4 != 0 || !is_valid_user_pointer(addr, 4)) {
+        return EINVAL;
+    }
+    crate::process::set_current_clear_child_tid(addr);
+    crate::process::current_tid().map(|tid| tid.0 as i64).unwrap_or(0)
 }
 
 fn open_flags_from_u32(flags: u32) -> Result<crate::fs::vfs::OpenFlags, i64> {

@@ -1,0 +1,16 @@
+{
+  "description": "Dunit musl port (M6) thread: — pthreads on the Dunit kernel. userspace/ctests/musl_thread.c spawns two threads that each do 5000 contended mutex increments, joins both, and checks the total and return values. Exercises the native __clone + per-thread SetThreadPointer, the futex wait/wake dispatcher, pthread_join, and the kernel clear-child-tid primitive (SetTidAddress) that releases musl's thread-list lock on thread exit. Run: tools/qemu_test.py --build --markers-file tools/m6_musl_thread_markers.json --post-boot-delay 3 --settle 8 --cmd-timeout 60 --timeout 220 --boot-timeout 120",
+  "run": {
+    "config": "limine.conf",
+    "cmd": ["exec musl_thread"]
+  },
+  "required": [
+    { "marker": "[TERM-007] Starting main loop", "claim": "the system booted to the terminal", "source": "kernel/src/lib.rs" },
+    { "marker": "[MUSL-THREAD] counter=10000 r1=5000 r2=5000", "claim": "two pthreads ran, a contended mutex serialized 10000 increments correctly, and both join return values propagated", "source": "userspace/ctests/musl_thread.c" },
+    { "marker": "[MUSL-THREAD] OK", "claim": "pthread_create/join + mutex/futex + clear-child-tid thread exit all work through the ported libc", "source": "userspace/ctests/musl_thread.c" }
+  ],
+  "forbidden": [
+    { "marker": "[PANIC]", "why": "kernel panic", "source": "kernel/src/lib.rs" },
+    { "marker": "[MUSL-THREAD] FAIL", "why": "wrong counter/return values", "source": "userspace/ctests/musl_thread.c" }
+  ]
+}

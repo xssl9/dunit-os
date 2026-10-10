@@ -78,7 +78,8 @@
 #define SYS_FSYNC 72
 #define SYS_FSCK 73
 #define SYS_ABI_QUERY 74
+#define SYS_SET_TID_ADDRESS 75
 
-#define DUNIT_SYSCALL_COUNT 75
+#define DUNIT_SYSCALL_COUNT 76
 
 #endif /* DUNIT_SYSCALL_H */
