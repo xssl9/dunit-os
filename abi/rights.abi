@@ -1,0 +1,15 @@
+# Dunit Userspace ABI v0 — handle-rights manifest (SINGLE SOURCE OF TRUTH).
+#
+# One line per capability bit: <bit index> <NAME>. A handle's rights only ever
+# narrow (never widen) when transferred. tools/gen_abi.py regenerates the
+# consumers and refuses to run if kernel/src/handle.rs disagrees:
+#   - userspace/libdunit/src/rights_numbers.rs  (Rust: pub const RIGHT_<NAME>)
+#   - abi/include/dunit/rights.h                (C:    #define DUNIT_RIGHT_<NAME>)
+
+0	READ
+1	WRITE
+2	MAP
+3	SIGNAL
+4	TRANSFER
+5	DISPLAY_MASTER
+6	INPUT_MASTER
