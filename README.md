@@ -109,11 +109,15 @@ by `tools/m6_musl_*_markers.json`):
 - `musl_malloc` — mallocng (small + 1 MiB `mmap` + `calloc` + `free`).
 - `musl_file` — `open`/`read`/`write`/`close`, incl. a write+read roundtrip in `/persist`.
 - `musl_thread` — two `pthread`s + a contended `pthread_mutex` + `pthread_join`.
+- `musl_read` — buffered stdio reads (`fopen`/`fgets`/`fgetc` EOF).
+- `musl_stat` — `stat()` of a file and a directory (type + size).
+- `musl_dir` — `opendir`/`readdir`/`closedir` listing a directory.
 
 Threads use the native `__clone`, a futex wait/wake dispatcher, and a kernel
 clear-child-tid primitive (`SetTidAddress`) that releases musl's thread-list lock
-on thread exit. Still to port: the stdio read path, `stat`/`getdents` struct
-translation, and signals (currently documented `ENOSYS`).
+on thread exit. The filesystem surface (open/read/write/close, `stat`, directory
+iteration, buffered stdio) is complete; signals and networking are still
+documented `ENOSYS`.
 
 ## Userspace apps
 
@@ -245,8 +249,9 @@ Working but UP-only / early:
 
 Not implemented yet:
 - Signals, dynamic TLS/DTV, and full `exec`/`fork`.
-- In the musl port: the stdio read path and `stat`/`getdents` struct translation
-  (the static C `hello`/`stdio`/`malloc`/`file`/`thread` suite already runs).
+- In the musl port: signals and networking (the static C `hello`/`stdio`/
+  `malloc`/`file`/`thread` suite and the open/read/write/stat/dir/stdio surface
+  all run).
 - Networking, audio, complete USB, and ACPI power/shutdown.
 - A real RTC/date source; filesystem journaling/recovery.
 
@@ -278,8 +283,9 @@ Milestone status (full detail in `DUNIT_OS_TECHNICAL_ROADMAP.md`):
 - **M5** — installed system + persistence (AHCI/VirtIO, GPT, DunitFS, BIOS/UEFI
   install): **done**.
 - **M6** — Dunit musl fork, static-first: **in progress** — the static C suite
-  (`hello`/`stdio`/`malloc`/`file`/`thread`) runs on the kernel; stdio read,
-  `stat`/`getdents`, signals and networking remain.
+  (`hello`/`stdio`/`malloc`/`file`/`thread`) runs on the kernel and the
+  filesystem surface (open/read/write/stat/dir/stdio) is complete; signals and
+  networking remain.
 - **M7** — networking, audio, USB, ACPI, package platform: **later**.
 
 ## License
