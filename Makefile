@@ -142,6 +142,12 @@ userspace:
 		$(USERSPACE_DIR)/ctests/crt0.s $(USERSPACE_DIR)/ctests/hello.c \
 		-Wl,-T,$(USERSPACE_DIR)/userspace.ld -Wl,--build-id=none
 	@echo "[USERSPACE] building musl ctests ($(MUSL_CTESTS)) against the Dunit port"
+	@if [ ! -f $(MUSL_DIR)/tools/dunit/build-libc.sh ] && [ -f .gitmodules ] && \
+	   { [ -d .git ] || [ -f .git ]; } && command -v git >/dev/null 2>&1; then \
+		echo "[USERSPACE] fetching $(MUSL_DIR) submodule (git submodule update --init)"; \
+		git submodule update --init --recursive $(MUSL_DIR) || \
+			echo "[USERSPACE] WARNING: submodule fetch failed (offline?)"; \
+	fi
 	@if [ -f $(MUSL_DIR)/tools/dunit/build-libc.sh ]; then set -e; \
 		[ -f $(abspath $(MUSL_LIBC)) ] || $(MUSL_DIR)/tools/dunit/build-libc.sh $(abspath $(MUSL_SYSROOT)); \
 		LIBGCC=$$($(CC) -print-libgcc-file-name); \
@@ -156,7 +162,7 @@ userspace:
 				$(abspath $(MUSL_SYSROOT))/lib/crtn.o \
 				-o $(USERSPACE_BUILD_DIR)/$$prog; \
 		done; \
-	else echo "[USERSPACE] skip musl ctests: submodule $(MUSL_DIR) not initialized (run: git submodule update --init --recursive)"; fi
+	else echo "[USERSPACE] WARNING: $(MUSL_DIR) unavailable (not a git checkout or offline); musl ctests skipped. Fetch with: git submodule update --init --recursive"; fi
 	@echo "Userspace programs built in $(USERSPACE_BUILD_DIR)/"
 
 iso: $(BUILD_DIR)/kernel.elf userspace
