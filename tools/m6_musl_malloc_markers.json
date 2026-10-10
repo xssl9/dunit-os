@@ -1,0 +1,17 @@
+{
+  "description": "Dunit musl port (M6) vm: — the mallocng heap over the native Mmap syscall. userspace/ctests/musl_malloc.c does a small malloc, a 1 MiB malloc (fresh mmap), memset across the pages, calloc (zeroed), and free. Dunit's prot/MAP_PRIVATE|MAP_ANONYMOUS flag values match Linux, so SYS_mmap maps straight to the native Mmap. Run: tools/qemu_test.py --build --markers-file tools/m6_musl_malloc_markers.json --post-boot-delay 3 --settle 4 --cmd-timeout 40 --timeout 160 --boot-timeout 100",
+  "run": {
+    "config": "limine.conf",
+    "cmd": ["exec musl_malloc"]
+  },
+  "required": [
+    { "marker": "[TERM-007] Starting main loop", "claim": "the system booted to the terminal", "source": "kernel/src/lib.rs" },
+    { "marker": "[MUSL-MALLOC] a[13]=13 big[0]=0xab pages_sum=", "claim": "malloc returned usable memory, a 1 MiB allocation (fresh Mmap) is readable/writable across all pages", "source": "userspace/ctests/musl_malloc.c" },
+    { "marker": "[MUSL-MALLOC] calloc z[0]=0 z[4095]=7", "claim": "calloc returned zeroed memory from the Dunit heap and survives write-back", "source": "userspace/ctests/musl_malloc.c" },
+    { "marker": "[MUSL-MALLOC] OK", "claim": "malloc/calloc/free all work through the ported libc over the native Mmap/Munmap syscalls", "source": "userspace/ctests/musl_malloc.c" }
+  ],
+  "forbidden": [
+    { "marker": "[PANIC]", "why": "kernel panic", "source": "kernel/src/lib.rs" },
+    { "marker": "[MUSL-MALLOC] FAIL", "why": "an allocation or zeroing check failed", "source": "userspace/ctests/musl_malloc.c" }
+  ]
+}

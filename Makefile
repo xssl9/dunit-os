@@ -36,7 +36,7 @@ MUSL_SYSROOT = $(BUILD_DIR)/dunit-sysroot
 MUSL_LIBC = $(MUSL_SYSROOT)/lib/libc.a
 # C programs linked against the Dunit musl port (userspace/ctests/<name>.c),
 # packed into the initrd as /app/<name>.
-MUSL_CTESTS = musl_hello musl_stdio
+MUSL_CTESTS = musl_hello musl_stdio musl_malloc
 
 USERSPACE_APPS = \
 	elf_demo fs_test exit_test args_test cwd_test path_test image_demo bmp_viewer color_test \
