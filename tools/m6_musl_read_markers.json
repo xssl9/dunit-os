@@ -1,0 +1,16 @@
+{
+  "description": "Dunit musl port (M6) fs: read path — buffered stdio reads over the native Read syscall. userspace/ctests/musl_read.c writes two lines with fputs, reopens the file, and reads them back with fgets x2 + fgetc EOF. __stdio_read/readv have no readv on Dunit and go through native Read. Run: tools/qemu_test.py --build --markers-file tools/m6_musl_read_markers.json --post-boot-delay 3 --settle 4 --cmd-timeout 45 --timeout 160 --boot-timeout 110",
+  "run": {
+    "config": "limine.conf",
+    "cmd": ["exec musl_read"]
+  },
+  "required": [
+    { "marker": "[TERM-007] Starting main loop", "claim": "the system booted to the terminal", "source": "kernel/src/lib.rs" },
+    { "marker": "[MUSL-READ] read 6+11 bytes eof=1", "claim": "fgets read both lines (6 + 11 bytes) through __stdio_read -> native Read and fgetc hit EOF", "source": "userspace/ctests/musl_read.c" },
+    { "marker": "[MUSL-READ] OK", "claim": "both lines matched exactly — the buffered stdio read path works", "source": "userspace/ctests/musl_read.c" }
+  ],
+  "forbidden": [
+    { "marker": "[PANIC]", "why": "kernel panic", "source": "kernel/src/lib.rs" },
+    { "marker": "[MUSL-READ] FAIL", "why": "a read/compare check failed", "source": "userspace/ctests/musl_read.c" }
+  ]
+}
