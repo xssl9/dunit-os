@@ -1,0 +1,16 @@
+{
+  "description": "Dunit musl port (M6) fs: cwd — getcwd/chdir over the native GetCwd/Chdir. userspace/ctests/musl_cwd.c reads the cwd (/), chdirs to /persist, reads it back, chdirs to /, reads again. Run: tools/qemu_test.py --build --markers-file tools/m6_musl_cwd_markers.json --post-boot-delay 3 --settle 4 --cmd-timeout 45 --timeout 160 --boot-timeout 110",
+  "run": {
+    "config": "limine.conf",
+    "cmd": ["exec musl_cwd"]
+  },
+  "required": [
+    { "marker": "[TERM-007] Starting main loop", "claim": "the system booted to the terminal", "source": "kernel/src/lib.rs" },
+    { "marker": "[MUSL-CWD] start=/ after=/persist back=/", "claim": "getcwd (native GetCwd) and chdir (native Chdir, ptr+len) round-tripped the working directory", "source": "userspace/ctests/musl_cwd.c" },
+    { "marker": "[MUSL-CWD] OK", "claim": "getcwd/chdir work through the ported libc", "source": "userspace/ctests/musl_cwd.c" }
+  ],
+  "forbidden": [
+    { "marker": "[PANIC]", "why": "kernel panic", "source": "kernel/src/lib.rs" },
+    { "marker": "[MUSL-CWD] FAIL", "why": "a getcwd/chdir check failed", "source": "userspace/ctests/musl_cwd.c" }
+  ]
+}
