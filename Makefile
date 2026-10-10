@@ -124,6 +124,13 @@ userspace:
 		(cd $(USERSPACE_DIR)/system_apps/$$app && $(CARGO) build $(USERSPACE_CARGO_FLAGS)); \
 		cp $(USERSPACE_DIR)/system_apps/$$app/target/x86_64-unknown-none/release/$$app $(USERSPACE_BUILD_DIR)/$$app; \
 	done
+	@echo "[USERSPACE] building c_hello (freestanding C, Dunit ABI v0 conformance)"
+	$(CC) -ffreestanding -nostdlib -nostartfiles -static -no-pie -fno-pic -m64 \
+		-fno-stack-protector -fno-asynchronous-unwind-tables -fcf-protection=none \
+		-I abi/include -O2 \
+		-o $(USERSPACE_BUILD_DIR)/c_hello \
+		$(USERSPACE_DIR)/ctests/crt0.s $(USERSPACE_DIR)/ctests/hello.c \
+		-Wl,-T,$(USERSPACE_DIR)/userspace.ld -Wl,--build-id=none
 	@echo "Userspace programs built in $(USERSPACE_BUILD_DIR)/"
 
 iso: $(BUILD_DIR)/kernel.elf userspace

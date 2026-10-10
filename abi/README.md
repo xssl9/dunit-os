@@ -82,6 +82,17 @@ address static executables — matches M6's static-first stance; no PIE/`ET_DYN`
 Segments honoured: `PT_LOAD` (mapped) and `PT_TLS` (TLS image, Variant II). No
 `PT_INTERP` / dynamic linker, no load bias, no `PT_GNU_RELRO` yet.
 
+## ABI v0 conformance (freestanding C, no musl)
+
+The roadmap's ABI v0 "done" gate is met: `userspace/ctests/` holds a freestanding
+C program (`hello.c`) with a Dunit `crt0` (`crt0.s`) — no libc. The host C
+compiler builds it against these generated headers; the kernel ELF loader runs it
+as `/app/c_hello`. Its `crt0` reads `argc/argv/envp` straight off the SysV initial
+stack (not the registers), calls `main`, makes raw `write`/`exit` syscalls, checks
+the errno contract (an out-of-range fd returns `-EBADF`), and exits with `main`'s
+value. `crt0.s` is the seed the eventual Dunit musl `crt1` generalises. Test:
+`tools/qemu_test.py --build --markers-file tools/m6_c_abi_markers.json`.
+
 ## Status / roadmap
 
 - [x] Syscall-number manifest + Rust/C generation + kernel consistency check.
@@ -89,7 +100,8 @@ Segments honoured: `PT_LOAD` (mapped) and `PT_TLS` (TLS image, Variant II). No
 - [x] Handle-rights manifest + Rust/C generation + kernel check (M6.3). Reserved fds `0/1/2` + inheritance still to document.
 - [x] Capability/feature query (`sys_abi_query`) + `abi_test` smoke (M6.3).
 - [x] Process-entry ABI + ELF contract documented (current shape above).
-- [ ] **Next:** SysV process-entry transition — `rsp` 0 mod 16 + auxv + Dunit `crt0`/`crt1`, with a crt0 reader test (M6.3). Touches every app's `_start`; a dedicated verified cycle.
+- [x] **ABI v0 conformance gate: freestanding C program (own crt0) reads args/env, raw syscalls, errno, exit — verified (M6.3).**
+- [ ] **Next:** SysV process-entry transition — `rsp` 0 mod 16 + auxv, so a musl `crt1` (not just this minimal crt0) can run (M6.3). Touches every app's `_start`; a dedicated verified cycle.
 - [ ] Scalar widths/alignment for `time_t`/`off_t`/`ino_t`/`pid_t`/pointers, versioned wire structs (M6.3).
 - [ ] M6.4 cross-toolchain `x86_64-dunit` + sysroot (installs these headers).
 - [ ] M6.2 create the `dunit-musl` fork repo + port (needs the GitHub repo).
