@@ -199,6 +199,14 @@ make run                # build + boot the ISO in QEMU
 make run-dwm            # build + boot the desktop in QEMU
 ```
 
+To compile your own static C program against the Dunit libc, use the `dunit-cc`
+wrapper that the sysroot build installs (one command, produces an `x86_64-dunit`
+`ET_EXEC`):
+
+```bash
+build/dunit-sysroot/bin/dunit-cc -O2 -o build/userspace/myapp myapp.c
+```
+
 ## Testing
 
 `tools/qemu_test.py` is the single, fully-automatic build/boot/verify entrypoint:
