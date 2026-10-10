@@ -1,0 +1,16 @@
+{
+  "description": "Dunit musl port (M6-B) clock + sleep — clock_gettime over the native ClockGetTime and nanosleep over the native Sleep. userspace/ctests/musl_time.c samples CLOCK_MONOTONIC, sleeps ~50ms, resamples and checks it advanced, and that time() is nonzero (monotonic since boot; no RTC yet). Run: tools/qemu_test.py --build --markers-file tools/m6_musl_time_markers.json --post-boot-delay 3 --settle 4 --cmd-timeout 45 --timeout 160 --boot-timeout 110",
+  "run": {
+    "config": "limine.conf",
+    "cmd": ["exec musl_time"]
+  },
+  "required": [
+    { "marker": "[TERM-007] Starting main loop", "claim": "the system booted to the terminal", "source": "kernel/src/lib.rs" },
+    { "marker": "[MUSL-TIME] slept ~", "claim": "clock_gettime + nanosleep ran through the native ClockGetTime/Sleep syscalls", "source": "userspace/ctests/musl_time.c" },
+    { "marker": "[MUSL-TIME] OK", "claim": "the monotonic clock advanced by ~50ms across nanosleep and time() is nonzero", "source": "userspace/ctests/musl_time.c" }
+  ],
+  "forbidden": [
+    { "marker": "[PANIC]", "why": "kernel panic", "source": "kernel/src/lib.rs" },
+    { "marker": "[MUSL-TIME] FAIL", "why": "clock did not advance or time() was zero", "source": "userspace/ctests/musl_time.c" }
+  ]
+}

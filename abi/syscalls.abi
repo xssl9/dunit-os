@@ -83,3 +83,4 @@
 73	Fsck
 74	AbiQuery
 75	SetTidAddress
+76	ClockGetTime

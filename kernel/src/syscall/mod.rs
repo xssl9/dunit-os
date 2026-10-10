@@ -85,6 +85,7 @@ pub enum Syscall {
     Fsck = 73,
     AbiQuery = 74,
     SetTidAddress = 75,
+    ClockGetTime = 76,
 }
 
 impl Syscall {
@@ -167,6 +168,7 @@ impl Syscall {
             73 => Some(Syscall::Fsck),
             74 => Some(Syscall::AbiQuery),
             75 => Some(Syscall::SetTidAddress),
+            76 => Some(Syscall::ClockGetTime),
             _ => None,
         }
     }
@@ -719,6 +721,7 @@ pub extern "C" fn syscall_handler(
         Syscall::Fsck => sys_fsck(arg0 as *mut UserFsckReport),
         Syscall::AbiQuery => sys_abi_query(arg0 as usize, arg1 as usize),
         Syscall::SetTidAddress => sys_set_tid_address(arg0),
+        Syscall::ClockGetTime => sys_clock_gettime(arg0, arg1 as *mut u64),
     }
 }
 
@@ -1563,6 +1566,27 @@ fn sys_set_tid_address(addr: u64) -> i64 {
     }
     crate::process::set_current_clear_child_tid(addr);
     crate::process::current_tid().map(|tid| tid.0 as i64).unwrap_or(0)
+}
+
+/// Write the current time as `[tv_sec, tv_nsec]` (two u64) to `out`. Dunit has
+/// no RTC yet, so both CLOCK_REALTIME (0) and CLOCK_MONOTONIC (1) report the
+/// monotonic time since boot (documented — not wall-clock, never faked as such).
+fn sys_clock_gettime(clock_id: u64, out: *mut u64) -> i64 {
+    if clock_id > 1 {
+        return EINVAL;
+    }
+    if let Err(error) = validate_user_range(out as u64, 2 * core::mem::size_of::<u64>()) {
+        return error;
+    }
+    let ns = crate::clock::monotonic_ns();
+    let ts: [u64; 2] = [ns / 1_000_000_000, ns % 1_000_000_000];
+    let bytes = unsafe {
+        core::slice::from_raw_parts(ts.as_ptr() as *const u8, core::mem::size_of_val(&ts))
+    };
+    match copy_buffer_to_user(out as *mut u8, bytes) {
+        Ok(()) => 0,
+        Err(error) => error,
+    }
 }
 
 fn open_flags_from_u32(flags: u32) -> Result<crate::fs::vfs::OpenFlags, i64> {
