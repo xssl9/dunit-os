@@ -1,0 +1,32 @@
+# Dunit Userspace ABI v0 — error-number manifest (SINGLE SOURCE OF TRUTH).
+#
+# One line per error: <positive magnitude> <NAME>. Dunit syscalls return the
+# NEGATED value in rax (e.g. EINVAL -> -22); the magnitudes equal POSIX errno,
+# so the Dunit error -> POSIX errno mapping is identity. tools/gen_abi.py
+# regenerates the consumers and refuses to run if kernel/src/syscall/mod.rs
+# disagrees:
+#   - userspace/libdunit/src/errno_numbers.rs  (Rust: pub const E* : isize = -N, error_name)
+#   - abi/include/dunit/errno.h                (C:    #define DUNIT_E* N)
+
+1	EPERM
+2	ENOENT
+4	EINTR
+5	EIO
+9	EBADF
+10	ECHILD
+11	EAGAIN
+12	ENOMEM
+13	EACCES
+14	EFAULT
+16	EBUSY
+17	EEXIST
+20	ENOTDIR
+21	EISDIR
+22	EINVAL
+23	ENFILE
+32	EPIPE
+36	ENAMETOOLONG
+38	ENOSYS
+90	EMSGSIZE
+95	EOPNOTSUPP
+105	ENOBUFS

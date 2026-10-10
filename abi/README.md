@@ -17,16 +17,24 @@ authoritative. Regenerate the consumers after any edit:
 Generated, committed, never hand-edited:
 
 - `userspace/libdunit/src/syscall_numbers.rs` — Rust `pub const SYSCALL_<NAME>`
+- `userspace/libdunit/src/errno_numbers.rs` — Rust `pub const E<NAME>` + `error_name()`
 - `abi/include/dunit/syscall.h` — C `#define SYS_<NAME>` (consumed by the musl fork)
+- `abi/include/dunit/errno.h` — C `#define DUNIT_E<NAME>` (== POSIX errno magnitudes)
 
-The kernel's `enum Syscall` (`kernel/src/syscall/mod.rs`) is the implementor; the
-generator refuses to run if its `{number -> name}` map differs from the manifest,
-so the kernel, libdunit and the C sysroot stay locked together.
+The kernel's `enum Syscall` and its `E<NAME>` error consts (`kernel/src/syscall/mod.rs`)
+are the implementor; the generator refuses to run if either disagrees with its
+manifest, so the kernel, libdunit and the C sysroot stay locked together.
+
+## Error numbers
+
+`abi/errno.abi` lists each error as `<positive magnitude> <NAME>`. Dunit syscalls
+report failure by returning the negated value in `rax` (`EINVAL` → `-22`); the
+magnitudes equal POSIX errno, so the Dunit-error → POSIX-errno mapping is identity.
 
 ## Status / roadmap
 
 - [x] Syscall-number manifest + Rust/C generation + kernel consistency check.
-- [ ] Signed error range + Dunit-error → POSIX `errno` mapping (M6.3).
+- [x] Error-number manifest + Rust/C generation + `error_name()` + kernel check (M6.3).
 - [ ] Handle/fd lifetime, rights, inheritance, reserved `0/1/2` (M6.3).
 - [ ] Scalar widths/alignment for `time_t`/`off_t`/`ino_t`/`pid_t`/pointers (M6.3).
 - [ ] Documented process-entry stack (`argc/argv/envp`/auxv) + crt1 (M6.3).
