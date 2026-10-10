@@ -150,17 +150,11 @@ userspace:
 	fi
 	@if [ -f $(MUSL_DIR)/tools/dunit/build-libc.sh ]; then set -e; \
 		[ -f $(abspath $(MUSL_LIBC)) ] || $(MUSL_DIR)/tools/dunit/build-libc.sh $(abspath $(MUSL_SYSROOT)); \
-		LIBGCC=$$($(CC) -print-libgcc-file-name); \
 		for prog in $(MUSL_CTESTS); do \
 			echo "  [MUSL] $$prog"; \
-			$(CC) -static -no-pie -nostdlib -nostartfiles -nostdinc \
-				-isystem $(abspath $(MUSL_SYSROOT))/include \
-				-fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables -O2 \
-				$(abspath $(MUSL_SYSROOT))/lib/crt1.o $(abspath $(MUSL_SYSROOT))/lib/crti.o \
-				$(USERSPACE_DIR)/ctests/$$prog.c \
-				$(abspath $(MUSL_SYSROOT))/lib/libc.a $$LIBGCC \
-				$(abspath $(MUSL_SYSROOT))/lib/crtn.o \
-				-o $(USERSPACE_BUILD_DIR)/$$prog; \
+			CC=$(CC) $(abspath $(MUSL_SYSROOT))/bin/dunit-cc -O2 \
+				-o $(USERSPACE_BUILD_DIR)/$$prog \
+				$(USERSPACE_DIR)/ctests/$$prog.c; \
 		done; \
 	else echo "[USERSPACE] WARNING: $(MUSL_DIR) unavailable (not a git checkout or offline); musl ctests skipped. Fetch with: git submodule update --init --recursive"; fi
 	@echo "Userspace programs built in $(USERSPACE_BUILD_DIR)/"
