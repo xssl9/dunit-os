@@ -215,7 +215,7 @@ root@dunit:~#
 - [x] Safe shared-memory objects and capability-based IPC handles. Shared VM object с guard pages/W^X/teardown (`[VM-TEST] OK`) и per-process handle table с rights (`READ/WRITE/MAP/SIGNAL/TRANSFER/DISPLAY_MASTER`, права только сужаются; `handle_test: OK`) — на M1; активно используются gui-v1 (shared framebuffers + capability-передача буфера компоситору).
 - [x] Userspace GUI Server/compositor/DWM and declarative UI Runtime. **Готово:** userspace `gui_server` (software compositor, damage, focus/input routing), config-driven DWM (панель/dock/launcher/workspaces/widgets, quick settings, notifications, Alt/Super switcher, config-driven край панели/трея, protocol resize/maximize, ARGB-прозрачность) и declarative UI Runtime (крейты `runtime/`, `gui_client` рисует DUI+DSS). Остаётся только persistence session-store через ребут (зависит от M5/DunitFS v2 — учтено в M4).
 - [ ] Disk-backed system root, first boot, user profiles, recovery-capable DunitFS.
-- [ ] Dunit musl fork, native C toolchain and static userspace baseline.
+- [~] Dunit musl fork, native C toolchain and static userspace baseline. **Готово:** fork `coreformdev/dunit-musl` (submodule), ABI v0, и `build/syscall/crt/fs(write)/vm` — статические musl-программы (`hello/stdio/malloc`) запускаются на ядре. **Осталось:** `fs`(files)/`thread` для полного acceptance suite (см. M6).
 - [ ] Packet networking, audio, complete USB, ACPI/power and package/application platform.
 
 ## 8. Удачные решения и главные архитектурные проблемы
@@ -455,12 +455,12 @@ Green Tea Kernel native syscalls and objects
 
 #### M6.2. Исходники и сопровождение fork
 
-- [ ] Создать отдельный репозиторий `dunit-musl` как fork полного upstream source tree, не копировать выборочные `.c` и headers.
-- [ ] Зафиксировать исходный upstream release/tag и commit в `UPSTREAM.md`.
-- [ ] Подключить fork в `toolchains/dunit-musl/` как pinned submodule либо воспроизводимый pinned checkout.
-- [ ] Вести Dunit-изменения тематическими commits: `build`, `crt`, `syscall`, `fs`, `vm`, `thread`, `signal`, `network`, `ldso`.
+- [x] Создать отдельный репозиторий `dunit-musl` как fork полного upstream source tree, не копировать выборочные `.c` и headers.
+- [x] Зафиксировать исходный upstream release/tag и commit в `UPSTREAM.md`.
+- [x] Подключить fork в `toolchains/dunit-musl/` как pinned submodule либо воспроизводимый pinned checkout.
+- [~] Вести Dunit-изменения тематическими commits: `build`, `crt`, `syscall`, `fs`, `vm`, `thread`, `signal`, `network`, `ldso`. **Готово:** `build`/`syscall`/`crt`/`fs`(write)/`vm`. **Осталось:** `fs`(files)/`thread`/`signal`/`network`/`ldso`.
 - [ ] Хранить таблицу отличий от upstream и регулярно переносить bug/security fixes; обновление версии должно проходить полный libc test gate.
-- [ ] Не удалять из fork временно неподдерживаемые подсистемы: исключать их build profile, чтобы позднее не восстанавливать дерево вручную.
+- [x] Не удалять из fork временно неподдерживаемые подсистемы: исключать их build profile, чтобы позднее не восстанавливать дерево вручную. (Неподдержанные syscalls → документированный `-ENOSYS` sentinel, ни один файл не удалён.)
 - [ ] Проверить лицензионные notices musl и генерировать перечень исходных версий в SDK/image metadata.
 
 **Цель:** управляемый fork с проверяемым происхождением. **Причина:** маленький vendor snapshot быстро потеряет исправления и станет непереносимым. **Подсистемы:** source management, build, release. **Зависимости:** M0. **Результат:** любой Dunit release указывает точный upstream и Dunit commit. **Готовность:** clean checkout воспроизводит тот же `libc.a`; upstream delta автоматически формируется в CI. **Тесты:** clean/offline rebuild, checksum comparison, upgrade rehearsal. **Риски:** большой вечный diff; минимизировать OS-specific changes и не переформатировать upstream files.

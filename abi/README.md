@@ -105,7 +105,8 @@ value. `crt0.s` is the seed the eventual Dunit musl `crt1` generalises. Test:
 - [ ] `AT_PHDR`/`AT_ENTRY` auxv entries for TLS-from-program-headers, when the libc port needs them.
 - [ ] Scalar widths/alignment for `time_t`/`off_t`/`ino_t`/`pid_t`/pointers, versioned wire structs (M6.3).
 - [x] M6.2 `dunit-musl` fork repo created (`github.com/coreformdev/dunit-musl`, musl v1.2.6+67 `b1efda5b`, MIT) and wired here as the `toolchains/dunit-musl` submodule, with provenance (`UPSTREAM.md`), porting plan (`PORTING.md`) and CI.
-- [ ] M6.4 cross-toolchain `x86_64-dunit` + sysroot (installs these headers; done alongside the libc build).
-- [ ] M6.2 libc port itself — `build`/`syscall`/`crt`/`fs`/`vm`/`thread` adapters in the fork (seed crt0: `userspace/ctests/crt0.s`).
+- [x] M6.4 `x86_64-dunit` sysroot — `toolchains/dunit-musl/tools/dunit/build-libc.sh` produces a static `libc.a` + crt objects + headers; `make userspace` builds it once and links the `MUSL_CTESTS` against it. (A packaged `dunit-cc` wrapper is still a convenience TODO.)
+- [x] M6.2 libc port — **`build:`/`syscall:`/`crt`/`fs:`(write)/`vm:` landed and verified on the kernel.** Static musl programs run over the Dunit ABI: `musl_hello` (crt1 + `__init_tls` + native `SetThreadPointer` + `write`), `musl_stdio` (`printf` via `__stdio_write` → native `Write`), `musl_malloc` (mallocng over native `Mmap`). Unmapped Linux syscalls return documented `-ENOSYS` sentinels (M6.1). See `userspace/ctests/musl_*.c` and `tools/m6_musl_*_markers.json`.
+- [ ] M6.2 libc port, remaining — `fs:`(files: `open` arg reshape, `stat`/`getdents` struct translation, stdio read path) and `thread:` (needs kernel `AT_PHDR` auxv, then `clone`/futex). These complete the roadmap's static C `hello`/`file`/`malloc`/`thread` acceptance suite (`hello`/`malloc` done).
 
 See `DUNIT_OS_TECHNICAL_ROADMAP.md` §M6 for the full plan.
