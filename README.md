@@ -4,65 +4,133 @@
 
 # Dunit OS
 
-Dunit OS is a small x86_64 hobby operating system built around a Rust kernel,
-a C/NASM hardware layer, a Limine boot flow, and a growing userspace runtime.
+Dunit OS is a from-scratch x86_64 operating system: a Rust `no_std` kernel (the
+**Green Tea Kernel**), a C/NASM hardware layer, a Limine BIOS/UEFI boot flow, its
+own stable userspace ABI, and a userspace GUI stack. The design rule is a strict
+split — **the kernel provides mechanisms, userspace provides policy**: processes
+are independent ring-3 ELF binaries, the window manager/compositor and all apps
+live in userspace, and configuration (not Rust code) drives the desktop.
 
-It is not a polished desktop OS yet. The current system is a terminal-first OS
-prototype with real userspace ELF execution, a memory-backed filesystem,
-syscalls, process records, recoverable userspace faults, and cooperative
-userspace child scheduling.
+POSIX and musl are treated as a *source-portability layer*, not a goal of Linux
+compatibility — the kernel speaks its own native syscall ABI, and a dedicated
+musl fork is being ported onto it (see [The Dunit musl port](#the-dunit-musl-port)).
+
+It is a hobby OS, not a production desktop — but it boots on BIOS and UEFI, runs
+preemptive multithreaded userspace processes with crash isolation, has a
+config-driven desktop, installs to a real disk with a persistent filesystem, and
+now runs static C programs built against its own ported libc.
 
 ## Current State
 
-What works today:
+### Kernel & runtime
+- Limine boot on **BIOS and UEFI**, with a Terminal Mode and a GUI/DWM Mode.
+- C/NASM HAL: GDT, IDT, interrupt + syscall entry, context switch, PIT timer,
+  port I/O, FS-base MSR, boot handoff.
+- Rust `no_std` kernel with PMM, VMM, kernel heap, per-process address spaces,
+  and recoverable userspace faults (a faulting app is killed, the system lives).
+- Ring-3 ELF processes with real process records, parent/child, wait/reap, exit
+  codes and fault statuses.
 
-- Limine boot with Terminal Mode first and GUI Mode still available.
-- HAL in C/NASM: GDT, IDT, interrupt entry, syscall entry, context switch stubs,
-  port I/O, and low-level boot handoff.
-- Rust `no_std` kernel with PMM, VMM, heap, address-space setup, and basic fault
-  recovery for userspace.
-- Framebuffer-backed kernel terminal with command parsing, history, autocomplete,
-  and honest system commands.
-- VFS with MemFS as the root filesystem.
-- `/app` userspace ELF binaries embedded into MemFS.
-- `/assets` mirrors the repository asset tree, including images, icons, GUI files,
-  wallpapers, fonts, and boot art.
-- Userspace syscall ABI for read/write/open/close, framebuffer drawing,
-  spawn/wait, pid, cwd/chdir, sleep, debug log, readdir/stat, process stats,
-  IPC, stdin, and cooperative yield.
-- Userspace exec ABI with `argc`, `argv`, and `envp`.
-- PATH lookup through `/app`, so both `exec /app/elf_demo` and `exec elf_demo`
-  style commands are supported.
-- stdio fd foundation: stdin returns EOF, stdout/stderr write to the terminal log.
-- Process table with real records, parent/child relation, wait/reap behavior,
-  terminal exec autoreap, exit codes, and fault statuses.
-- Runnable spawn/yield foundation: `spawn` prepares an ELF child into Ready
-  state, and `yield` can run Ready children and resume the parent.
-- Cooperative scheduler foundation: validated PID ready queue, userspace context
-  save/restore, and wait/reap status reporting.
-- Minimal `/proc`, `/dev`, and RAM-backed `ramblk0` block diagnostics.
+### Scheduling, threads & sync (M1, done)
+- **Preemptive** round-robin scheduler on the PIT (a CPU-bound child is
+  preempted without yielding); FPU/SSE state saved across switches.
+- Schedulable **threads**: per-thread TID, context, kernel stack and FPU state,
+  sharing the owner process address space; `join` returns status; a thread fault
+  is isolated.
+- **Wait queues** with blocking sleep and IPC/event waits (no busy-polling).
+- **TLS** ABI (x86_64 `FS.base`, Variant II TCB, `PT_TLS` image).
+- Dunit-native **futex** (`FutexWait`/`FutexWake`): key = (owner pid, user vaddr),
+  compare-and-park atomic under an IRQ guard + wait-queue lock (no lost wakeups).
 
-## Included Userspace Apps
+### Memory & VM
+- `mmap`/`munmap`/`mprotect`, anonymous mappings, guard pages, W^X enforcement,
+  shared VM objects, and correct teardown returning frames to the PMM.
 
-Current system apps in `/app`:
+### IPC, handles & capabilities
+- Message IPC with queues, shared-memory buffers, and a PTY subsystem.
+- Per-process **handle table** with rights (`READ/WRITE/MAP/SIGNAL/TRANSFER/
+  DISPLAY_MASTER`); rights can only narrow on `dup`/`transfer`; the display
+  master is exclusive system-wide.
 
-- `elf_demo` - minimal userspace hello-world.
-- `fs_test` - VFS syscall smoke test.
-- `exit_test` - process exit test.
-- `args_test` - argv ABI test.
-- `cwd_test` - getcwd/chdir ABI test.
-- `path_test` - PATH and spawn/wait contract test.
-- `stdin_test` - stdin EOF foundation test.
-- `scheduler_test` - scheduler/yield foundation test.
-- `spawn_ready_test` - runnable spawn foundation test.
-- `yield_test` / `resumable_test` - cooperative child execution tests.
-- `ipc_parent` / `ipc_child` - parent/child IPC round trip.
-- `runtime_stress` - canonical runtime regression app.
-- `image_demo` - framebuffer drawing demo.
-- `bmp_viewer` - BMP renderer; defaults to `/assets/images/logo.bmp`.
-- `gui_files` - GUI File Manager (gui-v1 userspace client) with real `readdir`/`stat`.
-- `fault_pf` - recoverable page fault test.
-- `fault_ud` - recoverable invalid opcode test.
+### Filesystem & storage (M5, done)
+- VFS with a writable **MemFS** root; `/app` and `/assets` are populated from the
+  Limine-loaded **initrd** archive (the kernel embeds no app binaries or assets).
+- **AHCI** and **VirtIO** block drivers, GPT partitioning, and **DunitFS**.
+- Bootable BIOS/UEFI **disk image**, plus an in-system installer that writes a
+  real installation to an AHCI disk. A persistent DunitFS partition is mounted at
+  **`/persist`** and survives reboots.
+- Minimal `/proc`, `/dev`, and RAM block diagnostics.
+
+### Kernel terminal
+- Framebuffer-backed terminal with a Linux-TTY-style 8x16 VGA console font,
+  command parsing, history, autocomplete, and honest system commands.
+
+### Userspace GUI / Dunit DWM (M3-M4, done)
+- `gui_server`: a **userspace** software compositor (damage tracking, focus and
+  input routing) — there is no window-management policy in the kernel.
+- Config-driven **Dunit DWM**: panel, dock, launcher, workspaces, widgets, quick
+  settings, notifications, an Alt/Super window switcher, ARGB transparency, and
+  protocol-driven resize/maximize — all driven by configuration, not hardcode.
+- A declarative **UI Runtime** (`runtime/`, DUI + DSS) and the `gui-v1` wire
+  protocol (`protocols/gui-v1`) with a headless reference server + host tests.
+- GUI applications are independent userspace ELF clients (crash-isolated).
+
+### Userspace ABI v0 (abi/)
+- A single-source-of-truth ABI under `abi/`: `syscalls.abi`, `errno.abi`,
+  `rights.abi` -> generated Rust (`libdunit`) **and** C headers
+  (`abi/include/dunit/*.h`), with `tools/gen_abi.py` asserting the kernel agrees
+  (drift is a hard error / CI gate).
+- Native syscall convention (`rax`=number, `rdi/rsi/rdx/r10/r8/r9`), errno =
+  negated POSIX magnitudes, a capability query (`sys_abi_query`), a SysV-style
+  process-entry stack with an **auxv** (`AT_PAGESZ/AT_SECURE/AT_RANDOM`), and a
+  static-first ELF contract (ELF64 LE `ET_EXEC`, `PT_LOAD` + `PT_TLS`).
+
+## The Dunit musl port
+
+M6 is a real port of **musl libc** onto the Green Tea Kernel's native ABI — not a
+Linux-compat shim. The fork lives in its own repository and is wired in as the
+git submodule `toolchains/dunit-musl` (auto-fetched by `build_iso.sh`/`make`):
+
+- Upstream musl **v1.2.6** (`b1efda5b`), carried as a full fork with provenance
+  (`UPSTREAM.md`) and a themed-commit porting plan (`PORTING.md`).
+- Target `x86_64-dunit`: the host compiler is the cross compiler (the syscall
+  instruction/registers already match Dunit); `tools/dunit/build-libc.sh` builds
+  a static `libc.a` + crt objects into a sysroot.
+- Linux syscall numbers are replaced with Dunit's; unmapped calls return a
+  documented `-ENOSYS` (never a silent fake). The thread pointer, anonymous
+  `mmap` (malloc), the stdio write path, and an `open` flag/arg adapter all map
+  onto native Dunit syscalls.
+
+Static musl programs that **run on the kernel today** (built into `/app`, checked
+by `tools/m6_musl_*_markers.json`):
+
+- `musl_hello` — crt1 + `__libc_start_main` + TLS setup + `write`.
+- `musl_stdio` — `printf`/`fflush` (buffered stdio over native `Write`).
+- `musl_malloc` — mallocng (small + 1 MiB `mmap` + `calloc` + `free`).
+- `musl_file` — `open`/`read`/`write`/`close`, incl. a write+read roundtrip in `/persist`.
+
+`musl_thread` (pthreads) is a work in progress: threads create, run and the mutex
+fast path works, but two threads exiting concurrently deadlock because musl
+relies on Linux `CLONE_CHILD_CLEARTID` to release its thread-list lock — the next
+step is a small kernel clear-child-tid primitive.
+
+## Userspace apps
+
+Apps are independent ELF binaries in `/app`, loaded from the initrd. A selection:
+
+- **Runtime/ABI tests:** `elf_demo`, `fs_test`, `exit_test`, `args_test`,
+  `cwd_test`, `path_test`, `env_test`, `file_api_test`, `stdin_test`, `abi_test`.
+- **Scheduler/threads/VM:** `scheduler_test`, `preempt_test`, `yield_test`,
+  `thread_test`, `wait_test`, `vm_test`, `vm_protect_fault`, `vm_guard_fault`,
+  `tls_test`, `futex_test`, `handle_test`, `runtime_stress`.
+- **IPC / processes:** `ipc_parent`/`ipc_child`, `spawn_ready_test`,
+  `kill_target`, `pty_test`/`pty_echo`.
+- **Faults (recoverable):** `fault_pf`, `fault_ud`.
+- **GUI / desktop:** `gui_server`, `dtop` (DWM), `gui_files`, `gui_terminal`,
+  `gui_calc`, `gui_stat`, `gui_settings`, `gui_client`/`gui_demo`.
+- **Shell / tools:** `dsh`, `calc`, `init`, `fsck_dunit`.
+- **Freestanding C & musl:** `c_hello` (ABI v0 conformance, no libc) and the
+  `musl_*` programs above.
 
 Example terminal commands:
 
@@ -70,165 +138,156 @@ Example terminal commands:
 help
 dufetch
 ls /app
-ls /assets
 exec args_test one two
-exec bmp_viewer
-exec bmp_viewer /assets/images/dr15.bmp
-exec fault_pf
+exec c_hello
+exec musl_malloc
+exec musl_file
 ps
-pwd
 ```
 
 ## Architecture
 
 ```text
-                 userspace Rust ELF apps
-        args_test | fs_test | bmp_viewer | ...
-                            |
-                         libdunit
-                            |
-                  syscall ABI / exec ABI
-                            |
-                  Rust kernel subsystems
-      process table | VFS/MemFS | ELF | PMM/VMM | terminal
-                            |
-                         C/NASM HAL
-          boot handoff | GDT | IDT | interrupts | syscall entry
-                            |
-                         Limine/QEMU
+      independent userspace ELF apps          static C / musl apps
+  gui_files | gui_terminal | dsh | calc         musl_hello | musl_file
+                   |                                    |
+               libdunit (Rust)                  Dunit musl fork (libc.a)
+                   \_______________   _________________/
+                                   \ /
+                 Dunit Userspace ABI v0  (abi/, generated)
+                 native syscalls | process-entry+auxv | ELF
+                                   |
+                      gui_server (compositor/DWM)   <- userspace policy
+                                   |
+                   Green Tea Kernel (Rust no_std)   <- mechanisms
+ process/threads | scheduler | VMM/PMM | VFS/MemFS/DunitFS | IPC/handles
+                 display/input | AHCI/VirtIO | terminal | ELF loader
+                                   |
+                        C/NASM HAL (GDT/IDT/syscall/timer)
+                                   |
+                            Limine (BIOS/UEFI) / QEMU
 ```
 
-The project is still early, but userspace process execution is now real enough
-for foreground apps to spawn children, yield to them, resume, and wait for real
-exit or fault status.
+## Build & run
 
-## Boot Modes
+Prerequisites: a host `gcc` (also used as the `x86_64-dunit` cross compiler),
+`nasm`, `lld`, `xorriso`, `qemu-system-x86_64`, `python3`, and a Rust **nightly**
+toolchain with `rust-src` (see `rust-toolchain.toml`).
 
-`limine.conf` is the normal interactive boot menu:
-
-```text
-timeout: 5
-
-/Dunit OS - GUI Mode
-    resolution: 1600x900x32
-
-/Dunit OS - Terminal Mode
-    cmdline: mode=terminal
+```bash
+git clone https://github.com/xssl9/dunit-os.git
+cd dunit-os
+./build_iso.sh          # fetches Limine + the dunit-musl submodule, builds the ISO
 ```
 
-Automated tests use separate configs so they never depend on the normal boot
-menu:
+`build_iso.sh` and `make` auto-fetch the `toolchains/dunit-musl` submodule, so a
+plain `git clone` (without `--recurse-submodules`) still builds the musl programs;
+if git/network is unavailable they are skipped with a warning rather than failing.
 
-- `limine_test_terminal.conf`: terminal mode, timeout 0.
-- `limine_test_gui.conf`: GUI mode, timeout 0.
+Common targets:
 
-Terminal Mode is the reliable development path. GUI Mode exists, but it is not
-the focus of the current runtime milestones.
+```bash
+make iso                # terminal-first ISO (build/microkernel.iso)
+make iso-dwm            # desktop (DWM) ISO
+make disk-image         # bootable BIOS/UEFI raw disk image (no root needed)
+make run                # build + boot the ISO in QEMU
+make run-dwm            # build + boot the desktop in QEMU
+```
 
-## Install to a Disk
+## Testing
 
-Build a bootable BIOS/UEFI image without root privileges:
+`tools/qemu_test.py` is the single, fully-automatic build/boot/verify entrypoint:
+it builds, boots QEMU headless, drives the terminal, and checks serial-log
+markers. Marker contracts live in `tools/*_markers.json`.
+
+```bash
+python3 tools/qemu_test.py --build --cmd "exec runtime_stress"
+python3 tools/qemu_test.py --build --markers-file tools/m6_musl_file_markers.json
+```
+
+## Boot modes
+
+`limine.conf` is the normal interactive menu (GUI + Terminal). Automated tests use
+dedicated zero-timeout configs so they never depend on the menu:
+
+- `limine_test_terminal.conf` — terminal mode.
+- `limine_test_gui.conf` — GUI mode.
+
+## Install to a disk
+
+Build a bootable BIOS/UEFI image without root:
 
 ```bash
 make disk-image
 ```
 
-Install to a whole physical disk from Linux or a live USB. This erases the
-selected disk, so verify the device name first:
+Install to a whole physical disk (this **erases** the target — verify the device):
 
 ```bash
 sudo python3 tools/install_disk.py /dev/sdX --yes-i-know-this-erases-the-disk
 ```
 
-The installer creates a FAT32 EFI System Partition containing Limine and the
-kernel, plus a persistent DunitFS partition automatically mounted at `/persist`.
-
-The live ISO can also install directly from the Dunit terminal:
+The installer writes a FAT32 EFI System Partition (Limine + kernel) and a
+persistent DunitFS partition mounted at `/persist`. The live system can also
+install itself from the Dunit terminal:
 
 ```text
 lsblk
 install.dunit sda --yes
 ```
 
-The in-system installer creates a BIOS and x86_64 UEFI installation on a
-writable AHCI disk.
+## Honest limitations
 
-## Honest Limitations
+Working but UP-only / early:
+- Single-CPU (no SMP yet); the root filesystem is still MemFS (DunitFS is the
+  persistent partition at `/persist`, not yet `/`).
 
 Not implemented yet:
+- Signals, dynamic TLS/DTV, and full `exec`/`fork`.
+- The musl `thread:` path (pthreads) — infrastructure is in, but concurrent
+  thread exit deadlocks pending a kernel clear-child-tid primitive; `stat`/
+  `getdents` and the stdio read path are not ported yet.
+- Networking, audio, complete USB, and ACPI power/shutdown.
+- A real RTC/date source; filesystem journaling/recovery.
 
-- Hardened timer preemption.
-- SMP.
-- Journaling and recovery for the disk-backed filesystem.
-- Network stack.
-- Userspace terminal/shell process.
-- musl libc port and the syscall/ABI surface it requires.
-- ACPI/QEMU shutdown.
-- Real RTC/date source.
+## Repository map
 
-Current foundation behavior:
-
-- `spawn` prepares a Ready child.
-- `yield` can switch to a Ready child and resume the parent.
-- `wait` on Ready/Running children returns `EAGAIN`; after execution it reports
-  real exit/fault status.
-- Foreground terminal `stdin` can provide line input to userspace apps.
-- `/assets` is embedded from the repository `assets/` directory with the same
-  hierarchy exposed in MemFS.
+```text
+hal/                        C/NASM hardware layer
+kernel/                     Rust no_std kernel (Green Tea Kernel)
+abi/                        Userspace ABI v0: manifests + generated C headers
+userspace/libdunit/         Rust userspace syscall/startup library
+userspace/system_apps/      Rust ELF apps shipped in /app
+userspace/ctests/           Freestanding C (c_hello) + static musl programs
+toolchains/dunit-musl/      The Dunit musl fork (git submodule)
+protocols/gui-v1/           GUI wire protocol + headless reference server
+runtime/                    Declarative UI runtime (DUI/DSS)
+assets/                     Images, icons, fonts, wallpapers, boot art
+tools/qemu_test.py          Canonical build/test/run automation
+tools/gen_abi.py            ABI manifest -> Rust/C generator + kernel check
+DUNIT_OS_TECHNICAL_ROADMAP.md   Detailed architecture & milestones (M0-M7)
+```
 
 ## Roadmap
 
-### 1. Userspace Runtime v1
+Milestone status (full detail in `DUNIT_OS_TECHNICAL_ROADMAP.md`):
 
-- Stabilize `spawn/yield/wait/exit/fault/stdin/stdout/ipc` as a runtime contract.
-- Use `runtime_stress` as the canonical QEMU regression app.
-- Keep automated launch/testing behind `build_and_run_multipass.py`.
-- Fix or document host-side kernel test workflow separately from QEMU runtime
-  verification.
-
-### 2. Runtime Contracts
-
-- Tighten syscall error codes and userspace wrappers.
-- Expand stdin beyond EOF-only behavior.
-- Add better process introspection for `ps`.
-- Keep fault diagnostics recoverable and readable.
-
-### 3. Filesystem Growth
-
-- Move beyond embedded MemFS assets.
-- Add a disk-backed filesystem path.
-- Add mount/unmount semantics.
-- Keep `/app` and `/assets` as early boot/system locations.
-
-### 4. Terminal And Tools
-
-- Make terminal commands less kernel-hardcoded over time.
-- Add more userspace tools.
-- Add file inspection/editing primitives.
-- Improve automated regression coverage.
-
-### 5. GUI Later
-
-- Revisit GUI mode after scheduler/runtime contracts are strong.
-- Prefer real userspace GUI processes over fake desktop state.
-- Add input, rendering, and window/compositor contracts gradually.
-
-## Repository Map
-
-```text
-hal/                         C/NASM hardware layer
-kernel/                      Rust no_std kernel
-userspace/libdunit/          Userspace syscall/startup helper library
-userspace/system_apps/       Small Rust ELF apps embedded into /app
-docs/                        Design notes and milestone context
-tools/qemu_test.py           Canonical build/test/run automation
-limine.conf                  Normal interactive boot menu
-limine_test_terminal.conf    Automated terminal test boot config
-limine_test_gui.conf         Automated GUI test boot config
-```
+- **M0-M1** — contracts + kernel runtime (preemption, threads, TLS, futex, VM,
+  handles): **done**.
+- **M2-M4** — GUI protocol, userspace compositor, Dunit DWM + UI runtime: **done**.
+- **M5** — installed system + persistence (AHCI/VirtIO, GPT, DunitFS, BIOS/UEFI
+  install): **done**.
+- **M6** — Dunit musl fork, static-first: **in progress** (hello/stdio/malloc/
+  file run on the kernel; threads WIP).
+- **M7** — networking, audio, USB, ACPI, package platform: **later**.
 
 ## License
 
 MIT License.
 
 ## made with rust
+
+
+
+
+
