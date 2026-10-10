@@ -9,6 +9,7 @@ extern crate std;
 pub mod allocator;
 pub mod apps;
 pub mod command;
+pub mod console_font;
 pub mod clock;
 pub mod cpu;
 pub mod dpkg;
