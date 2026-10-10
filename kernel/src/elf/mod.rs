@@ -161,6 +161,11 @@ pub const USER_STACK_SIZE: usize = 0x10000;
 pub const USER_STACK_TOP: usize = 0x00007FFF_FFFFF000;
 const MAX_EXEC_ARGS: usize = 16;
 const MAX_EXEC_ARG_LEN: usize = 128;
+
+// SysV auxiliary-vector types the initial stack carries (static-first subset).
+const AT_PAGESZ: u64 = 6;
+const AT_SECURE: u64 = 23;
+const AT_RANDOM: u64 = 25;
 const EXEC_ENV: [&str; 3] = ["PATH=/app", "SHELL=dunit", "CWD=/"];
 
 const PAGE_SIZE: usize = 4096;
@@ -280,8 +285,10 @@ struct InitialStack {
 /// On process entry:
 /// - `%rsp` points at the stack block below and is 8 mod 16, matching the
 ///   x86_64 SysV function-entry contract a Rust `_start` expects after `call`.
+///   (A libc `crt0`/`crt1` — including musl's — re-aligns with `and $-16,%rsp`,
+///   so this convention serves both.)
 /// - `%rdi = argc`, `%rsi = argv`, `%rdx = envp` for no-libc Rust `_start`.
-/// - Stack memory contains:
+/// - Stack memory contains a SysV-style initial block:
 ///
 /// ```text
 /// rsp -> argc: u64
@@ -292,11 +299,15 @@ struct InitialStack {
 ///        envp[0]: *const u8
 ///        ...
 ///        NULL
-///        padding, then NUL-terminated argv/env strings
+///        auxv[0]: { a_type: u64, a_val: u64 }   (e.g. AT_PAGESZ, AT_RANDOM)
+///        ...
+///        { AT_NULL = 0, 0 }
+///        padding, then NUL-terminated argv/env strings and the AT_RANDOM bytes
 /// ```
 ///
-/// `envp` is intentionally minimal for now. The ABI exists so a fuller shell
-/// environment can grow later without changing userspace startup shape.
+/// The auxiliary vector is the piece a libc startup (musl `__libc_start_main`)
+/// reads after the envp NULL; a no-libc Rust `_start` simply ignores everything
+/// above `envp`. `envp` is intentionally minimal for now.
 fn prepare_initial_stack(
     process: &mut Process,
     argv: &[String],
@@ -322,11 +333,37 @@ fn prepare_initial_stack(
     }
     env_ptrs.reverse();
 
+    // 16 random bytes for the auxv AT_RANDOM entry (a libc seeds its stack guard
+    // / TLS canary from these). Written in the strings region before alignment.
+    // TSC-derived — adequate for a hobby OS, not a cryptographic RNG.
+    let mut random = [0u8; 16];
+    fill_random(&mut random);
+    let random_ptr = write_stack_bytes(process, &mut sp, &random)?;
+
+    // Auxiliary vector (static-first subset). AT_PHDR/AT_ENTRY (for TLS from
+    // program headers) are added when the libc port needs them.
+    let auxv: [(u64, u64); 3] = [
+        (AT_PAGESZ, PAGE_SIZE as u64),
+        (AT_SECURE, 0),
+        (AT_RANDOM, random_ptr as u64),
+    ];
+
+    // Final %rsp must be 8 mod 16. The auxv contributes an even number of words,
+    // so it never changes the parity the pad below corrects for.
     let words = argv_ptrs.len() + env_ptrs.len() + 3;
     sp &= !0xF;
     if words % 2 == 0 {
         sp = sp.checked_sub(8).ok_or(ElfError::InvalidProgramHeader)?;
         write_user_u64(process, sp, 0)?;
+    }
+
+    // auxv, top-down: AT_NULL terminator highest, then entries (type at the
+    // lower address of each pair). Order among non-NULL entries is irrelevant.
+    push_user_u64(process, &mut sp, 0)?;
+    push_user_u64(process, &mut sp, 0)?;
+    for (a_type, a_val) in auxv.iter().rev() {
+        push_user_u64(process, &mut sp, *a_val)?;
+        push_user_u64(process, &mut sp, *a_type)?;
     }
 
     push_user_u64(process, &mut sp, 0)?;
@@ -371,6 +408,33 @@ fn write_stack_string(
     write_user_bytes(process, *sp, value.as_bytes())?;
     write_user_bytes(process, *sp + value.len(), &[0])?;
     Ok(*sp)
+}
+
+/// Write raw bytes into the stack strings region and return their (16-aligned)
+/// address — used for the auxv AT_RANDOM blob.
+fn write_stack_bytes(
+    process: &mut Process,
+    sp: &mut usize,
+    bytes: &[u8],
+) -> Result<usize, ElfError> {
+    *sp = sp
+        .checked_sub(bytes.len())
+        .ok_or(ElfError::InvalidProgramHeader)?;
+    *sp &= !0xF;
+    write_user_bytes(process, *sp, bytes)?;
+    Ok(*sp)
+}
+
+/// Fill `out` with TSC-seeded pseudo-random bytes (xorshift*). Non-cryptographic;
+/// enough to seed a libc stack guard on a hobby OS.
+fn fill_random(out: &mut [u8]) {
+    let mut x = unsafe { core::arch::x86_64::_rdtsc() } | 1;
+    for byte in out.iter_mut() {
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        *byte = (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33) as u8;
+    }
 }
 
 fn push_user_u64(process: &mut Process, sp: &mut usize, value: u64) -> Result<(), ElfError> {

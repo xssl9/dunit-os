@@ -71,6 +71,24 @@ int main(int argc, char **argv, char **envp) {
         return 1;
     }
 
+    /* Walk past envp's NULL to the auxiliary vector and verify the kernel
+     * supplied AT_PAGESZ=4096 and a terminating AT_NULL — exactly what a libc
+     * crt1 (musl's __libc_start_main) reads after the envp NULL. */
+    char **p = envp;
+    while (*p) p++;
+    unsigned long *aux = (unsigned long *)(p + 1);
+    int saw_pagesz = 0, saw_null = 0;
+    for (int i = 0; i < 64; i++) {
+        unsigned long a_type = aux[2 * i], a_val = aux[2 * i + 1];
+        if (a_type == 0) { saw_null = 1; break; }     /* AT_NULL */
+        if (a_type == 6 && a_val == 4096) saw_pagesz = 1; /* AT_PAGESZ */
+    }
+    if (!saw_pagesz || !saw_null) {
+        puts1("[C-ABI-TEST] FAIL: auxv\n");
+        return 1;
+    }
+    puts1("[C-ABI-TEST] auxv ok (AT_PAGESZ=4096)\n");
+
     puts1("[C-ABI-TEST] OK\n");
     return 0;
 }

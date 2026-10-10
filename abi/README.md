@@ -60,20 +60,20 @@ SysV-style initial stack plus register args:
 rsp -> argc            (u64)
        argv[0..argc]   (*const u8), then NULL
        envp[0..]       (*const u8), then NULL
-       (padding, then the NUL-terminated argv/env strings)
+       auxv[0..]       { a_type: u64, a_val: u64 }, then { AT_NULL, 0 }
+       (padding, then the NUL-terminated argv/env strings + AT_RANDOM bytes)
 ```
 
 `%rsp` is `8 mod 16` (the x86-64 SysV *function*-entry shape a no-libc Rust
-`_start` expects after a `call`), and `%rdi=argc`, `%rsi=argv`, `%rdx=envp`.
-There is **no auxv** yet, and no reserved behaviour beyond fds `0/1/2` = stdin/
-stdout/stderr.
+`_start` expects after a `call`); `%rdi=argc`, `%rsi=argv`, `%rdx=envp`; fds
+`0/1/2` = stdin/stdout/stderr. The auxiliary vector carries the static-first
+subset `AT_PAGESZ` (4096), `AT_SECURE` (0) and `AT_RANDOM` (→ 16 bytes).
 
-To host musl this must become the standard SysV *process*-entry: `%rsp` `0 mod
-16` at `_start`, an auxiliary vector (`AT_PAGESZ`, `AT_RANDOM`, `AT_NULL`, …)
-after the envp NULL, and a Dunit `crt0`/`crt1` that parses it and calls
-`__libc_start_main` (the kernel must not know musl internals). That is a
-coordinated transition touching every app's `_start`, so it is its own step — not
-folded into the generative ABI work above.
+A libc `crt1` re-aligns itself (musl's `_start` does `and $-16,%rsp`), so the
+`8 mod 16` convention serves both a no-libc Rust `_start` and a libc crt1 — no
+separate `rsp` 0-mod-16 switch is needed, and the auxv is the piece a crt1 reads
+after the envp NULL. `AT_PHDR`/`AT_PHENT`/`AT_PHNUM`/`AT_ENTRY` (for TLS from
+program headers) are added when the libc port needs them.
 
 ## ELF contract (current)
 
@@ -101,7 +101,8 @@ value. `crt0.s` is the seed the eventual Dunit musl `crt1` generalises. Test:
 - [x] Capability/feature query (`sys_abi_query`) + `abi_test` smoke (M6.3).
 - [x] Process-entry ABI + ELF contract documented (current shape above).
 - [x] **ABI v0 conformance gate: freestanding C program (own crt0) reads args/env, raw syscalls, errno, exit — verified (M6.3).**
-- [ ] **Next:** SysV process-entry transition — `rsp` 0 mod 16 + auxv, so a musl `crt1` (not just this minimal crt0) can run (M6.3). Touches every app's `_start`; a dedicated verified cycle.
+- [x] **Process-entry auxv** (`AT_PAGESZ`/`AT_SECURE`/`AT_RANDOM`/`AT_NULL`), verified from C (`c_hello` walks envp→auxv). Stack is now musl-crt1-ready; crt1 self-aligns, so no `rsp` 0-mod-16 switch needed (M6.3).
+- [ ] `AT_PHDR`/`AT_ENTRY` auxv entries for TLS-from-program-headers, when the libc port needs them.
 - [ ] Scalar widths/alignment for `time_t`/`off_t`/`ino_t`/`pid_t`/pointers, versioned wire structs (M6.3).
 - [ ] M6.4 cross-toolchain `x86_64-dunit` + sysroot (installs these headers).
 - [ ] M6.2 create the `dunit-musl` fork repo + port (needs the GitHub repo).
