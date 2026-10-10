@@ -1,0 +1,83 @@
+# Dunit Userspace ABI v0 — syscall-number manifest (SINGLE SOURCE OF TRUTH).
+#
+# One line per syscall: <number> <CanonicalName>. This file is authoritative;
+# tools/gen_abi.py regenerates the consumers from it and refuses to run if the
+# kernel's `enum Syscall` (kernel/src/syscall/mod.rs) disagrees:
+#   - userspace/libdunit/src/syscall_numbers.rs   (Rust: SYSCALL_<NAME>)
+#   - abi/include/dunit/syscall.h                 (C:    SYS_<NAME>)
+# Change a number here, run `python3 tools/gen_abi.py`, commit all outputs.
+
+0	Exit
+1	Fork
+2	Exec
+3	Read
+4	Write
+5	Open
+6	Close
+7	Mmap
+8	SendMessage
+9	ReceiveMessage
+10	GetFramebuffer
+11	DrawPixel
+12	DrawRect
+13	GetKey
+14	GetMousePos
+15	SpawnProcess
+16	WaitProcess
+17	GetPid
+18	KillProcess
+19	Sleep
+20	DebugLog
+21	SmokeDone
+22	GetCwd
+23	Chdir
+24	Yield
+25	GetTerminalCursor
+26	GetSystemStats
+27	Readdir
+28	Stat
+29	ThreadCreate
+30	ThreadJoin
+31	ThreadExit
+32	GetTid
+33	WaitEvent
+34	Munmap
+35	Mprotect
+36	SharedVmCreate
+37	SharedVmMap
+38	SharedVmClose
+39	SetThreadPointer
+40	GetThreadPointer
+41	FutexWait
+42	FutexWake
+43	HandleCreateMemory
+44	HandleCreateEndpoint
+45	HandleRead
+46	HandleWrite
+47	HandleMap
+48	HandleDup
+49	HandleRights
+50	HandleClose
+51	HandleSignal
+52	HandleTakeSignals
+53	HandleDisplayAcquire
+54	HandleTransfer
+55	HandleInputAcquire
+56	HandleCreateShared
+57	FbPresent
+58	HandleSharedLen
+59	ReceiveMessageFrom
+60	GetMouseState
+61	PtyCreate
+62	PtySpawn
+63	PtyRead
+64	PtyWrite
+65	PtyClose
+66	GetChar
+67	GetKeyEvent
+68	Unlink
+69	Rename
+70	Mkdir
+71	SetVideoMode
+72	Fsync
+73	Fsck
