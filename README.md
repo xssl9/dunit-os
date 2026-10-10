@@ -108,11 +108,12 @@ by `tools/m6_musl_*_markers.json`):
 - `musl_stdio` — `printf`/`fflush` (buffered stdio over native `Write`).
 - `musl_malloc` — mallocng (small + 1 MiB `mmap` + `calloc` + `free`).
 - `musl_file` — `open`/`read`/`write`/`close`, incl. a write+read roundtrip in `/persist`.
+- `musl_thread` — two `pthread`s + a contended `pthread_mutex` + `pthread_join`.
 
-`musl_thread` (pthreads) is a work in progress: threads create, run and the mutex
-fast path works, but two threads exiting concurrently deadlock because musl
-relies on Linux `CLONE_CHILD_CLEARTID` to release its thread-list lock — the next
-step is a small kernel clear-child-tid primitive.
+Threads use the native `__clone`, a futex wait/wake dispatcher, and a kernel
+clear-child-tid primitive (`SetTidAddress`) that releases musl's thread-list lock
+on thread exit. Still to port: the stdio read path, `stat`/`getdents` struct
+translation, and signals (currently documented `ENOSYS`).
 
 ## Userspace apps
 
@@ -244,9 +245,8 @@ Working but UP-only / early:
 
 Not implemented yet:
 - Signals, dynamic TLS/DTV, and full `exec`/`fork`.
-- The musl `thread:` path (pthreads) — infrastructure is in, but concurrent
-  thread exit deadlocks pending a kernel clear-child-tid primitive; `stat`/
-  `getdents` and the stdio read path are not ported yet.
+- In the musl port: the stdio read path and `stat`/`getdents` struct translation
+  (the static C `hello`/`stdio`/`malloc`/`file`/`thread` suite already runs).
 - Networking, audio, complete USB, and ACPI power/shutdown.
 - A real RTC/date source; filesystem journaling/recovery.
 
@@ -277,8 +277,9 @@ Milestone status (full detail in `DUNIT_OS_TECHNICAL_ROADMAP.md`):
 - **M2-M4** — GUI protocol, userspace compositor, Dunit DWM + UI runtime: **done**.
 - **M5** — installed system + persistence (AHCI/VirtIO, GPT, DunitFS, BIOS/UEFI
   install): **done**.
-- **M6** — Dunit musl fork, static-first: **in progress** (hello/stdio/malloc/
-  file run on the kernel; threads WIP).
+- **M6** — Dunit musl fork, static-first: **in progress** — the static C suite
+  (`hello`/`stdio`/`malloc`/`file`/`thread`) runs on the kernel; stdio read,
+  `stat`/`getdents`, signals and networking remain.
 - **M7** — networking, audio, USB, ACPI, package platform: **later**.
 
 ## License
