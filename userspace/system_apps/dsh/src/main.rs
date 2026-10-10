@@ -138,6 +138,16 @@ fn run(line: &str) {
         "uptime" => cmd_uptime(),
         "free" => cmd_free(),
         "ps" => cmd_ps(),
+        "top" => cmd_top(),
+        "poweroff" | "shutdown" => {
+            out("shutdown not implemented: ACPI/QEMU shutdown device unavailable\n")
+        }
+        // Privileged hardware/block/fs-admin diagnostics: a userspace shell can't
+        // touch PCI/AHCI/block itself, so these are rendered by the kernel (the
+        // owner of those drivers) via the `terminal_diag` gateway and printed
+        // verbatim — identical output to kernel Terminal Mode, one source of truth.
+        "lspci" | "usb" | "blk" | "lsblk" | "ahci" | "devs" | "blkread" | "blkwrite"
+        | "mkfs.dunit" | "mount.dunit" | "install.dunit" => run_diag(line),
         "exit" => libdunit::exit(0),
         // `exec <name>` runs /app/<name> — the same verb kernel Terminal Mode
         // uses to launch a program, so muscle memory carries over 1:1.
@@ -162,11 +172,13 @@ fn run(line: &str) {
 }
 
 fn cmd_help() {
-    out("dsh — Dunit userspace shell (mirrors the text-mode terminal)\n");
+    out("dsh — Dunit userspace shell (full parity with text-mode terminal)\n");
     out("filesystem: ls [path]  cd [path]  pwd  mkdir <dir>  touch <file>  cat <file>  rm <path>  tree [path]\n");
     out("text:       echo <text> [> file | >> file]\n");
-    out("system:     uname [-a]  whoami  date  uptime  free  ps\n");
-    out("control:    clear  help  exit\n");
+    out("system:     uname [-a]  whoami  date  uptime  free  ps  top  dufetch\n");
+    out("hardware:   lspci  usb  devs  blk  lsblk  ahci  blkread  blkwrite\n");
+    out("disk/fs:    mkfs.dunit  mount.dunit  install.dunit\n");
+    out("control:    clear  help  exit  poweroff  shutdown\n");
     out("any other name (or `exec <name>`) runs /app/<name> on a bridged pty\n");
 }
 
@@ -374,6 +386,46 @@ fn cmd_ps() {
         s.process_dead,
         s.process_reaped
     ));
+}
+
+/// A one-shot `top`-style snapshot (dsh has no alternate screen, so it prints
+/// once rather than refreshing): tasks + physical/heap memory + IPC + FS, all
+/// read from the single `get_system_stats` syscall.
+fn cmd_top() {
+    let mut s = SystemStats::default();
+    libdunit::get_system_stats(&mut s);
+    let kib = |b: u64| b / 1024;
+    out(&format!(
+        "tasks: {} total, {} running, {} ready, {} blocked\n",
+        s.process_total, s.process_running, s.process_ready, s.process_blocked
+    ));
+    out(&format!(
+        "mem KiB:  {} total, {} used, {} free\n",
+        kib(s.pmm_total_bytes), kib(s.pmm_used_bytes), kib(s.pmm_free_bytes)
+    ));
+    out(&format!(
+        "heap KiB: {} total, {} used, {} free ({} blocks)\n",
+        kib(s.heap_total_bytes), kib(s.heap_used_bytes), kib(s.heap_free_bytes),
+        s.heap_free_blocks
+    ));
+    out(&format!(
+        "ipc: {} queues, {} queued, {} shared regions\n",
+        s.ipc_queue_count, s.ipc_queued_messages, s.ipc_shared_regions
+    ));
+    out(&format!("fs: {} files, {} dirs\n", s.fs_files, s.fs_directories));
+}
+
+/// Render a PRIVILEGED diagnostic by asking the kernel (which owns the hardware)
+/// through the `terminal_diag` gateway, then print its text verbatim — identical
+/// output to kernel Terminal Mode. 16 KiB covers the largest listing.
+fn run_diag(line: &str) {
+    let mut buf = [0u8; 16384];
+    let n = libdunit::terminal_diag(line, &mut buf);
+    if n > 0 {
+        libdunit::write(1, &buf[..n as usize]);
+    } else if n < 0 {
+        out(&format!("dsh: {}: diagnostic unavailable (err {})\n", line, n));
+    }
 }
 
 /// Run an external program `path` (typically `/app/<name>`) on a private inner

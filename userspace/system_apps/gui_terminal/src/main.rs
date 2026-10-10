@@ -735,8 +735,9 @@ pub extern "C" fn _start() -> ! {
     // they also go to serial so a TOML edit is observable headless.
     let tcfg = dwm_settings::TerminalCfg::load("gui_terminal");
     libdunit::println(&alloc::format!(
-        "gui_terminal: cfg from_file={} prompt={} fg={:#010X} bg={:#010X} bg_alpha={} font={}",
+        "gui_terminal: cfg from_file={} theme={} prompt={} fg={:#010X} bg={:#010X} bg_alpha={} font={}",
         tcfg.from_file as u32,
+        tcfg.theme.as_str(),
         tcfg.prompt.as_str(),
         tcfg.fg,
         tcfg.bg,

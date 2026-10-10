@@ -587,6 +587,26 @@ pub fn fsck(report: &mut FsckReport) -> isize {
     syscall1(SYSCALL_FSCK, report as *mut FsckReport as usize)
 }
 
+/// Run one PRIVILEGED terminal diagnostic (`lspci`, `usb`, `blk`, `lsblk`,
+/// `ahci`, `devs`, `blkread`, `blkwrite`, `mkfs.dunit`, `mount.dunit`,
+/// `install.dunit`) in the kernel and capture its rendered text into `out`.
+/// These need kernel-owned hardware/block access the shell can't reach itself,
+/// so a userspace shell (`dsh`) reaches parity with the kernel terminal by
+/// asking the kernel to format them — one implementation, identical output.
+/// Returns the number of bytes written into `out` (truncated to its length), or
+/// a negative errno (`EINVAL` for a line outside the whitelist). The 5th syscall
+/// argument is unused padding (the kernel reads 4).
+pub fn terminal_diag(line: &str, out: &mut [u8]) -> isize {
+    syscall5(
+        SYSCALL_TERMINAL_DIAG,
+        line.as_ptr() as usize,
+        line.len(),
+        out.as_mut_ptr() as usize,
+        out.len(),
+        0,
+    )
+}
+
 /// `abi_query` selectors (Dunit Userspace ABI v0). Mirror the kernel's
 /// `sys_abi_query` field numbers.
 pub const ABI_QUERY_VERSION: usize = 0;

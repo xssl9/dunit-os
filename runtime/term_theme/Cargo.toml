@@ -1,0 +1,20 @@
+# Shared terminal color-theme presets (single source of truth for palettes).
+#
+# Pure `no_std`, const-only, ZERO dependencies, so the exact same preset table
+# links into BOTH the kernel (kernel/src/terminal.rs — the framebuffer terminal
+# mode) and the userspace stack (dwm_settings -> gui_terminal). A theme is just
+# data: a default foreground/background plus the 16 ANSI slots. WHICH theme is
+# active is policy and lives in each terminal's config (`[terminal] theme`), not
+# here — this crate only owns the palettes a name can resolve to.
+[package]
+name = "term_theme"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "term_theme"
+path = "src/lib.rs"
+
+[profile.release]
+panic = "abort"
+lto = true

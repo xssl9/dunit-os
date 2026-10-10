@@ -1,0 +1,16 @@
+# Dunit kernel terminal (framebuffer "terminal mode") config.
+#
+# Read ONCE by the kernel at terminal-mode start from
+# /system/share/dwm/apps/kernel_terminal.toml (embedded in the MemFS via the
+# initrd). This is the kernel terminal's OWN config, separate from
+# apps/gui_terminal.toml, so the two terminals can run different themes.
+#
+# Only `theme` is honored here (the kernel does not link a full TOML parser):
+# it selects a whole palette from the shared preset table (runtime/term_theme —
+# the single source of truth). A missing file or unknown name falls back to the
+# baseline (green_tea). Shipped presets: green_tea, catppuccin_mocha,
+# catppuccin_latte, dracula, gruvbox_dark, nord, solarized_dark,
+# solarized_light, tokyo_night, monokai.
+
+[terminal]
+theme = "tokyo_night"

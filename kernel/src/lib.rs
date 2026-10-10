@@ -7,7 +7,6 @@ extern crate alloc;
 extern crate std;
 
 pub mod allocator;
-pub mod apps;
 pub mod command;
 pub mod console_font;
 pub mod clock;
@@ -178,6 +177,31 @@ fn terminal_cwd() -> &'static str {
         let shell = &*SHELL.0.get();
         core::str::from_utf8(&shell.terminal_cwd[..shell.terminal_cwd_len]).unwrap_or("/")
     }
+}
+
+/// Resolve the kernel terminal's color theme from its own config file. The file
+/// is the terminal's — distinct from `gui_terminal`'s — so each terminal can run
+/// a DIFFERENT theme. We don't link a TOML parser into the kernel; a minimal
+/// scan for `theme = "<name>"` is enough for this one key. The name is resolved
+/// against the shared `term_theme` preset table (single source of truth), and a
+/// missing file / unknown name falls back to the baseline.
+fn load_terminal_theme() -> &'static term_theme::TermTheme {
+    const PATH: &str = "/system/share/dwm/apps/kernel_terminal.toml";
+    let data = match command::read_vfs_file("/", PATH) {
+        Ok(d) => d,
+        Err(_) => return term_theme::DEFAULT,
+    };
+    let text = core::str::from_utf8(&data).unwrap_or("");
+    for raw in text.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if let Some(rest) = line.strip_prefix("theme") {
+            if let Some(rest) = rest.trim_start().strip_prefix('=') {
+                let val = rest.trim().trim_matches('"').trim_matches('\'');
+                return term_theme::resolved_or_default(val);
+            }
+        }
+    }
+    term_theme::DEFAULT
 }
 
 fn terminal_exec(console: &mut terminal::FbConsole, cwd: &str, command_line: &str) {
@@ -920,6 +944,21 @@ pub extern "C" fn kernel_main(
             screen_log("[ .. ] Getting console instance", false);
             if let Some(console) = terminal::get_console() {
                 screen_log("[ OK ] Console instance obtained", false);
+
+                // Apply the configured kernel-terminal color theme BEFORE the
+                // first paint, so the banner comes up already themed. Presets
+                // come from the shared `term_theme` table (same source gui_
+                // terminal uses); the active name is policy read from config, so
+                // the two terminals can run DIFFERENT themes. Unknown/missing =>
+                // baseline (set_theme also repaints the whole screen to the bg).
+                let theme = load_terminal_theme();
+                console.set_theme(theme);
+                serial_write(&alloc::format!(
+                    "terminal: theme={} fg={:#08X} bg={:#08X}\r\n",
+                    theme.name,
+                    theme.fg & 0x00FF_FFFF,
+                    theme.bg & 0x00FF_FFFF,
+                ));
 
                 console.clear_top_area(48);
 

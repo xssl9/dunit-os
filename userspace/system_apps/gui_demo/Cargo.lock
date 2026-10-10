@@ -28,6 +28,7 @@ name = "dwm_settings"
 version = "0.1.0"
 dependencies = [
  "libdunit",
+ "term_theme",
 ]
 
 [[package]]
@@ -48,4 +49,8 @@ version = "0.1.0"
 
 [[package]]
 name = "libdunit"
+version = "0.1.0"
+
+[[package]]
+name = "term_theme"
 version = "0.1.0"

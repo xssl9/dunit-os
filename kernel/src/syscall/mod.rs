@@ -87,6 +87,7 @@ pub enum Syscall {
     SetTidAddress = 75,
     ClockGetTime = 76,
     Rmdir = 77,
+    TerminalDiag = 78,
 }
 
 impl Syscall {
@@ -171,6 +172,7 @@ impl Syscall {
             75 => Some(Syscall::SetTidAddress),
             76 => Some(Syscall::ClockGetTime),
             77 => Some(Syscall::Rmdir),
+            78 => Some(Syscall::TerminalDiag),
             _ => None,
         }
     }
@@ -726,6 +728,12 @@ pub extern "C" fn syscall_handler(
         Syscall::SetTidAddress => sys_set_tid_address(arg0),
         Syscall::ClockGetTime => sys_clock_gettime(arg0, arg1 as *mut u64),
         Syscall::Rmdir => sys_rmdir(arg0 as *const u8, arg1 as usize),
+        Syscall::TerminalDiag => sys_terminal_diag(
+            arg0 as *const u8,
+            arg1 as usize,
+            arg2 as *mut u8,
+            arg3 as usize,
+        ),
     }
 }
 
@@ -1195,6 +1203,43 @@ fn sys_rmdir(path: *const u8, path_len: usize) -> i64 {
         Ok(()) => 0,
         Err(error) => vfs_error_to_errno(error),
     }
+}
+
+/// Run one PRIVILEGED terminal diagnostic (lspci/usb/blk/.../mkfs.dunit/...) and
+/// return its rendered text to userspace. This is the bridge that lets the
+/// userspace shell (`dsh`) reach parity with the kernel terminal for commands
+/// that need kernel-owned hardware/block access — the shell can't touch PCI/
+/// AHCI/block itself (§10). It REUSES the kernel's own formatters (one source of
+/// truth, same output both terminals show) and is GATED to a whitelist in
+/// `shell::run_terminal_diag`, so it can never run an arbitrary kernel-shell
+/// command. SECURITY: it exposes mutating admin ops (blkwrite/mkfs/mount/install)
+/// to any userspace caller — acceptable only while Dunit is single-user-root;
+/// gate behind a capability once a privilege model exists.
+fn sys_terminal_diag(
+    line_ptr: *const u8,
+    line_len: usize,
+    out_ptr: *mut u8,
+    out_cap: usize,
+) -> i64 {
+    if out_cap == 0 {
+        return EINVAL;
+    }
+    let line = match copy_string_from_user_len(line_ptr, line_len, MAX_USER_PATH) {
+        Ok(l) => l,
+        Err(error) => return error,
+    };
+    let mut sink = crate::shell::StringSink::new();
+    if !crate::shell::run_terminal_diag(&mut sink, &line) {
+        // Not a whitelisted diagnostic — the gate rejects it rather than
+        // falling through to the general kernel shell.
+        return EINVAL;
+    }
+    let bytes = sink.buf.as_bytes();
+    let n = core::cmp::min(bytes.len(), out_cap);
+    if let Err(error) = copy_buffer_to_user(out_ptr, &bytes[..n]) {
+        return error;
+    }
+    n as i64
 }
 
 fn sys_mkdir(path: *const u8, path_len: usize) -> i64 {

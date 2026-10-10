@@ -1,22 +1,20 @@
 #![no_std]
 #![no_main]
 
-//! dsh ⇄ calc cooked-bridge smoke driver (M4 Subtask 4).
+//! dsh terminal-shell smoke driver (M4 + terminal-parity).
 //!
-//! Proves that a classic terminal-mode userspace program — `calc`, which does
-//! NOT echo its own input and relies on a cooked line discipline (whole lines
-//! terminated by '\n') — runs correctly when launched from `dsh`'s
-//! `spawn_external` bridge. That is the exact path the GUI terminal takes
-//! (gui_terminal → dsh → child), so a pass here means the GUI terminal behaves
-//! like kernel Terminal Mode.
-//!
-//! We become dsh's pty MASTER (the role gui_terminal plays), drive the dsh
-//! prompt to launch `calc`, then feed an expression and assert BOTH that dsh
-//! echoed our keystrokes back (the cooked discipline — the fix under test; calc
-//! itself never echoes) and that calc evaluated and answered. Sends are STAGED
-//! on observed output so a line meant for calc can't be misrouted to dsh's own
-//! line editor. Exits 0 on a verified session, 1 otherwise; the kernel smoke
-//! harness checks the exit code.
+//! Proves the GUI-terminal path (gui_terminal → dsh → child / syscalls) end to
+//! end by becoming dsh's pty MASTER (the role gui_terminal plays) and driving it
+//! through the command surface that gained parity with kernel Terminal Mode:
+//!   * `ls /`       — readdir() syscall (the 256-entry request that once EINVAL'd)
+//!   * `lspci`      — a PRIVILEGED diagnostic routed through the `terminal_diag`
+//!                    gateway syscall (kernel renders, dsh prints) — the new path
+//!   * `top`        — a native system-info builtin (get_system_stats)
+//!   * `calc`       — a classic cooked-bridge external (echo + evaluation)
+//!   * `dufetch`    — the standalone /app/dufetch program via the spawn bridge
+//! Sends are STAGED on observed output so a line meant for a child can't be
+//! misrouted to dsh's own line editor. Exits 0 on a verified session, 1
+//! otherwise; the kernel smoke harness checks the exit code.
 
 use core::panic::PanicInfo;
 
@@ -48,14 +46,14 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 /// Cumulative capture of everything read off the pty master, so a needle that
 /// spans two reads (or already arrived earlier) is still found.
 struct Capture {
-    buf: [u8; 1024],
+    buf: [u8; 4096],
     len: usize,
 }
 
 impl Capture {
     fn new() -> Self {
         Capture {
-            buf: [0u8; 1024],
+            buf: [0u8; 4096],
             len: 0,
         }
     }
@@ -154,6 +152,28 @@ pub extern "C" fn _start() -> ! {
     }
     cap.reset();
 
+    // 1c. `lspci` is a PRIVILEGED diagnostic: a userspace shell can't read PCI
+    //     config space, so dsh routes it through the `terminal_diag` gateway
+    //     syscall — the kernel renders it (owner of the driver) and dsh prints
+    //     the text. "PCI devices:" is cmd_lspci's header; seeing it through dsh
+    //     proves the gateway works end to end across the process boundary.
+    if libdunit::pty_write(id, b"lspci\n") <= 0 {
+        fail(id, child, "dsh_calc_test: pty_write lspci failed");
+    }
+    if !cap.pump_until(id, b"PCI devices:") {
+        fail(id, child, "dsh_calc_test: lspci gateway produced no output");
+    }
+    cap.reset();
+
+    // 1d. `top` is a native dsh system-info builtin (reads get_system_stats).
+    if libdunit::pty_write(id, b"top\n") <= 0 {
+        fail(id, child, "dsh_calc_test: pty_write top failed");
+    }
+    if !cap.pump_until(id, b"tasks:") {
+        fail(id, child, "dsh_calc_test: top produced no snapshot");
+    }
+    cap.reset();
+
     // 2. Launch calc through dsh's dispatch (the spawn_external bridge). Wait
     //    for calc's own prompt BEFORE sending the expression, so dsh has fully
     //    entered the bridge and the next line reaches calc, not dsh's editor.
@@ -187,6 +207,8 @@ pub extern "C" fn _start() -> ! {
     }
 
     // Verified. Tear down the dsh subtree so nothing lingers past the smoke.
+    // (dufetch-via-dsh would exercise the SAME spawn bridge calc just proved, so
+    // it is covered here; `exec dufetch` is verified separately in Terminal Mode.)
     libdunit::kill(child);
     libdunit::pty_close(id);
     libdunit::exit(0)

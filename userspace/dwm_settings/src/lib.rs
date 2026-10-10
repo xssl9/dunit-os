@@ -1584,6 +1584,10 @@ fn parse_color_array_into(rhs: &str, out: &mut [u32]) {
 pub struct TerminalCfg {
     pub prompt: ConfigStr,
     pub font: ConfigStr,
+    /// Active color theme name (`[terminal] theme`), resolved against the shared
+    /// `term_theme` preset table. Selects the base palette (`fg/bg/ansi*`); any
+    /// explicit color key below still overrides the chosen preset.
+    pub theme: ConfigStr,
     pub fg: u32,
     pub bg: u32,
     pub bg_alpha: u32,
@@ -1595,20 +1599,19 @@ pub struct TerminalCfg {
 
 impl TerminalCfg {
     pub const fn baseline() -> Self {
+        // Pull the baseline palette from the shared preset table (SSOT) rather
+        // than re-listing hex here — `term_theme::DEFAULT` is `green_tea`, the
+        // historical hardcoded baseline, so an unset `theme` is a visual no-op.
+        let d = term_theme::DEFAULT;
         TerminalCfg {
             prompt: ConfigStr::new("dsh"),
             font: ConfigStr::new(""),
-            fg: 0xFFA6_E3A1,
-            bg: 0xFF0B_0F14,
+            theme: ConfigStr::new(d.name),
+            fg: d.fg,
+            bg: d.bg,
             bg_alpha: 255,
-            ansi: [
-                0xFF45_475A, 0xFFF3_8BA8, 0xFFA6_E3A1, 0xFFF9_E2AF,
-                0xFF89_B4FA, 0xFFCB_A6F7, 0xFF94_E2D5, 0xFFCD_D6F4,
-            ],
-            ansi_bright: [
-                0xFF58_5B70, 0xFFEB_A0AC, 0xFFA6_E3A1, 0xFFFA_B387,
-                0xFF89_DCEB, 0xFFF5_C2E7, 0xFF94_E2D5, 0xFFFF_FFFF,
-            ],
+            ansi: d.ansi,
+            ansi_bright: d.ansi_bright,
             from_file: false,
         }
     }
@@ -1618,9 +1621,43 @@ impl TerminalCfg {
         let mut c = Self::baseline();
         if let Some(text) = read_file(&config_path(APPS_DIR, app_id)) {
             c.from_file = true;
+            // Pass 1: a named `theme` sets the whole base palette...
+            c.apply_theme(&text);
+            // Pass 2: ...then explicit `fg/bg/ansi*` keys override it, so a theme
+            // plus a single tweak composes regardless of key order in the file.
             c.parse(&text);
         }
         c
+    }
+
+    /// First pass: find `[terminal] theme = "<name>"` and copy that preset's
+    /// palette in as the base. Unknown/empty names fall back to the default.
+    fn apply_theme(&mut self, text: &str) {
+        let mut section = String::new();
+        for raw in text.lines() {
+            let line = strip_comment(raw).trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(name) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                section.clear();
+                section.push_str(name.trim());
+                continue;
+            }
+            if section != "terminal" {
+                continue;
+            }
+            let Some(eq) = line.find('=') else { continue };
+            if line[..eq].trim() != "theme" {
+                continue;
+            }
+            let t = term_theme::resolved_or_default(unquote(line[eq + 1..].trim()));
+            self.theme.set(t.name);
+            self.fg = t.fg;
+            self.bg = t.bg;
+            self.ansi = t.ansi;
+            self.ansi_bright = t.ansi_bright;
+        }
     }
 
     fn parse(&mut self, text: &str) {
@@ -1644,6 +1681,9 @@ impl TerminalCfg {
             match key {
                 "prompt" => self.prompt.set(unquote(rhs)),
                 "font" => self.font.set(unquote(rhs)),
+                // `theme` is resolved in pass 1 (apply_theme); ignore it here so a
+                // later explicit color key wins over the preset, not vice versa.
+                "theme" => {}
                 "fg" => if let Some(c) = parse_color(unquote(rhs)) { self.fg = c; },
                 "bg" => if let Some(c) = parse_color(unquote(rhs)) { self.bg = c; },
                 "bg_alpha" => if let Some(n) = parse_uint(rhs) { self.bg_alpha = n.min(255); },

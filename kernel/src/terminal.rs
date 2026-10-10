@@ -17,6 +17,50 @@ pub struct FbConsole {
     fg_color: u32,
     bg_color: u32,
     stride: usize,
+    /// Active 16-color ANSI palette (0..=7 normal, 8..=15 bright), fed by the
+    /// configured theme (`term_theme`). Stored as 0x00RRGGBB (framebuffer is
+    /// XRGB), so SGR 30-37/90-97 index straight into it.
+    palette: [u32; 16],
+    /// Default foreground the terminal falls back to (SGR 0 / 39 restore this).
+    default_fg: u32,
+    /// SGR bold flag: makes a subsequent 30-37 select the bright slot.
+    bold: bool,
+    /// Escape-sequence parser state (lets ESC[…m / ESC[2J render instead of
+    /// painting the raw escape bytes as glyphs). See `draw_char`.
+    esc: EscState,
+    /// CSI numeric-parameter accumulator and the parsed parameter list.
+    csi_cur: u32,
+    csi_params: [u32; 8],
+    csi_n: usize,
+    csi_has_param: bool,
+}
+
+/// Escape-sequence parser state. `Normal` draws glyphs; `Esc` saw `0x1B`; `Csi`
+/// is inside a `ESC [` control sequence accumulating parameters until a final.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EscState {
+    Normal,
+    Esc,
+    Csi,
+}
+
+/// Framebuffer is XRGB — drop the theme's 0xFF alpha byte so a `0xAARRGGBB`
+/// preset color writes cleanly as a pixel.
+#[inline]
+fn rgb(color: u32) -> u32 {
+    color & 0x00FF_FFFF
+}
+
+/// Build the 16-slot XRGB palette from a theme (0..=7 normal, 8..=15 bright).
+fn palette_from(t: &term_theme::TermTheme) -> [u32; 16] {
+    let mut p = [0u32; 16];
+    let mut i = 0;
+    while i < 8 {
+        p[i] = rgb(t.ansi[i]);
+        p[i + 8] = rgb(t.ansi_bright[i]);
+        i += 1;
+    }
+    p
 }
 
 const MAX_COLS: usize = 160;
@@ -69,9 +113,17 @@ impl FbConsole {
             cursor_y: 0,
             char_width: 8,
             char_height: 16,
-            fg_color: DEFAULT_FG_COLOR,
-            bg_color: 0x000000,
+            fg_color: rgb(term_theme::DEFAULT.fg),
+            bg_color: rgb(term_theme::DEFAULT.bg),
             stride,
+            palette: palette_from(term_theme::DEFAULT),
+            default_fg: rgb(term_theme::DEFAULT.fg),
+            bold: false,
+            esc: EscState::Normal,
+            csi_cur: 0,
+            csi_params: [0; 8],
+            csi_n: 0,
+            csi_has_param: false,
         }
     }
 
@@ -279,7 +331,146 @@ impl FbConsole {
         self.fg_color = DEFAULT_FG_COLOR;
     }
 
+    /// Install a color theme: the 16 ANSI slots + default fg/bg are taken from
+    /// `theme` (the shared `term_theme` presets — single source of truth), then
+    /// the viewport is repainted so the new background takes effect immediately.
+    pub fn set_theme(&mut self, theme: &term_theme::TermTheme) {
+        self.palette = palette_from(theme);
+        self.default_fg = rgb(theme.fg);
+        self.fg_color = rgb(theme.fg);
+        self.bg_color = rgb(theme.bg);
+        self.bold = false;
+        self.render_viewport();
+        self.draw_cursor(true);
+    }
+
+    /// Feed one byte while inside an ESC/CSI sequence (see `draw_char`).
+    fn handle_escape(&mut self, c: char) {
+        match self.esc {
+            EscState::Esc => {
+                if c == '[' {
+                    self.esc = EscState::Csi;
+                    self.csi_cur = 0;
+                    self.csi_n = 0;
+                    self.csi_has_param = false;
+                } else {
+                    // Non-CSI escape (ESC c, ESC( …) — unsupported; resume normal.
+                    self.esc = EscState::Normal;
+                }
+            }
+            EscState::Csi => {
+                if c.is_ascii_digit() {
+                    self.csi_cur = self.csi_cur.saturating_mul(10) + (c as u32 - '0' as u32);
+                    self.csi_has_param = true;
+                } else if c == ';' {
+                    self.push_csi_param();
+                } else if ('\u{40}'..='\u{7e}').contains(&c) {
+                    // Final byte: commit the pending parameter, then dispatch.
+                    self.push_csi_param();
+                    self.dispatch_csi(c);
+                    self.esc = EscState::Normal;
+                }
+                // else: intermediate/private byte (e.g. '?') — ignore, keep scanning.
+            }
+            EscState::Normal => {}
+        }
+    }
+
+    fn push_csi_param(&mut self) {
+        if self.csi_n < self.csi_params.len() {
+            self.csi_params[self.csi_n] = self.csi_cur;
+            self.csi_n += 1;
+        }
+        self.csi_cur = 0;
+    }
+
+    fn dispatch_csi(&mut self, final_byte: char) {
+        match final_byte {
+            'm' => self.apply_sgr(),
+            // ESC[2J clears the whole screen (the `clear`/TUI reset); plain
+            // ESC[J (erase-below) is left alone in this append-only model.
+            'J' => {
+                if self.csi_n >= 1 && self.csi_params[0] == 2 {
+                    self.clear_screen();
+                }
+            }
+            // Cursor addressing: a scrollback console can't jump to arbitrary
+            // rows, so honor the column reset of the common ESC[H (paired w/ 2J).
+            'H' | 'f' => self.cursor_x = 0,
+            // 'K' erase-in-line and the rest: no-op for sequential output.
+            _ => {}
+        }
+    }
+
+    /// Apply one SGR (`ESC[…m`) run to the live foreground color.
+    fn apply_sgr(&mut self) {
+        let n = if self.csi_n == 0 { 1 } else { self.csi_n }; // bare ESC[m == ESC[0m
+        let mut i = 0;
+        while i < n {
+            let p = if self.csi_n == 0 { 0 } else { self.csi_params[i] };
+            match p {
+                0 => {
+                    self.fg_color = self.default_fg;
+                    self.bold = false;
+                }
+                1 => self.bold = true,
+                22 => self.bold = false,
+                30..=37 => {
+                    let idx = (p - 30) as usize + if self.bold { 8 } else { 0 };
+                    self.fg_color = self.palette[idx];
+                }
+                39 => self.fg_color = self.default_fg,
+                90..=97 => self.fg_color = self.palette[(p - 90) as usize + 8],
+                38 => {
+                    // Extended fg: 38;2;r;g;b (truecolor) or 38;5;n (256-color).
+                    if i + 1 < n {
+                        let mode = self.csi_params[i + 1];
+                        if mode == 2 && i + 4 < n {
+                            let r = self.csi_params[i + 2] & 0xFF;
+                            let g = self.csi_params[i + 3] & 0xFF;
+                            let b = self.csi_params[i + 4] & 0xFF;
+                            self.fg_color = (r << 16) | (g << 8) | b;
+                            i += 4;
+                        } else if mode == 5 && i + 2 < n {
+                            self.fg_color = self.xterm256(self.csi_params[i + 2]);
+                            i += 2;
+                        }
+                    }
+                }
+                _ => {} // 40-49 (background), 2-9, etc. — not modeled here.
+            }
+            i += 1;
+        }
+    }
+
+    /// Map an xterm-256 index to an XRGB color (0-15 use the theme palette).
+    fn xterm256(&self, n: u32) -> u32 {
+        if n < 16 {
+            return self.palette[n as usize];
+        }
+        if n >= 232 {
+            let l = 8 + (n - 232) * 10;
+            return (l << 16) | (l << 8) | l;
+        }
+        let n = n - 16;
+        let (r, g, b) = ((n / 36) % 6, (n / 6) % 6, n % 6);
+        let conv = |v: u32| if v == 0 { 0 } else { 55 + v * 40 };
+        (conv(r) << 16) | (conv(g) << 8) | conv(b)
+    }
+
     pub fn draw_char(&mut self, c: char) {
+        // Escape-sequence handling comes first: while inside an ESC/CSI sequence
+        // we CONSUME bytes (never draw them), so SGR color runs (ESC[…m) and
+        // ESC[2J/H control the terminal instead of printing as garbage glyphs.
+        if self.esc != EscState::Normal {
+            self.handle_escape(c);
+            return;
+        }
+        if c == '\x1b' {
+            self.esc = EscState::Esc;
+            return;
+        }
+
         if c == '\n' {
             self.cursor_x = 0;
             self.append_history_line();
@@ -432,9 +623,17 @@ pub fn init(fb_addr: *mut u32, width: usize, height: usize, pitch: usize) {
         core::ptr::write(&mut (*ptr).cursor_y, 0);
         core::ptr::write(&mut (*ptr).char_width, 8);
         core::ptr::write(&mut (*ptr).char_height, 16);
-        core::ptr::write(&mut (*ptr).fg_color, 0xFFFFFF);
-        core::ptr::write(&mut (*ptr).bg_color, 0x000000);
+        core::ptr::write(&mut (*ptr).fg_color, rgb(term_theme::DEFAULT.fg));
+        core::ptr::write(&mut (*ptr).bg_color, rgb(term_theme::DEFAULT.bg));
         core::ptr::write(&mut (*ptr).stride, stride);
+        core::ptr::write(&mut (*ptr).palette, palette_from(term_theme::DEFAULT));
+        core::ptr::write(&mut (*ptr).default_fg, rgb(term_theme::DEFAULT.fg));
+        core::ptr::write(&mut (*ptr).bold, false);
+        core::ptr::write(&mut (*ptr).esc, EscState::Normal);
+        core::ptr::write(&mut (*ptr).csi_cur, 0);
+        core::ptr::write(&mut (*ptr).csi_params, [0; 8]);
+        core::ptr::write(&mut (*ptr).csi_n, 0);
+        core::ptr::write(&mut (*ptr).csi_has_param, false);
 
         CONSOLE_INITIALIZED.store(true, Ordering::Relaxed);
     }

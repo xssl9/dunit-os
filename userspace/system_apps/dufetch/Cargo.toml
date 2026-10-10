@@ -1,0 +1,18 @@
+# dufetch — Dunit's neofetch-style system summary, as a standalone userspace
+# program (/app/dufetch). Runs in BOTH terminals: the kernel framebuffer
+# terminal (`exec dufetch`) and the GUI terminal via dsh (`dufetch`, bridged on
+# an inner pty). It emits ANSI SGR color codes only — WHICH colors appear is the
+# terminal's active theme, so dufetch is drawn in each terminal's palette. All
+# facts come from libdunit syscalls (get_system_stats / get_pid / getcwd /
+# get_framebuffer); no kernel-internal APIs.
+[package]
+name = "dufetch"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libdunit = { path = "../../libdunit" }
+
+[[bin]]
+name = "dufetch"
+path = "src/main.rs"

@@ -53,6 +53,9 @@ harness = true
 [dependencies]
 bootloader = "0.9"
 bitflags = "2.11"
+# Shared terminal color-theme presets (single source of truth), also linked by
+# the userspace stack (dwm_settings -> gui_terminal). Pure const data, no_std.
+term_theme = { path = "../runtime/term_theme" }
 
 [features]
 default = []

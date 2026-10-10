@@ -82,6 +82,33 @@ impl ShellSink for crate::terminal::FbConsole {
     }
 }
 
+/// A `ShellSink` that captures output into an owned `String`. Used by the
+/// `terminal_diag` syscall to run a diagnostic command in the kernel and hand
+/// the rendered text back to a userspace shell (`dsh`), so `lspci`/`blk`/... has
+/// exactly ONE implementation serving both the kernel terminal and the GUI one.
+pub struct StringSink {
+    pub buf: String,
+}
+
+impl StringSink {
+    pub fn new() -> Self {
+        StringSink { buf: String::new() }
+    }
+}
+
+impl Default for StringSink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ShellSink for StringSink {
+    fn write_str(&mut self, s: &str) {
+        self.buf.push_str(s);
+    }
+    // Color hints are ignored: diagnostics render as plain text.
+}
+
 /// Result of dispatching a command line. Pure-output commands return `Handled`;
 /// commands whose effect depends on the terminal (clear/exec/exit) return a
 /// variant the caller interprets.
@@ -892,11 +919,6 @@ fn tree_path(out: &mut dyn ShellSink, vfs: &mut vfs::VirtualFileSystem, path: &s
 
 /// Handle a filesystem command. Returns true if `trimmed` matched one.
 fn handle_fs_command(out: &mut dyn ShellSink, cwd: &mut String, trimmed: &str) -> bool {
-    if trimmed == "dufetch" {
-        crate::apps::dufetch::run(out, cwd);
-        return true;
-    }
-
     if trimmed == "pwd" {
         out.write_str(cwd);
         out.write_str("\n");
@@ -1108,6 +1130,35 @@ fn cmd_help(out: &mut dyn ShellSink) {
     out.write_str("  poweroff   - Shutdown status\n");
 }
 
+/// Gated dispatcher for the PRIVILEGED hardware/block/fs-admin diagnostics that
+/// a userspace shell can't run itself (no PCI/AHCI/block access in userspace,
+/// §10). ONLY the whitelisted verbs are accepted; anything else returns `false`
+/// so the `terminal_diag` syscall rejects it — this is never a general
+/// kernel-shell backdoor. Reuses the exact `cmd_*` formatters the kernel
+/// terminal uses, so `dsh` and the kernel terminal render identical output.
+pub fn run_terminal_diag(out: &mut dyn ShellSink, line: &str) -> bool {
+    let trimmed = line.trim();
+    let (cmd, rest) = match trimmed.find(char::is_whitespace) {
+        Some(i) => (&trimmed[..i], trimmed[i..].trim_start()),
+        None => (trimmed, ""),
+    };
+    match cmd {
+        "lspci" => cmd_lspci(out),
+        "usb" => cmd_usb(out),
+        "devs" => cmd_devs(out),
+        "blk" => cmd_blk(out),
+        "lsblk" => cmd_lsblk(out),
+        "ahci" => cmd_ahci(out),
+        "blkread" => cmd_blkread(out, rest),
+        "blkwrite" => cmd_blkwrite(out, rest),
+        "mkfs.dunit" => cmd_mkfs_dunit(out, rest),
+        "mount.dunit" => cmd_mount_dunit(out, rest),
+        "install.dunit" => cmd_install_dunit(out, rest),
+        _ => return false,
+    }
+    true
+}
+
 /// Dispatch a command line shared by both terminals. `cwd` is owned by the
 /// caller and mutated by `cd`.
 pub fn run_command(out: &mut dyn ShellSink, cwd: &mut String, line: &str) -> ShellOutcome {
@@ -1128,6 +1179,13 @@ pub fn run_command(out: &mut dyn ShellSink, cwd: &mut String, line: &str) -> She
     if trimmed == "exec" || trimmed.starts_with("exec ") {
         let args = trimmed.strip_prefix("exec").unwrap_or("").trim();
         return ShellOutcome::Exec(String::from(args));
+    }
+
+    // `dufetch` is a standalone userspace program now (/app/dufetch) — route it
+    // through the SAME exec path a user would (`exec dufetch`), so there is ONE
+    // dufetch implementation shared by both terminals (no kernel builtin).
+    if trimmed == "dufetch" {
+        return ShellOutcome::Exec(String::from("dufetch"));
     }
 
     if handle_fs_command(out, cwd, trimmed) {
