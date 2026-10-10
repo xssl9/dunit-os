@@ -1,0 +1,16 @@
+{
+  "description": "Dunit musl port (M6) fs: stat — POSIX stat() over the native Stat syscall. userspace/ctests/musl_stat.c stats a regular file (/app/musl_stat) and a directory (/persist); the adapter translates Dunit UserFileStat (type + size) into struct stat (st_mode type bits + st_size). Run: tools/qemu_test.py --build --markers-file tools/m6_musl_stat_markers.json --post-boot-delay 3 --settle 4 --cmd-timeout 45 --timeout 160 --boot-timeout 110",
+  "run": {
+    "config": "limine.conf",
+    "cmd": ["exec musl_stat"]
+  },
+  "required": [
+    { "marker": "[TERM-007] Starting main loop", "claim": "the system booted to the terminal", "source": "kernel/src/lib.rs" },
+    { "marker": "[MUSL-STAT] file reg=1 size=", "claim": "stat() on a file returned S_IFREG with a nonzero size via the native Stat -> struct stat adapter", "source": "userspace/ctests/musl_stat.c" },
+    { "marker": "[MUSL-STAT] OK", "claim": "the file is regular with size>0 and /persist stats as a directory — the stat adapter works", "source": "userspace/ctests/musl_stat.c" }
+  ],
+  "forbidden": [
+    { "marker": "[PANIC]", "why": "kernel panic", "source": "kernel/src/lib.rs" },
+    { "marker": "[MUSL-STAT] FAIL", "why": "a stat/type check failed", "source": "userspace/ctests/musl_stat.c" }
+  ]
+}
