@@ -104,7 +104,8 @@ value. `crt0.s` is the seed the eventual Dunit musl `crt1` generalises. Test:
 - [x] **Process-entry auxv** (`AT_PAGESZ`/`AT_SECURE`/`AT_RANDOM`/`AT_NULL`), verified from C (`c_hello` walks envp→auxv). Stack is now musl-crt1-ready; crt1 self-aligns, so no `rsp` 0-mod-16 switch needed (M6.3).
 - [ ] `AT_PHDR`/`AT_ENTRY` auxv entries for TLS-from-program-headers, when the libc port needs them.
 - [ ] Scalar widths/alignment for `time_t`/`off_t`/`ino_t`/`pid_t`/pointers, versioned wire structs (M6.3).
-- [ ] M6.4 cross-toolchain `x86_64-dunit` + sysroot (installs these headers).
-- [ ] M6.2 create the `dunit-musl` fork repo + port (needs the GitHub repo).
+- [x] M6.2 `dunit-musl` fork repo created (`github.com/coreformdev/dunit-musl`, musl v1.2.6+67 `b1efda5b`, MIT) and wired here as the `toolchains/dunit-musl` submodule, with provenance (`UPSTREAM.md`), porting plan (`PORTING.md`) and CI.
+- [ ] M6.4 cross-toolchain `x86_64-dunit` + sysroot (installs these headers; done alongside the libc build).
+- [ ] M6.2 libc port itself — `build`/`syscall`/`crt`/`fs`/`vm`/`thread` adapters in the fork (seed crt0: `userspace/ctests/crt0.s`).
 
 See `DUNIT_OS_TECHNICAL_ROADMAP.md` §M6 for the full plan.

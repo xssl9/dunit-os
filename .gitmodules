@@ -1,0 +1,3 @@
+[submodule "toolchains/dunit-musl"]
+	path = toolchains/dunit-musl
+	url = https://github.com/coreformdev/dunit-musl.git
