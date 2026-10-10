@@ -21,6 +21,7 @@ pub const ENFILE: isize = -23;
 pub const EPIPE: isize = -32;
 pub const ENAMETOOLONG: isize = -36;
 pub const ENOSYS: isize = -38;
+pub const ENOTEMPTY: isize = -39;
 pub const EMSGSIZE: isize = -90;
 pub const EOPNOTSUPP: isize = -95;
 pub const ENOBUFS: isize = -105;
@@ -47,6 +48,7 @@ pub fn error_name(code: isize) -> &'static str {
         -32 => "EPIPE",
         -36 => "ENAMETOOLONG",
         -38 => "ENOSYS",
+        -39 => "ENOTEMPTY",
         -90 => "EMSGSIZE",
         -95 => "EOPNOTSUPP",
         -105 => "ENOBUFS",

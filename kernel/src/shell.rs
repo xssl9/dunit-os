@@ -180,6 +180,7 @@ fn vfs_error_str(error: VfsError) -> &'static str {
         VfsError::InvalidPath => "invalid path",
         VfsError::Unsupported => "unsupported",
         VfsError::IoError => "I/O error",
+        VfsError::DirectoryNotEmpty => "Directory not empty",
     }
 }
 

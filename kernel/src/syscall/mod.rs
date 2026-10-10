@@ -86,6 +86,7 @@ pub enum Syscall {
     AbiQuery = 74,
     SetTidAddress = 75,
     ClockGetTime = 76,
+    Rmdir = 77,
 }
 
 impl Syscall {
@@ -169,6 +170,7 @@ impl Syscall {
             74 => Some(Syscall::AbiQuery),
             75 => Some(Syscall::SetTidAddress),
             76 => Some(Syscall::ClockGetTime),
+            77 => Some(Syscall::Rmdir),
             _ => None,
         }
     }
@@ -178,6 +180,7 @@ pub const EFAULT: i64 = -14;
 pub const EINVAL: i64 = -22;
 pub const EBADF: i64 = -9;
 pub const ENOSYS: i64 = -38;
+pub const ENOTEMPTY: i64 = -39;
 pub const ENAMETOOLONG: i64 = -36;
 pub const ENOENT: i64 = -2;
 pub const EACCES: i64 = -13;
@@ -722,6 +725,7 @@ pub extern "C" fn syscall_handler(
         Syscall::AbiQuery => sys_abi_query(arg0 as usize, arg1 as usize),
         Syscall::SetTidAddress => sys_set_tid_address(arg0),
         Syscall::ClockGetTime => sys_clock_gettime(arg0, arg1 as *mut u64),
+        Syscall::Rmdir => sys_rmdir(arg0 as *const u8, arg1 as usize),
     }
 }
 
@@ -1163,7 +1167,7 @@ fn sys_unlink(path: *const u8, path_len: usize) -> i64 {
     }
 }
 
-fn sys_mkdir(path: *const u8, path_len: usize) -> i64 {
+fn sys_rmdir(path: *const u8, path_len: usize) -> i64 {
     let path = match copy_string_from_user_len(path, path_len, MAX_USER_PATH) {
         Ok(path) => path,
         Err(error) => return error,
@@ -1179,6 +1183,35 @@ fn sys_mkdir(path: *const u8, path_len: usize) -> i64 {
         None => return EIO,
     };
 
+    let abs = match vfs.normalize_at(&cwd, &path) {
+        Ok(abs) => abs,
+        Err(error) => return vfs_error_to_errno(error),
+    };
+    if path_is_protected(&abs) {
+        return EACCES;
+    }
+
+    match vfs.remove_dir_at(&cwd, &path) {
+        Ok(()) => 0,
+        Err(error) => vfs_error_to_errno(error),
+    }
+}
+
+fn sys_mkdir(path: *const u8, path_len: usize) -> i64 {
+    let path = match copy_string_from_user_len(path, path_len, MAX_USER_PATH) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+
+    let cwd = match crate::process::current_process() {
+        Some(process) => process.cwd.clone(),
+        None => return EINVAL,
+    };
+
+    let vfs = match crate::fs::vfs::get_vfs() {
+        Some(vfs) => vfs,
+        None => return EIO,
+    };
     let abs = match vfs.normalize_at(&cwd, &path) {
         Ok(abs) => abs,
         Err(error) => return vfs_error_to_errno(error),
@@ -1639,6 +1672,7 @@ fn vfs_error_to_errno(error: crate::fs::vfs::VfsError) -> i64 {
         crate::fs::vfs::VfsError::AlreadyExists => EEXIST,
         crate::fs::vfs::VfsError::NotADirectory => ENOTDIR,
         crate::fs::vfs::VfsError::IsADirectory => EISDIR,
+        crate::fs::vfs::VfsError::DirectoryNotEmpty => ENOTEMPTY,
         crate::fs::vfs::VfsError::InvalidPath => EINVAL,
         crate::fs::vfs::VfsError::Unsupported => EOPNOTSUPP,
         crate::fs::vfs::VfsError::IoError => EIO,

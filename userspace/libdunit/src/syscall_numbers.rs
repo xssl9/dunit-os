@@ -79,3 +79,4 @@ pub const SYSCALL_FSCK: usize = 73;
 pub const SYSCALL_ABI_QUERY: usize = 74;
 pub const SYSCALL_SET_TID_ADDRESS: usize = 75;
 pub const SYSCALL_CLOCK_GET_TIME: usize = 76;
+pub const SYSCALL_RMDIR: usize = 77;

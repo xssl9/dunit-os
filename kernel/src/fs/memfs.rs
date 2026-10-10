@@ -453,6 +453,28 @@ impl FileSystem for MemFs {
         Ok(())
     }
 
+    fn remove_dir(&mut self, path: &str) -> Result<()> {
+        let clean = Self::clean(path);
+        if clean.is_empty() {
+            return Err(VfsError::InvalidPath);
+        }
+        let idx = self.node_index(clean).ok_or(VfsError::NotFound)?;
+        if matches!(self.nodes[idx].data, MemData::Static(_)) {
+            return Err(VfsError::PermissionDenied);
+        }
+        if self.nodes[idx].file_type != FileType::Directory {
+            return Err(VfsError::NotADirectory);
+        }
+        // Reject non-empty directories (any node living beneath this path).
+        let mut prefix = String::from(clean);
+        prefix.push('/');
+        if self.nodes.iter().any(|node| node.path.starts_with(prefix.as_str())) {
+            return Err(VfsError::DirectoryNotEmpty);
+        }
+        self.nodes.remove(idx);
+        Ok(())
+    }
+
     fn rename(&mut self, old: &str, new: &str) -> Result<()> {
         let old_clean = Self::clean(old);
         let new_clean = Self::clean(new);

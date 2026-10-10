@@ -140,6 +140,7 @@ pub enum VfsError {
     InvalidPath,
     Unsupported,
     IoError,
+    DirectoryNotEmpty,
 }
 
 impl fmt::Display for VfsError {
@@ -154,6 +155,7 @@ impl fmt::Display for VfsError {
             VfsError::InvalidPath => write!(f, "Invalid path"),
             VfsError::Unsupported => write!(f, "Operation unsupported"),
             VfsError::IoError => write!(f, "I/O error"),
+            VfsError::DirectoryNotEmpty => write!(f, "Directory not empty"),
         }
     }
 }
@@ -170,6 +172,11 @@ pub trait FileSystem: Send {
     fn create(&mut self, path: &str) -> Result<()>;
     fn mkdir(&mut self, path: &str) -> Result<()>;
     fn remove(&mut self, path: &str) -> Result<()>;
+    /// Remove an empty directory. Filesystems that cannot support it inherit the
+    /// default (Unsupported).
+    fn remove_dir(&mut self, _path: &str) -> Result<()> {
+        Err(VfsError::Unsupported)
+    }
     fn truncate(&mut self, path: &str) -> Result<()>;
     fn stat(&mut self, path: &str) -> Result<FileStat>;
 
@@ -367,6 +374,11 @@ impl VirtualFileSystem {
     pub fn remove_at(&mut self, cwd: &str, path: &str) -> Result<()> {
         let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut *VFS_PATH_BUFFER.0.get())? };
         unsafe { (&mut *fs).remove(relative_path) }
+    }
+
+    pub fn remove_dir_at(&mut self, cwd: &str, path: &str) -> Result<()> {
+        let (fs, relative_path) = unsafe { self.resolve_path(path, cwd, &mut *VFS_PATH_BUFFER.0.get())? };
+        unsafe { (&mut *fs).remove_dir(relative_path) }
     }
 
     pub fn rename_at(&mut self, cwd: &str, old: &str, new: &str) -> Result<()> {

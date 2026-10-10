@@ -1,0 +1,13 @@
+{
+  "description": "Dunit musl port (M6-C) file management — mkdir/rename/unlink/rmdir over native Mkdir/Rename/Unlink. userspace/ctests/musl_fsmgmt.c makes a dir, creates a file, renames it, stats across each step, unlinks, rmdirs. Run: tools/qemu_test.py --build --markers-file tools/m6_musl_fsmgmt_markers.json --post-boot-delay 3 --settle 4 --cmd-timeout 45 --timeout 160 --boot-timeout 110",
+  "run": { "config": "limine.conf", "cmd": ["exec musl_fsmgmt"] },
+  "required": [
+    { "marker": "[TERM-007] Starting main loop", "claim": "booted to terminal", "source": "kernel/src/lib.rs" },
+    { "marker": "[MUSL-FSM] created=1 rename(oldgone=1 new=1) unlinked=1 rmdir=1", "claim": "mkdir/create/rename/unlink/rmdir all took effect, verified by stat between steps", "source": "userspace/ctests/musl_fsmgmt.c" },
+    { "marker": "[MUSL-FSM] OK", "claim": "file-management syscalls work through the ported libc", "source": "userspace/ctests/musl_fsmgmt.c" }
+  ],
+  "forbidden": [
+    { "marker": "[PANIC]", "why": "kernel panic", "source": "kernel/src/lib.rs" },
+    { "marker": "[MUSL-FSM] FAIL", "why": "a file-management step failed", "source": "userspace/ctests/musl_fsmgmt.c" }
+  ]
+}

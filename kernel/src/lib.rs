@@ -237,6 +237,7 @@ fn terminal_exec(console: &mut terminal::FbConsole, cwd: &str, command_line: &st
                 fs::vfs::VfsError::InvalidPath => "invalid path",
                 fs::vfs::VfsError::Unsupported => "unsupported",
                 fs::vfs::VfsError::IoError => "I/O error",
+                fs::vfs::VfsError::DirectoryNotEmpty => "Directory not empty",
             });
             console.write_str("\n");
         }
