@@ -1690,6 +1690,17 @@ fn sys_receive_message_from(msg: *mut u8, len: usize, sender_out: *mut u32) -> i
 }
 
 fn sys_get_framebuffer(info: *mut FbInfo) -> i64 {
+    // Raw framebuffer access is reserved for the display-master owner — the
+    // userspace compositor, or a full-screen app that acquired the display.
+    // Other processes must go through the compositor. Mirrors sys_fb_present so
+    // there is one ownership rule for the framebuffer, not a back door.
+    let pid = match crate::process::current_process() {
+        Some(process) => process.pid.0,
+        None => return EINVAL,
+    };
+    if pid == 0 || crate::handle::display_owner() != pid {
+        return EACCES;
+    }
     unsafe {
         if KERNEL_FB_ADDR.load(Ordering::Relaxed) == 0 {
             return EINVAL;
@@ -1789,6 +1800,15 @@ fn sys_get_system_stats(info: *mut SystemStats) -> i64 {
 }
 
 fn sys_draw_pixel(x: u32, y: u32, color: u32) -> i64 {
+    // Same ownership rule as sys_get_framebuffer / sys_fb_present: only the
+    // display-master owner may poke the raw framebuffer.
+    let pid = match crate::process::current_process() {
+        Some(process) => process.pid.0,
+        None => return EINVAL,
+    };
+    if pid == 0 || crate::handle::display_owner() != pid {
+        return EACCES;
+    }
     unsafe {
         if KERNEL_FB_ADDR.load(Ordering::Relaxed) == 0 {
             return EINVAL;

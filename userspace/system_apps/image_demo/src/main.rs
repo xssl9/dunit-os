@@ -63,6 +63,13 @@ fn draw_image(x: u32, y: u32) {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
+    // Full-screen framebuffer demo: acquire the display master before touching
+    // the framebuffer. The kernel gates raw FB access (get_framebuffer/draw_*)
+    // on the display owner, so a stray process can't scribble over the screen.
+    if libdunit::handle_display_acquire() < 0 {
+        libdunit::println("image_demo: display is busy (a compositor owns it)");
+        libdunit::exit(1);
+    }
     let mut fb = libdunit::FbInfo {
         addr: 0,
         width: 0,

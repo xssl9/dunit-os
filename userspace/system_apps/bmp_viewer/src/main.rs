@@ -320,6 +320,12 @@ pub extern "C" fn _start(
         }
     };
 
+    // Full-screen framebuffer app: acquire the display master before touching
+    // the framebuffer. The kernel gates raw FB access on the display owner.
+    if libdunit::handle_display_acquire() < 0 {
+        libdunit::println("bmp_viewer: display is busy (a compositor owns it)");
+        libdunit::exit(6);
+    }
     let mut fb = libdunit::FbInfo {
         addr: 0,
         width: 0,
