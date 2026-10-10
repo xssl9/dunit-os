@@ -409,6 +409,8 @@ def run(args: argparse.Namespace) -> RunResult:
         args.config = run_defaults["config"]
     if run_defaults.get("cmd") and not args.cmd:
         args.cmd = list(run_defaults["cmd"])
+    if run_defaults.get("scratch_disk_mib") and not args.scratch_disk:
+        args.scratch_disk = int(run_defaults["scratch_disk_mib"])
 
     is_disk = False
     if args.build:
@@ -436,8 +438,23 @@ def run(args: argparse.Namespace) -> RunResult:
             pass
 
     display = args.display if getattr(args, "interactive", False) else "none"
+    extra_args = list(args.qemu_arg or [])
+    # A blank scratch disk lets the in-kernel installer self-test provision a
+    # pristine AHCI target. On an ISO boot the CD is ATAPI (the AHCI driver skips
+    # it), so this is the only SATA disk and enumerates as sda.
+    if args.scratch_disk:
+        scratch = workdir / "dunit-scratch.img"
+        try:
+            scratch.unlink()
+        except FileNotFoundError:
+            pass
+        with open(scratch, "wb") as fh:
+            fh.truncate(int(args.scratch_disk) * 1024 * 1024)
+        extra_args += ["-drive", f"file={scratch},format=raw,if=ide"]
+        print(f"[qemu_test] blank scratch disk: {scratch} "
+              f"({args.scratch_disk} MiB)", file=sys.stderr)
     qemu_cmd = build_qemu_command(image, is_disk, args.accel, args.mem, qmp_sock,
-                                  serial_log, args.qemu_arg or [], display)
+                                  serial_log, extra_args, display)
     print("[qemu_test] launch:", " ".join(qemu_cmd), file=sys.stderr)
 
     result = RunResult(ok=False, reason="", booted=False, iso=str(image))
@@ -650,6 +667,9 @@ def main() -> int:
     parser.add_argument("--workdir", help="where to place qmp socket / serial log (default build/)")
     parser.add_argument("--qemu-arg", action="append",
                         help="extra raw argument passed to qemu (repeatable)")
+    parser.add_argument("--scratch-disk", type=int, metavar="SIZE_MB",
+                        help="attach a blank raw AHCI scratch disk of SIZE_MB MiB before "
+                             "booting (for the installer self-test; enumerates as sda on an ISO boot)")
     parser.add_argument("--json", action="store_true",
                         help="print the result as JSON instead of human text")
     parser.add_argument("--interactive", action="store_true",

@@ -402,7 +402,7 @@ Dunit DWM — отдельный policy shell поверх GUI Server:
 - [x] Реализовать real init/service manager и first-boot provisioning.
 - [x] Расширить DunitFS: allocation bitmap/extents, directories, rename, unlink, timestamps, permissions, fsync, superblock generations, journal или metadata COW.
 - [x] Добавить `fsck.dunit`, read-only degraded mount и recovery report.
-- [ ] Сделать installer transactional: validate -> partition -> format -> copy -> verify -> boot config -> sync.
+- [x] Сделать installer transactional: validate -> partition -> format -> copy -> verify -> boot config -> sync.
 - [ ] Поддержать AHCI и VirtIO target; отдельно тестировать BIOS и UEFI.
 - [ ] Разделить Live и installed manifests; Live имеет installer/recovery, installed — persistent root и first boot.
 

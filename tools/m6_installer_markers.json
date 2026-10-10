@@ -1,0 +1,30 @@
+{
+  "description": "M5 item 6 — transactional installer (validate -> partition -> format -> copy -> verify -> boot config -> sync, with rollback). The in-kernel installer self-test (feature boot-smoke-tests) runs in drivers::init BEFORE auto_mount, in the Live/ISO environment where the installer ESP/BIOS payloads are present, against a BLANK scratch AHCI disk attached by the harness (--scratch-disk / run.scratch_disk_mib). Phase A: a transaction with an injected mid-transaction fault (AfterPartition) must restore the scratch's FRONT (LBA 0..=33) and BACK (LBA blocks-33..=blocks-1) partition-table regions byte-for-byte to their pre-write (blank) state, proving rollback; the disk must have no readable GPT afterwards. Phase B: a clean transaction must run every phase and self-verify — the GPT reads back with the ESP and DUNIT-SYSTEM partitions, the freshly formatted root fscks Clean, and the protective MBR carries the 0x55aa boot signature; the install is left unmounted. The subsequent normal auto_mount then finds and mounts the freshly installed DUNIT-SYSTEM partition at /persist, proving the installed image is real and mountable. Run: tools/qemu_test.py --build --markers-file tools/m6_installer_markers.json --timeout 360 --boot-timeout 320 --post-boot-delay 2 --settle 2",
+  "run": {
+    "config": "limine_test_terminal.conf",
+    "scratch_disk_mib": 256,
+    "cmd": []
+  },
+  "required": [
+    { "marker": "[AHCI] controllers found=1 initialized=1", "claim": "the AHCI controller came up so a writable SATA scratch target exists", "source": "kernel/src/drivers/ahci.rs" },
+    { "marker": "[INSTALL-TEST] START", "claim": "the installer self-test launched before auto_mount", "source": "kernel/src/storage/installer.rs" },
+    { "marker": "[INSTALL-TEST] target=sda", "claim": "a blank scratch AHCI disk was selected as the install target", "source": "kernel/src/storage/installer.rs" },
+    { "marker": "[INSTALL] rollback restored partition table", "claim": "the transaction's rollback path restored both partition-table snapshots after the injected fault", "source": "kernel/src/storage/installer.rs" },
+    { "marker": "[INSTALL-TEST] rollback restored ok", "claim": "after the fault-injected transaction the scratch's FRONT/BACK regions are byte-identical to the pre-write state and no GPT remains — rollback is real", "source": "kernel/src/storage/installer.rs" },
+    { "marker": "[INSTALL] transaction committed root_start=", "claim": "the clean transaction ran all phases to a commit", "source": "kernel/src/storage/installer.rs" },
+    { "marker": "[INSTALL-TEST] install verified ok", "claim": "the installed disk reads back with ESP + DUNIT-SYSTEM partitions, a Clean fsck, and a bootable MBR signature", "source": "kernel/src/storage/installer.rs" },
+    { "marker": "[INSTALL-TEST] OK", "claim": "both installer self-test phases passed", "source": "kernel/src/storage/installer.rs" },
+    { "marker": "[DUNITFS] auto-mounted", "claim": "the freshly installed DUNIT-SYSTEM partition was then mounted at /persist by the normal auto_mount — the install is real and mountable", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[TERM-007] Starting main loop", "claim": "the Live system booted to the terminal after all self-tests", "source": "kernel/src/lib.rs" }
+  ],
+  "forbidden": [
+    { "marker": "[PANIC]", "why": "kernel panic", "source": "kernel/src/lib.rs" },
+    { "marker": "[INSTALL-TEST] skipped: no scratch target", "why": "no blank scratch disk was attached — the installer path is unproven", "source": "kernel/src/storage/installer.rs" },
+    { "marker": "[INSTALL-TEST] skipped: installer payloads unavailable", "why": "the ESP/BIOS payloads were missing — the installer could not run", "source": "kernel/src/storage/installer.rs" },
+    { "marker": "[INSTALL-TEST] skipped: a volume is already mounted", "why": "a DunitFS volume was already mounted before the test — ran on the wrong boot path", "source": "kernel/src/storage/installer.rs" },
+    { "marker": "[INSTALL-TEST] FAIL", "why": "the installer self-test failed", "source": "kernel/src/storage/installer.rs" },
+    { "marker": "[INSTALL-TEST] rollback restored FAIL", "why": "rollback did not restore the partition table after the injected fault", "source": "kernel/src/storage/installer.rs" },
+    { "marker": "[INSTALL-TEST] install verified FAIL", "why": "the clean install did not read back consistent", "source": "kernel/src/storage/installer.rs" },
+    { "marker": "[INSTALL] rollback restore FAILED", "why": "the rollback write-back itself failed", "source": "kernel/src/storage/installer.rs" }
+  ]
+}
