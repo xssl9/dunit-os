@@ -1,0 +1,19 @@
+{
+  "description": "M5 item 8 — INSTALLED profile manifest. An installed image carries ONLY the persistent root (+ first boot); the Live-only installer/recovery payloads are dropped. tools/install_disk.py builds the installed ESP's limine.conf by keeping only the boot modules listed in manifests/installed-modules.txt (initrd.img), so installer-esp.img and installer-bios.bin are NOT present on the installed disk. Booting the installed disk (--build-disk, which runs install_disk.py) must therefore show the initrd payload present but BOTH installer payloads unavailable, and still mount the persistent root at /persist — proving the installed profile = persistent root + first boot, with the installer absent. This is the data-driven counterpart to tools/m8_live_profile_markers.json. Run: tools/qemu_test.py --build-disk --markers-file tools/m8_installed_profile_markers.json --timeout 200 --boot-timeout 150 --post-boot-delay 2.5 --settle 3",
+  "run": {
+    "config": "limine_test_terminal.conf",
+    "cmd": []
+  },
+  "required": [
+    { "marker": "[BOOT] initrd payload OK", "claim": "the installed image carries the persistent-root initrd module", "source": "hal/src/boot_main.c" },
+    { "marker": "[BOOT] installer payload unavailable", "claim": "the Live-only installer ESP payload is NOT on the installed image — the manifest split is real", "source": "hal/src/boot_main.c" },
+    { "marker": "[BOOT] BIOS payload unavailable", "claim": "the Live-only installer BIOS payload is NOT on the installed image", "source": "hal/src/boot_main.c" },
+    { "marker": "[DUNITFS] auto-mounted", "claim": "the installed persistent root was mounted at /persist", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[TERM-007] Starting main loop", "claim": "the installed disk booted to the terminal", "source": "kernel/src/lib.rs" }
+  ],
+  "forbidden": [
+    { "marker": "[PANIC]", "why": "kernel panic", "source": "kernel/src/lib.rs" },
+    { "marker": "[BOOT] installer payload OK", "why": "the installer payload leaked onto the installed image — the manifest split failed", "source": "hal/src/boot_main.c" },
+    { "marker": "[BOOT] BIOS payload OK", "why": "the installer BIOS payload leaked onto the installed image", "source": "hal/src/boot_main.c" }
+  ]
+}

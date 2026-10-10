@@ -404,7 +404,7 @@ Dunit DWM — отдельный policy shell поверх GUI Server:
 - [x] Добавить `fsck.dunit`, read-only degraded mount и recovery report.
 - [x] Сделать installer transactional: validate -> partition -> format -> copy -> verify -> boot config -> sync.
 - [x] Поддержать AHCI и VirtIO target; отдельно тестировать BIOS и UEFI.
-- [ ] Разделить Live и installed manifests; Live имеет installer/recovery, installed — persistent root и first boot.
+- [x] Разделить Live и installed manifests; Live имеет installer/recovery, installed — persistent root и first boot.
 
 **Цель/причина:** `/persist` рядом с embedded root не является законченной установкой. **Подсистемы:** installer, GPT, DunitFS, VFS, boot, init, build images. **Зависимости:** базовая часть параллельна GUI; DWM config persistence зависит от неё. **Результат:** system/users/apps обновляются с диска. **Готовность:** create/write/fsync/reboot/read; interrupted metadata update восстанавливается; kernel не содержит app binaries. **Тесты:** two-reboot content hash, 1000-file/large-file tests, disk-full, corrupted CRC, power-cut points, BIOS/UEFI × AHCI/VirtIO. **Риски:** filesystem corruption; нельзя использовать DunitFS v1 как единственную копию важных данных.
 

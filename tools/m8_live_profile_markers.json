@@ -1,0 +1,18 @@
+{
+  "description": "M5 item 8 — LIVE profile manifest. A Live image carries the persistent root PLUS the installer and read-only recovery payloads. Built as an ISO from the Live Limine config (limine_test_terminal.conf), which lists all three boot modules: initrd.img + installer-esp.img + installer-bios.bin. The kernel's boot loader reports each payload's presence, so a Live boot must show the initrd AND both installer payloads available. This is the counterpart to tools/m8_installed_profile_markers.json (same image contents minus the Live-only installer). Run: tools/qemu_test.py --build --markers-file tools/m8_live_profile_markers.json --timeout 120 --boot-timeout 90",
+  "run": {
+    "config": "limine_test_terminal.conf",
+    "cmd": []
+  },
+  "required": [
+    { "marker": "[BOOT] initrd payload OK", "claim": "the persistent-root initrd module is present on the Live image", "source": "hal/src/boot_main.c" },
+    { "marker": "[BOOT] installer payload OK", "claim": "the Live image carries the installer ESP payload (installer-esp.img module)", "source": "hal/src/boot_main.c" },
+    { "marker": "[BOOT] BIOS payload OK", "claim": "the Live image carries the installer BIOS stage payload (installer-bios.bin module)", "source": "hal/src/boot_main.c" },
+    { "marker": "[TERM-007] Starting main loop", "claim": "the Live image booted to the terminal", "source": "kernel/src/lib.rs" }
+  ],
+  "forbidden": [
+    { "marker": "[PANIC]", "why": "kernel panic", "source": "kernel/src/lib.rs" },
+    { "marker": "[BOOT] installer payload unavailable", "why": "the Live image is missing its installer payload", "source": "hal/src/boot_main.c" },
+    { "marker": "[BOOT] BIOS payload unavailable", "why": "the Live image is missing its installer BIOS payload", "source": "hal/src/boot_main.c" }
+  ]
+}

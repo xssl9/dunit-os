@@ -1,0 +1,22 @@
+# Dunit boot-module manifest — INSTALLED profile (M5 item 8).
+#
+# Dunit ships one kernel ABI and one package format; Live and installed images
+# differ by MANIFEST, not by #ifdef (see DUNIT_OS_TECHNICAL_ROADMAP.md §21).
+#
+#   Live profile      = persistent root + installer + read-only recovery.
+#                       Its manifest is the Live Limine config itself
+#                       (limine*.conf), which lists every boot module:
+#                       initrd.img + installer-esp.img + installer-bios.bin.
+#   Installed profile = persistent root + first boot ONLY. The installer and
+#                       recovery payloads are Live-only and are NOT carried on an
+#                       installed system's ESP.
+#
+# This file is that installed-profile manifest: the authoritative allowlist of
+# boot-module basenames an installed image carries. tools/install_disk.py builds
+# an installed ESP's limine.conf by keeping only the `module_path:` lines whose
+# basename appears below (and dropping every other module), so the Live→installed
+# split is declared here as data, not inferred from a filename substring.
+#
+# One module basename per line. Blank lines and `#` comments are ignored.
+
+initrd.img

@@ -285,21 +285,45 @@ def build_esp_image(path: Path, root: Path, config: Path) -> None:
     path.with_name("installer-bios.bin").write_bytes(bios_payload)
 
 
+def load_installed_module_manifest(root: Path) -> set[str]:
+    """Read the installed-profile boot-module allowlist (M5 item 8).
+
+    The Live→installed split is declared as data in manifests/installed-modules.txt
+    (one module basename per line, `#` comments ignored), not inferred from a
+    filename. An installed image carries only the modules listed here; every other
+    `module_path:` line from the Live config (installer/recovery payloads) is
+    dropped when building the installed ESP's limine.conf.
+    """
+    manifest = root / "manifests/installed-modules.txt"
+    modules: set[str] = set()
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        name = line.split("#", 1)[0].strip()
+        if name:
+            modules.add(name)
+    if not modules:
+        raise RuntimeError(f"installed-module manifest is empty: {manifest}")
+    return modules
+
+
 def copy_boot_files(root: Path, fat_image: str, config: Path) -> None:
     env = os.environ.copy()
     env["MTOOLS_SKIP_CHECK"] = "1"
     for directory in ("EFI", "EFI/BOOT", "boot", "boot/limine"):
         run(["mmd", "-i", fat_image, f"::/{directory}"], env=env)
 
-    # The installed system boots from its own ESP, which carries only the initrd
-    # module (apps + assets); the installer-only payloads (installer-esp.img and
-    # installer-bios.bin) are not copied to the target, so their module_path
-    # lines are stripped while the initrd module_path line is preserved.
+    # The installed system boots from its own ESP, which carries only the
+    # persistent-root modules declared in the installed-profile manifest; the
+    # installer/recovery payloads (installer-esp.img, installer-bios.bin) are
+    # Live-only and are dropped. A `module_path:` line is kept iff its basename
+    # is in the manifest, so the split is declared by data, not by a substring.
+    installed_modules = load_installed_module_manifest(root)
+
     def keep_config_line(line: str) -> bool:
         stripped = line.lstrip()
         if not stripped.startswith("module_path:"):
             return True
-        return "initrd.img" in stripped
+        basename = stripped.split(":", 1)[1].strip().rsplit("/", 1)[-1]
+        return basename in installed_modules
 
     installed_config = root / "build/installed-limine.conf"
     installed_config.write_text(
