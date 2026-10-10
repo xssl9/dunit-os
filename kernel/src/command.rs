@@ -349,6 +349,15 @@ pub fn run_dsh_calc_smoke() -> bool {
 #[cfg(feature = "boot-smoke-tests")]
 pub fn run_fsck_cli_smoke() -> bool {
     crate::serial_write("[FSCK-CLI-TEST] START\r\n");
+    // The CLI runs fsck against a live Dunit partition; a diskless boot (e.g. the
+    // plain terminal/GUI ISO with no attached disk) legitimately has none, so
+    // sys_fsck would return ENOENT and the CLI would exit non-zero. Skip cleanly
+    // in that case — consistent with the dunitfs and installer self-tests, which
+    // also skip when there is no target — instead of reporting a false FAIL.
+    if crate::fs::dunitfs::locate_dunit_partition().is_none() {
+        crate::serial_write("[FSCK-CLI-TEST] skipped: no Dunit partition\r\n");
+        return true;
+    }
     let mut input = NoExecInput;
     let result = run_foreground_exec("/", "fsck_dunit", ProcessOutputSink::SerialOnly, &mut input);
     let ok = match result {
