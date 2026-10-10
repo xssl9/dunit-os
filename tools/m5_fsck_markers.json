@@ -1,0 +1,41 @@
+{
+  "description": "M5 item 5 — fsck.dunit + read-only degraded mount + recovery report. On a freshly provisioned disk the in-kernel smoke self-test (feature boot-smoke-tests) runs BEFORE auto_mount and, after the torn-commit recovery test, exercises the full fsck/degraded path on the real partition: (1) format + seed two files, fsck reports Clean; (2) a node entry is corrupted on disk (node self-CRC broken, both superblocks republished at the same generation with a recomputed whole-slot CRC so the slot still passes physically) and fsck now reports Degraded with >=1 corrupt node; (3) load() on the corrupted FS falls back to a read-only degraded mount that drops the bad node, keeps the survivor readable, and rejects writes with PermissionDenied. The self-test then reformats clean and writes the persistence sentinel. After auto_mount, the fsck.dunit userspace CLI (sys_fsck syscall 73 -> libdunit::fsck) runs against the clean /persist mount and must report verdict=clean with exit code 0, proving the kernel checker, syscall ABI, libdunit wrapper and CLI report/exit-code mapping all agree. Run: tools/qemu_test.py --build-disk --config limine_test_terminal.conf --markers-file tools/m5_fsck_markers.json",
+  "run": {
+    "config": "limine_test_terminal.conf",
+    "cmd": []
+  },
+  "required": [
+    { "marker": "[AHCI] controllers found=1 initialized=1", "claim": "writable AHCI target disk present for the self-test and the CLI", "source": "kernel/src/drivers/ahci.rs" },
+    { "marker": "[FSCK-TEST] clean verdict ok", "claim": "fsck reports Clean on a freshly formatted, consistent filesystem", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[FSCK] verdict=clean", "claim": "the recovery report line itself is emitted with the clean verdict", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[FSCK-TEST] degraded verdict ok", "claim": "fsck downgrades to Degraded with >=1 corrupt node after a node entry is corrupted on disk", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[FSCK] verdict=degraded", "claim": "the recovery report line is emitted with the degraded verdict", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[DUNITFS] degraded read-only mount", "claim": "load() falls back to a read-only degraded mount instead of failing when strict decode fails", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[FSCK-TEST] degraded mount read-only ok", "claim": "the degraded mount is flagged read_only", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[FSCK-TEST] survivor readable ok", "claim": "an intact file is still readable through the degraded mount", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[FSCK-TEST] corrupt node dropped ok", "claim": "the corrupt node is dropped from the degraded mount", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[FSCK-TEST] write rejected ok", "claim": "writes to the read-only degraded mount are rejected with PermissionDenied", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[DUNITFS] auto-mounted", "claim": "the reformatted root is mounted at /persist after the self-test", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[FSCK-CLI-TEST] START", "claim": "the userspace fsck.dunit CLI smoke launched", "source": "kernel/src/command.rs" },
+    { "marker": "[fsck.dunit] verdict=clean", "claim": "the userspace CLI, via sys_fsck/libdunit, reports a clean verdict on the live /persist", "source": "userspace/system_apps/fsck_dunit/src/main.rs" },
+    { "marker": "[FSCK-CLI-TEST] OK", "claim": "the fsck.dunit CLI exited 0 (clean) — kernel checker, syscall ABI, libdunit wrapper and CLI exit-code mapping agree", "source": "kernel/src/command.rs" },
+    { "marker": "[TERM-007] Starting main loop", "claim": "the installed disk boots to the terminal after all self-tests", "source": "kernel/src/lib.rs" }
+  ],
+  "forbidden": [
+    { "marker": "[PANIC]", "why": "kernel panic", "source": "kernel/src/lib.rs" },
+    { "marker": "[DUNITFS-V2] smoke skipped: no Dunit partition", "why": "self-test could not find the disk — acceptance unproven", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[FSCK-TEST] format FAIL", "why": "clean format failed before the fsck test", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[FSCK-TEST] seed FAIL", "why": "could not seed the two test files", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[FSCK-TEST] seed load FAIL", "why": "freshly formatted FS did not load for seeding", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[FSCK-TEST] index load FAIL", "why": "could not reload to resolve the bad node index", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[FSCK-TEST] clean verdict FAIL", "why": "fsck did not report Clean on an intact filesystem", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[FSCK-TEST] corrupt FAIL", "why": "could not corrupt the node on disk", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[FSCK-TEST] degraded verdict FAIL", "why": "fsck did not downgrade to Degraded after corruption", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[FSCK-TEST] degraded mount load FAIL", "why": "load() failed instead of degraded-mounting the corrupted FS", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[FSCK-TEST] degraded mount read-only FAIL", "why": "degraded mount was not flagged read-only", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[FSCK-TEST] survivor readable FAIL", "why": "the intact file was not readable through the degraded mount", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[FSCK-TEST] corrupt node dropped FAIL", "why": "the corrupt node was not dropped", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[FSCK-TEST] write rejected FAIL", "why": "a write to the read-only degraded mount was not rejected", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[FSCK-CLI-TEST] FAIL", "why": "the userspace fsck.dunit CLI did not exit 0 on the clean /persist", "source": "kernel/src/command.rs" }
+  ]
+}

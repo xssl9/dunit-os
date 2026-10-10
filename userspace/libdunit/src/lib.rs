@@ -79,6 +79,7 @@ pub const SYSCALL_RENAME: usize = 69;
 pub const SYSCALL_MKDIR: usize = 70;
 pub const SYSCALL_SET_VIDEO_MODE: usize = 71;
 pub const SYSCALL_FSYNC: usize = 72;
+pub const SYSCALL_FSCK: usize = 73;
 
 /// Права хэндлов (capabilities). Совпадают с битами в ядре (kernel/src/handle.rs).
 pub const RIGHT_READ: u32 = 1 << 0;
@@ -403,6 +404,25 @@ pub struct FileStat {
     pub size: usize,
 }
 
+/// Recovery report ФС (`fsck`). Поле за полем зеркалит `UserFsckReport` в ядре
+/// (тот же `#[repr(C)]`, порядок и типы) — иначе раскладка разъедется.
+/// `verdict`: 0=clean, 1=degraded, 2=unrecoverable.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct FsckReport {
+    pub primary_ok: u32,
+    pub backup_ok: u32,
+    pub slot_crc_ok: u32,
+    pub generation: u64,
+    pub nodes_total: u32,
+    pub nodes_ok: u32,
+    pub nodes_corrupt: u32,
+    pub duplicate_paths: u32,
+    pub extent_errors: u32,
+    pub bitmap_errors: u32,
+    pub verdict: u32,
+}
+
 #[repr(C)]
 pub struct FbInfo {
     pub addr: u64,
@@ -644,6 +664,13 @@ pub fn mkdir(path: &str) -> isize {
 /// a negative errno. For the standard streams it is a no-op (returns 0).
 pub fn fsync(fd: usize) -> isize {
     syscall1(SYSCALL_FSYNC, fd)
+}
+
+/// Проверяет целостность установленной Dunit-ФС и заполняет `report`. Возвращает
+/// 0 при успехе, отрицательный errno если проверить нечего (нет Dunit-раздела —
+/// ENOENT) или произошла ошибка. Сам вердикт — в `report.verdict`.
+pub fn fsck(report: &mut FsckReport) -> isize {
+    syscall1(SYSCALL_FSCK, report as *mut FsckReport as usize)
 }
 
 pub fn print(s: &str) {

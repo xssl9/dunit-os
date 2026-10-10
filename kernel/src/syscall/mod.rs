@@ -82,6 +82,7 @@ pub enum Syscall {
     Mkdir = 70,
     SetVideoMode = 71,
     Fsync = 72,
+    Fsck = 73,
 }
 
 impl Syscall {
@@ -161,6 +162,7 @@ impl Syscall {
             70 => Some(Syscall::Mkdir),
             71 => Some(Syscall::SetVideoMode),
             72 => Some(Syscall::Fsync),
+            73 => Some(Syscall::Fsck),
             _ => None,
         }
     }
@@ -263,6 +265,25 @@ pub struct UserDirEntry {
 pub struct UserFileStat {
     pub file_type: u32,
     pub size: usize,
+}
+
+/// Recovery report, передаваемый в userspace через `sys_fsck`. Поле за полем
+/// зеркалит `libdunit::FsckReport` (тот же `#[repr(C)]`, порядок и типы), иначе
+/// раскладка разъедется. `verdict`: 0=clean, 1=degraded, 2=unrecoverable.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct UserFsckReport {
+    pub primary_ok: u32,
+    pub backup_ok: u32,
+    pub slot_crc_ok: u32,
+    pub generation: u64,
+    pub nodes_total: u32,
+    pub nodes_ok: u32,
+    pub nodes_corrupt: u32,
+    pub duplicate_paths: u32,
+    pub extent_errors: u32,
+    pub bitmap_errors: u32,
+    pub verdict: u32,
 }
 
 const USER_SPACE_START: u64 = 0x0000_0000_0000_0000;
@@ -687,6 +708,7 @@ pub extern "C" fn syscall_handler(
         Syscall::Mkdir => sys_mkdir(arg0 as *const u8, arg1 as usize),
         Syscall::SetVideoMode => sys_set_video_mode(arg0 as u32, arg1 as u32),
         Syscall::Fsync => sys_fsync(arg0 as u32),
+        Syscall::Fsck => sys_fsck(arg0 as *mut UserFsckReport),
     }
 }
 
@@ -1252,6 +1274,40 @@ fn sys_fsync(fd: u32) -> i64 {
             }
         }
     }
+}
+
+/// Проверяет целостность установленной Dunit-ФС и копирует recovery report в
+/// userspace. Механизм: ядро владеет блочным доступом, поэтому проверку делает
+/// in-kernel `dunitfs::fsck`; `fsck_dunit` — лишь CLI поверх этого. Серийный
+/// вывод оставлен за CLI (здесь не эмитим), чтобы не задваивать строки.
+fn sys_fsck(out: *mut UserFsckReport) -> i64 {
+    let Some((device, start, blocks)) = crate::fs::dunitfs::locate_dunit_partition() else {
+        return ENOENT;
+    };
+    let report = crate::fs::dunitfs::fsck(device, start, blocks);
+    let user = UserFsckReport {
+        primary_ok: report.primary_ok as u32,
+        backup_ok: report.backup_ok as u32,
+        slot_crc_ok: report.slot_crc_ok as u32,
+        generation: report.generation,
+        nodes_total: report.nodes_total,
+        nodes_ok: report.nodes_ok,
+        nodes_corrupt: report.nodes_corrupt,
+        duplicate_paths: report.duplicate_paths,
+        extent_errors: report.extent_errors,
+        bitmap_errors: report.bitmap_errors,
+        verdict: report.verdict.code(),
+    };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            &user as *const UserFsckReport as *const u8,
+            core::mem::size_of::<UserFsckReport>(),
+        )
+    };
+    if let Err(error) = copy_buffer_to_user(out as *mut u8, bytes) {
+        return error;
+    }
+    0
 }
 
 fn user_file_type(file_type: crate::fs::vfs::FileType) -> u32 {

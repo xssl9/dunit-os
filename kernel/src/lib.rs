@@ -882,6 +882,12 @@ pub extern "C" fn kernel_main(
         } else {
             screen_log("[FAIL] dsh/calc terminal-program smoke failed", true);
         }
+        screen_log("[ .. ] Running fsck.dunit CLI smoke test", false);
+        if command::run_fsck_cli_smoke() {
+            screen_log("[ OK ] fsck.dunit CLI smoke passed", false);
+        } else {
+            screen_log("[FAIL] fsck.dunit CLI smoke failed", true);
+        }
     }
 
     screen_log("[ OK ] System initialization complete", false);

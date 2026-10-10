@@ -1,0 +1,11 @@
+[package]
+name = "fsck_dunit"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libdunit = { path = "../../libdunit" }
+
+[[bin]]
+name = "fsck_dunit"
+path = "src/main.rs"

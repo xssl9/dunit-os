@@ -340,6 +340,29 @@ pub fn run_dsh_calc_smoke() -> bool {
     ok
 }
 
+/// Run the `fsck_dunit` userspace CLI against the live /persist mount and verify
+/// it reports a Clean verdict (exit code 0). This proves the full
+/// mechanism→tool path: the kernel `dunitfs::fsck` checker, the `sys_fsck`
+/// syscall (73), the libdunit wrapper, and the CLI's report+exit-code mapping
+/// all agree on an intact filesystem. The low-level recovery/degraded behaviour
+/// is exercised separately by `dunitfs::smoke_self_test` (`[FSCK-TEST] ...`).
+#[cfg(feature = "boot-smoke-tests")]
+pub fn run_fsck_cli_smoke() -> bool {
+    crate::serial_write("[FSCK-CLI-TEST] START\r\n");
+    let mut input = NoExecInput;
+    let result = run_foreground_exec("/", "fsck_dunit", ProcessOutputSink::SerialOnly, &mut input);
+    let ok = match result {
+        Ok((_, exit)) => {
+            let _ = process::autoreap_process(exit.pid, "fsck-cli-smoke");
+            matches!(exit.status, process::ProcessExitStatus::Exited(0))
+        }
+        Err(_) => false,
+    };
+    crate::serial_write(if ok { "[FSCK-CLI-TEST] OK\r\n" } else { "[FSCK-CLI-TEST] FAIL\r\n" });
+    ok
+}
+
+
 fn serial_write_i32(value: i32) {
     if value < 0 {
         crate::serial_write("-");
