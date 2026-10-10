@@ -34,6 +34,9 @@ USERSPACE_BUILD_DIR = $(BUILD_DIR)/userspace
 MUSL_DIR = toolchains/dunit-musl
 MUSL_SYSROOT = $(BUILD_DIR)/dunit-sysroot
 MUSL_LIBC = $(MUSL_SYSROOT)/lib/libc.a
+# C programs linked against the Dunit musl port (userspace/ctests/<name>.c),
+# packed into the initrd as /app/<name>.
+MUSL_CTESTS = musl_hello musl_stdio
 
 USERSPACE_APPS = \
 	elf_demo fs_test exit_test args_test cwd_test path_test image_demo bmp_viewer color_test \
@@ -138,18 +141,22 @@ userspace:
 		-o $(USERSPACE_BUILD_DIR)/c_hello \
 		$(USERSPACE_DIR)/ctests/crt0.s $(USERSPACE_DIR)/ctests/hello.c \
 		-Wl,-T,$(USERSPACE_DIR)/userspace.ld -Wl,--build-id=none
-	@echo "[USERSPACE] building musl_hello (static musl on the Dunit port)"
+	@echo "[USERSPACE] building musl ctests ($(MUSL_CTESTS)) against the Dunit port"
 	@if [ -f $(MUSL_DIR)/tools/dunit/build-libc.sh ]; then set -e; \
 		[ -f $(abspath $(MUSL_LIBC)) ] || $(MUSL_DIR)/tools/dunit/build-libc.sh $(abspath $(MUSL_SYSROOT)); \
-		$(CC) -static -no-pie -nostdlib -nostartfiles -nostdinc \
-			-isystem $(abspath $(MUSL_SYSROOT))/include \
-			-fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables -O2 \
-			$(abspath $(MUSL_SYSROOT))/lib/crt1.o $(abspath $(MUSL_SYSROOT))/lib/crti.o \
-			$(USERSPACE_DIR)/ctests/musl_hello.c \
-			$(abspath $(MUSL_SYSROOT))/lib/libc.a $$($(CC) -print-libgcc-file-name) \
-			$(abspath $(MUSL_SYSROOT))/lib/crtn.o \
-			-o $(USERSPACE_BUILD_DIR)/musl_hello; \
-	else echo "[USERSPACE] skip musl_hello: submodule $(MUSL_DIR) not initialized (run: git submodule update --init --recursive)"; fi
+		LIBGCC=$$($(CC) -print-libgcc-file-name); \
+		for prog in $(MUSL_CTESTS); do \
+			echo "  [MUSL] $$prog"; \
+			$(CC) -static -no-pie -nostdlib -nostartfiles -nostdinc \
+				-isystem $(abspath $(MUSL_SYSROOT))/include \
+				-fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables -O2 \
+				$(abspath $(MUSL_SYSROOT))/lib/crt1.o $(abspath $(MUSL_SYSROOT))/lib/crti.o \
+				$(USERSPACE_DIR)/ctests/$$prog.c \
+				$(abspath $(MUSL_SYSROOT))/lib/libc.a $$LIBGCC \
+				$(abspath $(MUSL_SYSROOT))/lib/crtn.o \
+				-o $(USERSPACE_BUILD_DIR)/$$prog; \
+		done; \
+	else echo "[USERSPACE] skip musl ctests: submodule $(MUSL_DIR) not initialized (run: git submodule update --init --recursive)"; fi
 	@echo "Userspace programs built in $(USERSPACE_BUILD_DIR)/"
 
 iso: $(BUILD_DIR)/kernel.elf userspace

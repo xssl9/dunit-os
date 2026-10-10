@@ -1,0 +1,15 @@
+{
+  "description": "Dunit musl port (M6) fs: write path — buffered stdio over the native Write syscall. userspace/ctests/musl_stdio.c calls printf()/fflush(); musl's __stdio_write has no writev on Dunit, so the port drains the stream with per-buffer Write. Proves formatted output works through the ported libc. Run: tools/qemu_test.py --build --markers-file tools/m6_musl_stdio_markers.json --post-boot-delay 3 --settle 4 --cmd-timeout 40 --timeout 160 --boot-timeout 100",
+  "run": {
+    "config": "limine.conf",
+    "cmd": ["exec musl_stdio"]
+  },
+  "required": [
+    { "marker": "[TERM-007] Starting main loop", "claim": "the system booted to the terminal", "source": "kernel/src/lib.rs" },
+    { "marker": "[MUSL-STDIO] printf 42 ok 0xff", "claim": "printf -> vfprintf -> __stdio_write -> native Write produced correctly formatted output through the ported libc", "source": "userspace/ctests/musl_stdio.c" },
+    { "marker": "[MUSL-STDIO] OK", "claim": "stdio buffering + fflush + a clean return all work on the Dunit port", "source": "userspace/ctests/musl_stdio.c" }
+  ],
+  "forbidden": [
+    { "marker": "[PANIC]", "why": "kernel panic", "source": "kernel/src/lib.rs" }
+  ]
+}
