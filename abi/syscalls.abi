@@ -81,3 +81,4 @@
 71	SetVideoMode
 72	Fsync
 73	Fsck
+74	AbiQuery

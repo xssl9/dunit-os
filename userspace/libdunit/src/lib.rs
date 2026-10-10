@@ -587,6 +587,25 @@ pub fn fsck(report: &mut FsckReport) -> isize {
     syscall1(SYSCALL_FSCK, report as *mut FsckReport as usize)
 }
 
+/// `abi_query` selectors (Dunit Userspace ABI v0). Mirror the kernel's
+/// `sys_abi_query` field numbers.
+pub const ABI_QUERY_VERSION: usize = 0;
+pub const ABI_QUERY_SYSCALL_COUNT: usize = 1;
+pub const ABI_QUERY_HAS_SYSCALL: usize = 2;
+
+/// Query the kernel's ABI contract: version, syscall count, or whether a given
+/// syscall number is implemented. Lets programs negotiate features explicitly
+/// instead of guessing from a kernel version. Returns the field value, or a
+/// negative errno (`ENOSYS` for an unknown selector).
+pub fn abi_query(query: usize, arg: usize) -> isize {
+    syscall2(SYSCALL_ABI_QUERY, query, arg)
+}
+
+/// ABI major version the kernel implements (`0` for v0).
+pub fn abi_version() -> isize {
+    abi_query(ABI_QUERY_VERSION, 0)
+}
+
 pub fn print(s: &str) {
     write_stdout(s);
 }

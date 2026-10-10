@@ -83,6 +83,7 @@ pub enum Syscall {
     SetVideoMode = 71,
     Fsync = 72,
     Fsck = 73,
+    AbiQuery = 74,
 }
 
 impl Syscall {
@@ -163,6 +164,7 @@ impl Syscall {
             71 => Some(Syscall::SetVideoMode),
             72 => Some(Syscall::Fsync),
             73 => Some(Syscall::Fsck),
+            74 => Some(Syscall::AbiQuery),
             _ => None,
         }
     }
@@ -713,6 +715,7 @@ pub extern "C" fn syscall_handler(
         Syscall::SetVideoMode => sys_set_video_mode(arg0 as u32, arg1 as u32),
         Syscall::Fsync => sys_fsync(arg0 as u32),
         Syscall::Fsck => sys_fsck(arg0 as *mut UserFsckReport),
+        Syscall::AbiQuery => sys_abi_query(arg0 as usize, arg1 as usize),
     }
 }
 
@@ -1687,6 +1690,38 @@ fn sys_receive_message_from(msg: *mut u8, len: usize, sender_out: *mut u32) -> i
         pid.0, sender.0, received
     ));
     received as i64
+}
+
+/// Dunit Userspace ABI v0 capability query. Lets userspace negotiate features
+/// explicitly instead of inferring them from a kernel version. `query` selects a
+/// field; `arg` is query-specific:
+///   0 (VERSION)       -> ABI major version (0 for v0)
+///   1 (SYSCALL_COUNT) -> number of defined syscalls
+///   2 (HAS_SYSCALL)   -> 1 if syscall number `arg` is defined, else 0
+/// Any other `query` returns ENOSYS. Selector values are mirrored by libdunit's
+/// `ABI_QUERY_*` constants.
+fn sys_abi_query(query: usize, arg: usize) -> i64 {
+    const ABI_VERSION: i64 = 0;
+    match query {
+        0 => ABI_VERSION,
+        1 => {
+            // Size of the syscall number space (highest defined number + 1).
+            // Scan a bounded range and take the MAX so a cfg-gated hole (e.g. the
+            // boot-smoke-only SmokeDone=21) can't truncate the count the way a
+            // stop-at-first-gap scan would.
+            let mut max = 0u64;
+            let mut n = 0u64;
+            while n < 256 {
+                if Syscall::from_u64(n).is_some() {
+                    max = n;
+                }
+                n += 1;
+            }
+            (max + 1) as i64
+        }
+        2 => Syscall::from_u64(arg as u64).is_some() as i64,
+        _ => ENOSYS,
+    }
 }
 
 fn sys_get_framebuffer(info: *mut FbInfo) -> i64 {

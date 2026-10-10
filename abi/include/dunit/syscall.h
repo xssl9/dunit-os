@@ -77,7 +77,8 @@
 #define SYS_SET_VIDEO_MODE 71
 #define SYS_FSYNC 72
 #define SYS_FSCK 73
+#define SYS_ABI_QUERY 74
 
-#define DUNIT_SYSCALL_COUNT 74
+#define DUNIT_SYSCALL_COUNT 75
 
 #endif /* DUNIT_SYSCALL_H */
