@@ -458,7 +458,7 @@ Green Tea Kernel native syscalls and objects
 - [x] Создать отдельный репозиторий `dunit-musl` как fork полного upstream source tree, не копировать выборочные `.c` и headers.
 - [x] Зафиксировать исходный upstream release/tag и commit в `UPSTREAM.md`.
 - [x] Подключить fork в `toolchains/dunit-musl/` как pinned submodule либо воспроизводимый pinned checkout.
-- [~] Вести Dunit-изменения тематическими commits: `build`, `crt`, `syscall`, `fs`, `vm`, `thread`, `signal`, `network`, `ldso`. **Готово:** `build`/`syscall`/`crt`/`fs`(write)/`vm`. **Осталось:** `fs`(files)/`thread`/`signal`/`network`/`ldso`.
+- [~] Вести Dunit-изменения тематическими commits: `build`, `crt`, `syscall`, `fs`, `vm`, `thread`, `signal`, `network`, `ldso`. **Готово:** `build`/`syscall`/`crt`/`fs`(write+files)/`vm` (musl hello/stdio/malloc/file на ядре). **В работе:** `thread` (инфраструктура есть, упирается в kernel clear-child-tid). **Осталось:** `signal`/`network`/`ldso`.
 - [ ] Хранить таблицу отличий от upstream и регулярно переносить bug/security fixes; обновление версии должно проходить полный libc test gate.
 - [x] Не удалять из fork временно неподдерживаемые подсистемы: исключать их build profile, чтобы позднее не восстанавливать дерево вручную. (Неподдержанные syscalls → документированный `-ENOSYS` sentinel, ни один файл не удалён.)
 - [ ] Проверить лицензионные notices musl и генерировать перечень исходных версий в SDK/image metadata.
