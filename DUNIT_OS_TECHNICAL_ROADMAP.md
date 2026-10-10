@@ -106,7 +106,7 @@ root@dunit:~#
 
 - **Реализовано:** Limine handoff, HHDM, memory map, framebuffer и modules в `hal/src/boot_main.c:166`; выбор Terminal Mode по `mode=terminal` в `hal/src/boot_main.c:205`; меню в `limine.conf`; deterministic configs `limine_test_terminal.conf` и `limine_test_gui.conf`.
 - **Реализовано:** host installer создаёт GPT, 64 MiB FAT32 ESP, DunitFS и ставит Limine BIOS stages (`tools/install_disk.py:96`, `:191`, `:227`, `:296`). Один image загрузился и через SeaBIOS, и через OVMF.
-- **Частично:** in-system installer пишет ESP payload, GPT и BIOS stages, но принимает только writable AHCI (`kernel/src/storage/installer.rs:78`); VirtIO install отвергается.
+- **Работает:** in-system installer транзакционен (validate→partition→format→copy→verify→boot config→sync с rollback) и принимает writable AHCI и VirtIO target (`kernel/src/storage/installer.rs` `is_supported_target`); проверено на матрице BIOS/UEFI × AHCI/VirtIO.
 - **Проблема:** `initrd::init()` создаёт пустой объект (`kernel/src/initrd.rs`), хотя boot log утверждает, что archive найден и распакован. Это вводящий в заблуждение лог.
 - **Проблема:** kernel не читает `/boot/userspace`; binaries в `/app` запекаются в kernel через `kernel/src/fs/vfs.rs:8-38`.
 
@@ -403,7 +403,7 @@ Dunit DWM — отдельный policy shell поверх GUI Server:
 - [x] Расширить DunitFS: allocation bitmap/extents, directories, rename, unlink, timestamps, permissions, fsync, superblock generations, journal или metadata COW.
 - [x] Добавить `fsck.dunit`, read-only degraded mount и recovery report.
 - [x] Сделать installer transactional: validate -> partition -> format -> copy -> verify -> boot config -> sync.
-- [ ] Поддержать AHCI и VirtIO target; отдельно тестировать BIOS и UEFI.
+- [x] Поддержать AHCI и VirtIO target; отдельно тестировать BIOS и UEFI.
 - [ ] Разделить Live и installed manifests; Live имеет installer/recovery, installed — persistent root и first boot.
 
 **Цель/причина:** `/persist` рядом с embedded root не является законченной установкой. **Подсистемы:** installer, GPT, DunitFS, VFS, boot, init, build images. **Зависимости:** базовая часть параллельна GUI; DWM config persistence зависит от неё. **Результат:** system/users/apps обновляются с диска. **Готовность:** create/write/fsync/reboot/read; interrupted metadata update восстанавливается; kernel не содержит app binaries. **Тесты:** two-reboot content hash, 1000-file/large-file tests, disk-full, corrupted CRC, power-cut points, BIOS/UEFI × AHCI/VirtIO. **Риски:** filesystem corruption; нельзя использовать DunitFS v1 как единственную копию важных данных.

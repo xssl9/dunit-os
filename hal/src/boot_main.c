@@ -102,12 +102,18 @@ struct limine_memmap_response {
     struct limine_memmap_entry **entries;
 };
 
+struct limine_firmware_type_response {
+    uint64_t revision;
+    uint64_t firmware_type;
+};
+
 extern struct limine_framebuffer_response *get_framebuffer_response(void);
 extern struct limine_terminal_response *get_terminal_response(void);
 extern struct limine_kernel_file_response *get_kernel_file_response(void);
 extern struct limine_module_response *get_module_response(void);
 extern struct limine_hhdm_response *get_hhdm_response(void);
 extern struct limine_memmap_response *get_memmap_response(void);
+extern struct limine_firmware_type_response *get_firmware_type_response(void);
 
 void serial_init() {
     __asm__ volatile("outb %%al, %%dx" : : "a"((uint8_t)0x00), "d"((uint16_t)0x3F8 + 1));
@@ -202,6 +208,16 @@ void boot_main(void) {
         serial_write("[BOOT] memmap OK\r\n");
     } else {
         serial_write("[BOOT] memmap FAIL\r\n");
+    }
+
+    // Firmware type (BIOS vs UEFI) is reported so the installer test matrix can
+    // prove it booted under the firmware it meant to exercise.
+    struct limine_firmware_type_response *fw_resp = get_firmware_type_response();
+    if (fw_resp) {
+        serial_write(fw_resp->firmware_type == 0 ? "[BOOT] firmware=BIOS\r\n"
+                                                 : "[BOOT] firmware=UEFI\r\n");
+    } else {
+        serial_write("[BOOT] firmware=unknown\r\n");
     }
 
     int terminal_mode = 0;

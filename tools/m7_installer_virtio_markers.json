@@ -1,0 +1,30 @@
+{
+  "description": "M5 item 7 — installer VirtIO target. Same transactional installer self-test as item 6 (tools/m6_installer_markers.json) but the blank scratch disk is attached on the VirtIO bus (legacy virtio-blk-pci -> vd0) instead of AHCI, proving the installer and its block I/O work over VirtIO as well as AHCI. The kernel's virtio_blk driver now honours multi-sector block buffers (vd0_read/vd0_write loop per sector), so gpt::write, dunitfs::format, the ESP copy, verify and install_bios all run through the generic block registry against vd0. find_scratch_target()/plan() accept driver in {ahci, virtio-blk}. On an ISO boot the AHCI controller is present but carries no data disk (the CD is ATAPI), so the only writable scratch target is vd0. Run (BIOS): tools/qemu_test.py --build --markers-file tools/m7_installer_virtio_markers.json --timeout 420 --boot-timeout 380 --post-boot-delay 2 --settle 2 --require-marker '[BOOT] firmware=BIOS'. Run (UEFI): add --uefi and --require-marker '[BOOT] firmware=UEFI'.",
+  "run": {
+    "config": "limine_test_terminal.conf",
+    "scratch_disk_mib": 256,
+    "scratch_bus": "virtio",
+    "cmd": []
+  },
+  "required": [
+    { "marker": "[VIRTIO-BLK] registered vd0", "claim": "the virtio-blk scratch disk came up as a writable block device", "source": "kernel/src/drivers/virtio_blk.rs" },
+    { "marker": "[INSTALL-TEST] START", "claim": "the installer self-test launched before auto_mount", "source": "kernel/src/storage/installer.rs" },
+    { "marker": "[INSTALL-TEST] target=vd0", "claim": "the installer selected the VirtIO disk as its target", "source": "kernel/src/storage/installer.rs" },
+    { "marker": "[INSTALL] rollback restored partition table", "claim": "rollback restored both partition-table snapshots on VirtIO after the injected fault", "source": "kernel/src/storage/installer.rs" },
+    { "marker": "[INSTALL-TEST] rollback restored ok", "claim": "the VirtIO scratch's FRONT/BACK regions are byte-identical to the pre-write state and no GPT remains — rollback is real over VirtIO", "source": "kernel/src/storage/installer.rs" },
+    { "marker": "[INSTALL] transaction committed root_start=", "claim": "the clean transaction ran all phases to a commit over VirtIO", "source": "kernel/src/storage/installer.rs" },
+    { "marker": "[INSTALL-TEST] install verified ok", "claim": "the VirtIO-installed disk reads back with ESP + DUNIT-SYSTEM, a Clean fsck, and a bootable MBR signature", "source": "kernel/src/storage/installer.rs" },
+    { "marker": "[INSTALL-TEST] OK", "claim": "both installer self-test phases passed over VirtIO", "source": "kernel/src/storage/installer.rs" },
+    { "marker": "[DUNITFS] auto-mounted", "claim": "the freshly installed VirtIO DUNIT-SYSTEM partition was mounted at /persist by auto_mount — the install is real and mountable", "source": "kernel/src/fs/dunitfs.rs" },
+    { "marker": "[TERM-007] Starting main loop", "claim": "the Live system booted to the terminal after all self-tests", "source": "kernel/src/lib.rs" }
+  ],
+  "forbidden": [
+    { "marker": "[PANIC]", "why": "kernel panic", "source": "kernel/src/lib.rs" },
+    { "marker": "[INSTALL-TEST] skipped: no scratch target", "why": "the VirtIO scratch disk was not detected as an install target", "source": "kernel/src/storage/installer.rs" },
+    { "marker": "[INSTALL-TEST] skipped: installer payloads unavailable", "why": "the ESP/BIOS payloads were missing", "source": "kernel/src/storage/installer.rs" },
+    { "marker": "[INSTALL-TEST] FAIL", "why": "the installer self-test failed over VirtIO", "source": "kernel/src/storage/installer.rs" },
+    { "marker": "[INSTALL-TEST] rollback restored FAIL", "why": "rollback did not restore the partition table on VirtIO", "source": "kernel/src/storage/installer.rs" },
+    { "marker": "[INSTALL-TEST] install verified FAIL", "why": "the clean VirtIO install did not read back consistent", "source": "kernel/src/storage/installer.rs" },
+    { "marker": "[INSTALL] rollback restore FAILED", "why": "the rollback write-back itself failed on VirtIO", "source": "kernel/src/storage/installer.rs" }
+  ]
+}

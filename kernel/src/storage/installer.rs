@@ -122,11 +122,18 @@ fn fault_check(active: Fault, point: Fault) -> Result<(), InstallError> {
         Ok(())
     }
 }
+
+/// Block drivers the installer can target. Both expose a writable 512-byte block
+/// device through the generic registry, so every phase (gpt/format/copy/verify/
+/// boot config/sync) is driver-agnostic — only this gate names them.
+fn is_supported_target(driver: &str) -> bool {
+    driver == "ahci" || driver == "virtio-blk"
+}
 /// Validate phase (read-only): check the device and both payloads, compute the
 /// GPT geometry, and build the two partition specs. No disk writes happen here,
 /// so a validation failure needs no rollback.
 fn plan(device: BlockDeviceInfo) -> Result<InstallPlan, InstallError> {
-    if device.readonly || device.block_size != BLOCK_SIZE || device.driver != "ahci" {
+    if device.readonly || device.block_size != BLOCK_SIZE || !is_supported_target(device.driver) {
         return Err(InstallError::UnsupportedDevice);
     }
     if dunitfs::is_mounted() {
@@ -471,7 +478,7 @@ fn find_scratch_target() -> Option<BlockDeviceInfo> {
     let mut devices = [None; 8];
     let count = block::snapshot(&mut devices);
     for info in devices[..count].iter().flatten() {
-        if info.driver != "ahci" || info.readonly || info.block_size != BLOCK_SIZE {
+        if info.readonly || info.block_size != BLOCK_SIZE || !is_supported_target(info.driver) {
             continue;
         }
         if gpt::read(*info).is_err() {

@@ -361,6 +361,29 @@ def type_command(qmp: Qmp, text: str) -> None:
     qmp.send_key(["ret"])
 
 
+def resolve_ovmf() -> tuple[Path, Path]:
+    """Locate an OVMF firmware (CODE, VARS) pair for UEFI boot. Raises if none."""
+    code_candidates = [
+        "/usr/share/edk2/x64/OVMF_CODE.4m.fd",
+        "/usr/share/edk2-ovmf/x64/OVMF_CODE.4m.fd",
+        "/usr/share/ovmf/x64/OVMF_CODE.4m.fd",
+        "/usr/share/OVMF/OVMF_CODE_4M.fd",
+        "/usr/share/OVMF/OVMF_CODE.fd",
+    ]
+    vars_candidates = [
+        "/usr/share/edk2/x64/OVMF_VARS.4m.fd",
+        "/usr/share/edk2-ovmf/x64/OVMF_VARS.4m.fd",
+        "/usr/share/ovmf/x64/OVMF_VARS.4m.fd",
+        "/usr/share/OVMF/OVMF_VARS_4M.fd",
+        "/usr/share/OVMF/OVMF_VARS.fd",
+    ]
+    code = next((Path(p) for p in code_candidates if Path(p).is_file()), None)
+    vars_ = next((Path(p) for p in vars_candidates if Path(p).is_file()), None)
+    if code is None or vars_ is None:
+        raise RuntimeError("OVMF firmware not found for --uefi (install edk2-ovmf)")
+    return code, vars_
+
+
 def build_qemu_command(image: Path, is_disk: bool, accel: str, mem: str,
                        qmp_sock: Path, serial_log: Path, extra: list[str],
                        display: str = "none") -> list[str]:
@@ -411,6 +434,10 @@ def run(args: argparse.Namespace) -> RunResult:
         args.cmd = list(run_defaults["cmd"])
     if run_defaults.get("scratch_disk_mib") and not args.scratch_disk:
         args.scratch_disk = int(run_defaults["scratch_disk_mib"])
+    if run_defaults.get("scratch_bus") and args.scratch_bus == "ahci":
+        args.scratch_bus = str(run_defaults["scratch_bus"])
+    if run_defaults.get("uefi") and not args.uefi:
+        args.uefi = bool(run_defaults["uefi"])
 
     is_disk = False
     if args.build:
@@ -439,9 +466,21 @@ def run(args: argparse.Namespace) -> RunResult:
 
     display = args.display if getattr(args, "interactive", False) else "none"
     extra_args = list(args.qemu_arg or [])
+    # UEFI: prepend an OVMF pflash pair (CODE read-only, a writable VARS copy) so
+    # the same image boots through its EFI path instead of SeaBIOS.
+    if args.uefi:
+        code, vars_src = resolve_ovmf()
+        vars_copy = workdir / "ovmf-vars.fd"
+        shutil.copyfile(vars_src, vars_copy)
+        extra_args += [
+            "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={code}",
+            "-drive", f"if=pflash,format=raw,unit=1,file={vars_copy}",
+        ]
+        print(f"[qemu_test] UEFI firmware: {code}", file=sys.stderr)
     # A blank scratch disk lets the in-kernel installer self-test provision a
-    # pristine AHCI target. On an ISO boot the CD is ATAPI (the AHCI driver skips
-    # it), so this is the only SATA disk and enumerates as sda.
+    # pristine target. On an ISO boot the CD is ATAPI (the AHCI driver skips it),
+    # so an AHCI scratch is the only SATA disk and enumerates as sda; a virtio
+    # scratch registers as vd0.
     if args.scratch_disk:
         scratch = workdir / "dunit-scratch.img"
         try:
@@ -450,9 +489,15 @@ def run(args: argparse.Namespace) -> RunResult:
             pass
         with open(scratch, "wb") as fh:
             fh.truncate(int(args.scratch_disk) * 1024 * 1024)
-        extra_args += ["-drive", f"file={scratch},format=raw,if=ide"]
+        if args.scratch_bus == "virtio":
+            extra_args += [
+                "-drive", f"file={scratch},format=raw,if=none,id=dunitscratch",
+                "-device", "virtio-blk-pci,drive=dunitscratch,disable-modern=on,disable-legacy=off",
+            ]
+        else:
+            extra_args += ["-drive", f"file={scratch},format=raw,if=ide"]
         print(f"[qemu_test] blank scratch disk: {scratch} "
-              f"({args.scratch_disk} MiB)", file=sys.stderr)
+              f"({args.scratch_disk} MiB, bus={args.scratch_bus})", file=sys.stderr)
     qemu_cmd = build_qemu_command(image, is_disk, args.accel, args.mem, qmp_sock,
                                   serial_log, extra_args, display)
     print("[qemu_test] launch:", " ".join(qemu_cmd), file=sys.stderr)
@@ -670,6 +715,12 @@ def main() -> int:
     parser.add_argument("--scratch-disk", type=int, metavar="SIZE_MB",
                         help="attach a blank raw AHCI scratch disk of SIZE_MB MiB before "
                              "booting (for the installer self-test; enumerates as sda on an ISO boot)")
+    parser.add_argument("--scratch-bus", choices=["ahci", "virtio"], default="ahci",
+                        help="bus for --scratch-disk: ahci (if=ide -> sda) or virtio "
+                             "(legacy virtio-blk-pci -> vd0); default ahci")
+    parser.add_argument("--uefi", action="store_true",
+                        help="boot under UEFI firmware (OVMF pflash) instead of the default "
+                             "SeaBIOS; the same image's EFI boot path is exercised")
     parser.add_argument("--json", action="store_true",
                         help="print the result as JSON instead of human text")
     parser.add_argument("--interactive", action="store_true",

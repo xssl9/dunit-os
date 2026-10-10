@@ -105,6 +105,17 @@ fn init_device(dev: pci::PciDevice) -> Option<VirtioBlkDevice> {
     pci::enable_io_bus_master(dev);
 
     outb(io_base + REG_DEVICE_STATUS, 0);
+    // Legacy virtio reset is not instantaneous when firmware already drove the
+    // device: under OVMF/UEFI the firmware's own virtio-blk driver leaves the
+    // device in DRIVER_OK with its queue configured, so we must re-read the
+    // status until it reads back 0 before re-initialising — otherwise the first
+    // virtqueue request after our DRIVER_OK is silently dropped. SeaBIOS never
+    // touches the scratch device, so this spins zero times there.
+    let mut reset_spins = 0usize;
+    while inb(io_base + REG_DEVICE_STATUS) != 0 && reset_spins < 1_000_000 {
+        core::hint::spin_loop();
+        reset_spins += 1;
+    }
     outb(io_base + REG_DEVICE_STATUS, STATUS_ACKNOWLEDGE);
     outb(
         io_base + REG_DEVICE_STATUS,
@@ -115,6 +126,8 @@ fn init_device(dev: pci::PciDevice) -> Option<VirtioBlkDevice> {
     outl(io_base + REG_GUEST_FEATURES, 0);
 
     outw(io_base + REG_QUEUE_SELECT, 0);
+    // Tear down any queue the firmware left programmed before sizing our own.
+    outl(io_base + REG_QUEUE_PFN, 0);
     let queue_size = inw(io_base + REG_QUEUE_SIZE) as usize;
     let queue_bytes = vring_bytes(queue_size);
     if queue_size < 3 || queue_bytes > MAX_QUEUE_PAGES * 4096 {
@@ -151,6 +164,7 @@ fn init_device(dev: pci::PciDevice) -> Option<VirtioBlkDevice> {
         return None;
     }
 
+
     Some(VirtioBlkDevice {
         io_base,
         capacity_sectors: capacity,
@@ -164,16 +178,32 @@ fn init_device(dev: pci::PciDevice) -> Option<VirtioBlkDevice> {
 }
 
 fn vd0_read(lba: u64, buf: &mut [u8]) -> Result<usize, BlockError> {
-    transfer(lba, buf, false)
+    if buf.is_empty() || buf.len() % SECTOR_SIZE != 0 {
+        return Err(BlockError::BufferTooSmall);
+    }
+    // The vring request path moves one sector at a time; loop so the block-device
+    // contract honours multi-sector buffers exactly like the AHCI driver (needed
+    // for the installer, which snapshots/copies many blocks per call).
+    let sectors = buf.len() / SECTOR_SIZE;
+    for i in 0..sectors {
+        let mut tmp = [0u8; SECTOR_SIZE];
+        transfer(lba + i as u64, &mut tmp, false)?;
+        buf[i * SECTOR_SIZE..(i + 1) * SECTOR_SIZE].copy_from_slice(&tmp);
+    }
+    Ok(buf.len())
 }
 
 fn vd0_write(lba: u64, buf: &[u8]) -> Result<usize, BlockError> {
-    if buf.len() < SECTOR_SIZE {
+    if buf.is_empty() || buf.len() % SECTOR_SIZE != 0 {
         return Err(BlockError::BufferTooSmall);
     }
-    let mut tmp = [0u8; SECTOR_SIZE];
-    tmp.copy_from_slice(&buf[..SECTOR_SIZE]);
-    transfer(lba, &mut tmp, true)
+    let sectors = buf.len() / SECTOR_SIZE;
+    for i in 0..sectors {
+        let mut tmp = [0u8; SECTOR_SIZE];
+        tmp.copy_from_slice(&buf[i * SECTOR_SIZE..(i + 1) * SECTOR_SIZE]);
+        transfer(lba + i as u64, &mut tmp, true)?;
+    }
+    Ok(buf.len())
 }
 
 fn transfer(lba: u64, buf: &mut [u8], write: bool) -> Result<usize, BlockError> {
@@ -317,13 +347,19 @@ fn alloc_contiguous_queue(bytes: usize) -> Option<(usize, usize)> {
             index += 1;
         }
 
-        if contiguous {
+        // A queue at physical page 0 is unusable: legacy virtio treats
+        // QUEUE_PFN == 0 as "no queue". The PMM can hand out frame 0 under some
+        // firmware memory maps (seen under OVMF/UEFI), so require a non-zero base
+        // and never return frame 0 to the pool, or we would draw it again.
+        if contiguous && first != 0 {
             return Some((first, vmm::phys_to_virt(first)));
         }
 
         let mut free_index = 0usize;
         while free_index < pages {
-            pmm.free_frame(PhysicalAddress::from_usize(frames[free_index]));
+            if frames[free_index] != 0 {
+                pmm.free_frame(PhysicalAddress::from_usize(frames[free_index]));
+            }
             free_index += 1;
         }
         attempts += 1;
@@ -332,8 +368,22 @@ fn alloc_contiguous_queue(bytes: usize) -> Option<(usize, usize)> {
 }
 
 fn alloc_frame_pair() -> Option<(usize, usize)> {
-    let frame = get_pmm()?.alloc_frame()?;
-    Some((frame.as_usize(), vmm::phys_to_virt(frame.as_usize())))
+    let pmm = get_pmm()?;
+    // Avoid physical frame 0 for the DMA buffer too (same firmware-dependent
+    // free-list quirk); leak a frame-0 draw and take the next one.
+    let mut leaked0 = false;
+    loop {
+        let frame = pmm.alloc_frame()?;
+        let phys = frame.as_usize();
+        if phys == 0 {
+            if leaked0 {
+                return None;
+            }
+            leaked0 = true;
+            continue;
+        }
+        return Some((phys, vmm::phys_to_virt(phys)));
+    }
 }
 
 fn fail_device(io_base: u16) {
@@ -342,6 +392,10 @@ fn fail_device(io_base: u16) {
 
 fn inw(port: u16) -> u16 {
     unsafe { hal::hal_inw(port) }
+}
+
+fn inb(port: u16) -> u8 {
+    unsafe { hal::hal_inb(port) }
 }
 
 fn inl(port: u16) -> u32 {
