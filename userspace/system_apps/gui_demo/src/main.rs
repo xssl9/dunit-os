@@ -50,11 +50,8 @@ fn panic(_: &PanicInfo) -> ! {
     libdunit::exit(101)
 }
 
-/// The font, embedded in the ELF (assets still ship in-image at this stage).
-static FONT_BYTES: &[u8] = include_bytes!("../../../../assets/fonts/DejaVuSans.ttf");
-
 /// Load the configured TTF (`[desktop] font`) from the VFS, falling back to the
-/// embedded `FONT_BYTES` on any error — the desktop font is a live config knob.
+/// shipped /assets default font on any error — the desktop font is a live config knob.
 fn load_font() -> Result<Font, ()> {
     let cfg = dwm_settings::load();
     if let Some(bytes) = libdunit::read_binary(cfg.desktop.font.as_str(), 4 * 1024 * 1024) {
@@ -62,7 +59,9 @@ fn load_font() -> Result<Font, ()> {
             return Ok(f);
         }
     }
-    Font::parse(FONT_BYTES.to_vec()).map_err(|_| ())
+    libdunit::read_binary("/assets/fonts/DejaVuSans.ttf", 4 * 1024 * 1024)
+        .ok_or(())
+        .and_then(|b| Font::parse(b).map_err(|_| ()))
 }
 
 /// Unpack a `0xAARRGGBB` config word into a straight-alpha `Color`.

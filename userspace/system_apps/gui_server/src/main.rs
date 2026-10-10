@@ -2389,13 +2389,11 @@ fn two_digits(out: &mut [u8], off: usize, v: u64) {
 // numbers, dock initials); everything reference-facing now renders in the real
 // desktop font so it reads like the mockup.
 
-/// The desktop font, embedded in the ELF as a last-known-good fallback. The
-/// live font path is a config knob (`[desktop] font`); see `load_font`.
-static FONT_BYTES: &[u8] = include_bytes!("../../../../assets/fonts/DejaVuSans.ttf");
-
-/// Load the configured TTF from the VFS, falling back to `FONT_BYTES`. `None`
-/// only if even the embedded font fails to parse — then the shell silently
-/// keeps its 3x5 labels and skips the new crisp text.
+/// Load the configured TTF from the VFS, falling back to the shipped default
+/// font in the initrd (/assets/fonts) — assets live on the filesystem, not baked
+/// into the ELF. The live font path is a config knob (`[desktop] font`). `None`
+/// only if even the default font fails to parse — then the shell silently keeps
+/// its 3x5 labels and skips the new crisp text.
 fn load_font() -> Option<Font> {
     let cfg = settings::load();
     if let Some(bytes) = libdunit::read_binary(cfg.desktop.font.as_str(), 4 * 1024 * 1024) {
@@ -2403,7 +2401,7 @@ fn load_font() -> Option<Font> {
             return Some(f);
         }
     }
-    Font::parse(FONT_BYTES.to_vec()).ok()
+    libdunit::read_binary("/assets/fonts/DejaVuSans.ttf", 4 * 1024 * 1024).and_then(|b| Font::parse(b).ok())
 }
 
 fn round_i32(v: f32) -> i32 {

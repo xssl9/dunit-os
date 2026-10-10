@@ -103,13 +103,10 @@ const POLL_MS: u64 = 40;
 
 // APPEND_MARKER
 
-/// The window's text font, embedded in the ELF (M4 still ships assets in-image).
-/// Monospace so the cell-grid columns line up even on the built-in fallback path.
-static FONT_BYTES: &[u8] = include_bytes!("../../../../assets/fonts/DejaVuSansMono.ttf");
-
-/// Load the terminal's TTF, falling back to the embedded `FONT_BYTES` on any
-/// error. Prefers the per-terminal `[terminal] font` when set; otherwise the
-/// shared `[desktop] font`. Both are live config knobs.
+/// Load the terminal's TTF, falling back to the shipped monospace default in the
+/// initrd (/assets/fonts) on any error — assets live on the filesystem, not baked
+/// into the ELF. Prefers the per-terminal `[terminal] font` when set; otherwise
+/// the shared `[desktop] font`. Both are live config knobs.
 fn load_font(tcfg: &dwm_settings::TerminalCfg) -> Result<Font, ()> {
     let cfg = dwm_settings::load();
     let path = if tcfg.font.as_str().is_empty() {
@@ -122,7 +119,9 @@ fn load_font(tcfg: &dwm_settings::TerminalCfg) -> Result<Font, ()> {
             return Ok(f);
         }
     }
-    Font::parse(FONT_BYTES.to_vec()).map_err(|_| ())
+    libdunit::read_binary("/assets/fonts/DejaVuSansMono.ttf", 4 * 1024 * 1024)
+        .ok_or(())
+        .and_then(|b| Font::parse(b).map_err(|_| ()))
 }
 
 #[panic_handler]
