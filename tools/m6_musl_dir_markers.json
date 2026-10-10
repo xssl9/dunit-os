@@ -1,0 +1,16 @@
+{
+  "description": "Dunit musl port (M6) fs: getdents — directory iteration over the native Readdir. userspace/ctests/musl_dir.c opendir(/app), reads all entries with readdir, finds its own /app/musl_dir, closedir. The adapter snapshots the path-based Readdir in opendir and serializes it into struct dirent records for readdir. Run: tools/qemu_test.py --build --markers-file tools/m6_musl_dir_markers.json --post-boot-delay 3 --settle 4 --cmd-timeout 45 --timeout 160 --boot-timeout 110",
+  "run": {
+    "config": "limine.conf",
+    "cmd": ["exec musl_dir"]
+  },
+  "required": [
+    { "marker": "[TERM-007] Starting main loop", "claim": "the system booted to the terminal", "source": "kernel/src/lib.rs" },
+    { "marker": "[MUSL-DIR] /app entries=", "claim": "opendir+readdir enumerated /app via the native Readdir snapshot", "source": "userspace/ctests/musl_dir.c" },
+    { "marker": "[MUSL-DIR] OK", "claim": "the listing has many entries and includes the program's own name — the getdents adapter works", "source": "userspace/ctests/musl_dir.c" }
+  ],
+  "forbidden": [
+    { "marker": "[PANIC]", "why": "kernel panic", "source": "kernel/src/lib.rs" },
+    { "marker": "[MUSL-DIR] FAIL", "why": "opendir failed or the listing was wrong", "source": "userspace/ctests/musl_dir.c" }
+  ]
+}
