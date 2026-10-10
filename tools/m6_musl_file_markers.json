@@ -1,0 +1,17 @@
+{
+  "description": "Dunit musl port (M6) fs: files — the open adapter (POSIX flag + pointer/length translation to the native Open) plus read/write/close. userspace/ctests/musl_file.c opens an existing initrd file read-only and checks its ELF magic, then does a write+read roundtrip in /persist. Run: tools/qemu_test.py --build --markers-file tools/m6_musl_file_markers.json --post-boot-delay 3 --settle 4 --cmd-timeout 45 --timeout 160 --boot-timeout 100",
+  "run": {
+    "config": "limine.conf",
+    "cmd": ["exec musl_file"]
+  },
+  "required": [
+    { "marker": "[TERM-007] Starting main loop", "claim": "the system booted to the terminal", "source": "kernel/src/lib.rs" },
+    { "marker": "[MUSL-FILE] ro ELF magic ok", "claim": "open(O_RDONLY) flag translation + read + close read an existing file over the Dunit VFS", "source": "userspace/ctests/musl_file.c" },
+    { "marker": "[MUSL-FILE] rw roundtrip ok: wrote 19 read 19", "claim": "open(O_WRONLY|O_CREAT|O_TRUNC) + write + close + reopen + read round-tripped a file in /persist", "source": "userspace/ctests/musl_file.c" },
+    { "marker": "[MUSL-FILE] OK", "claim": "the full fs: open/read/write/close path works through the ported libc", "source": "userspace/ctests/musl_file.c" }
+  ],
+  "forbidden": [
+    { "marker": "[PANIC]", "why": "kernel panic", "source": "kernel/src/lib.rs" },
+    { "marker": "[MUSL-FILE] FAIL", "why": "a file-IO check failed", "source": "userspace/ctests/musl_file.c" }
+  ]
+}
