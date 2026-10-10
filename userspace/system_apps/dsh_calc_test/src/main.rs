@@ -48,16 +48,23 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 /// Cumulative capture of everything read off the pty master, so a needle that
 /// spans two reads (or already arrived earlier) is still found.
 struct Capture {
-    buf: [u8; 512],
+    buf: [u8; 1024],
     len: usize,
 }
 
 impl Capture {
     fn new() -> Self {
         Capture {
-            buf: [0u8; 512],
+            buf: [0u8; 1024],
             len: 0,
         }
+    }
+
+    /// Drop everything captured so far, so a later milestone starts with the
+    /// full buffer instead of accumulating earlier output toward the overflow
+    /// cap. Only called at points where no needle we still need has arrived yet.
+    fn reset(&mut self) {
+        self.len = 0;
     }
 
     /// Pump the pty master until `needle` appears in the cumulative capture.
@@ -133,6 +140,19 @@ pub extern "C" fn _start() -> ! {
     if !cap.pump_until(id, b"dsh ") {
         fail(id, child, "dsh_calc_test: no dsh prompt");
     }
+
+    // 1b. `ls /` exercises dsh's readdir() syscall — the exact path that failed
+    //     with EINVAL in the GUI terminal, because dsh asks for 256 directory
+    //     entries while the kernel used to cap a request at 64 and reject it. A
+    //     real root entry ("system") in the output proves readdir now serves the
+    //     full request instead of erroring.
+    if libdunit::pty_write(id, b"ls /\n") <= 0 {
+        fail(id, child, "dsh_calc_test: pty_write ls failed");
+    }
+    if !cap.pump_until(id, b"system") {
+        fail(id, child, "dsh_calc_test: ls / did not list the root (readdir EINVAL?)");
+    }
+    cap.reset();
 
     // 2. Launch calc through dsh's dispatch (the spawn_external bridge). Wait
     //    for calc's own prompt BEFORE sending the expression, so dsh has fully

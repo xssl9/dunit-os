@@ -295,7 +295,11 @@ const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
 const MAX_FD: u32 = 1024;
 const MAX_USER_COPY: usize = 64 * 1024;
 const MAX_USER_PATH: usize = 256;
-const MAX_USER_DIRENTS: usize = 64;
+// Upper bound on how many directory entries one readdir() call may request. The
+// kernel-side scratch is heap-allocated to exactly the requested capacity, so
+// this only bounds that allocation; it is large enough that `dsh` (which asks
+// for 256) and typical directories are served in a single call.
+const MAX_USER_DIRENTS: usize = 1024;
 const USER_CONTEXT_RETURN_MAGIC: i64 = 0x0051_5953_4341_4C4C;
 #[cfg(feature = "boot-smoke-tests")]
 const SMOKE_USER_PAGE: usize = 0x0000_0000_0040_0000;
@@ -1343,9 +1347,9 @@ fn sys_readdir(
         None => return EINVAL,
     };
 
-    let mut kernel_entries = [crate::fs::vfs::DirEntry::empty(); MAX_USER_DIRENTS];
+    let mut kernel_entries = alloc::vec![crate::fs::vfs::DirEntry::empty(); capacity];
     let count = match crate::fs::vfs::get_vfs().ok_or(EIO).and_then(|vfs| {
-        vfs.readdir_into_at(&cwd, &path, &mut kernel_entries[..capacity])
+        vfs.readdir_into_at(&cwd, &path, &mut kernel_entries[..])
             .map_err(vfs_error_to_errno)
     }) {
         Ok(count) => count,
