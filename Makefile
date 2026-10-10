@@ -28,6 +28,13 @@ BUILD_DIR = build
 ISO_DIR = $(BUILD_DIR)/iso
 USERSPACE_BUILD_DIR = $(BUILD_DIR)/userspace
 
+# Dunit musl port (M6): the x86_64-dunit libc fork lives in the submodule
+# toolchains/dunit-musl. build-libc.sh produces a static libc.a + crt objects
+# into this sysroot (built once; the recipe is skipped while libc.a exists).
+MUSL_DIR = toolchains/dunit-musl
+MUSL_SYSROOT = $(BUILD_DIR)/dunit-sysroot
+MUSL_LIBC = $(MUSL_SYSROOT)/lib/libc.a
+
 USERSPACE_APPS = \
 	elf_demo fs_test exit_test args_test cwd_test path_test image_demo bmp_viewer color_test \
 	scheduler_test spawn_ready_test yield_child yield_test resumable_child resumable_test \
@@ -131,6 +138,18 @@ userspace:
 		-o $(USERSPACE_BUILD_DIR)/c_hello \
 		$(USERSPACE_DIR)/ctests/crt0.s $(USERSPACE_DIR)/ctests/hello.c \
 		-Wl,-T,$(USERSPACE_DIR)/userspace.ld -Wl,--build-id=none
+	@echo "[USERSPACE] building musl_hello (static musl on the Dunit port)"
+	@if [ -f $(MUSL_DIR)/tools/dunit/build-libc.sh ]; then set -e; \
+		[ -f $(abspath $(MUSL_LIBC)) ] || $(MUSL_DIR)/tools/dunit/build-libc.sh $(abspath $(MUSL_SYSROOT)); \
+		$(CC) -static -no-pie -nostdlib -nostartfiles -nostdinc \
+			-isystem $(abspath $(MUSL_SYSROOT))/include \
+			-fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables -O2 \
+			$(abspath $(MUSL_SYSROOT))/lib/crt1.o $(abspath $(MUSL_SYSROOT))/lib/crti.o \
+			$(USERSPACE_DIR)/ctests/musl_hello.c \
+			$(abspath $(MUSL_SYSROOT))/lib/libc.a $$($(CC) -print-libgcc-file-name) \
+			$(abspath $(MUSL_SYSROOT))/lib/crtn.o \
+			-o $(USERSPACE_BUILD_DIR)/musl_hello; \
+	else echo "[USERSPACE] skip musl_hello: submodule $(MUSL_DIR) not initialized (run: git submodule update --init --recursive)"; fi
 	@echo "Userspace programs built in $(USERSPACE_BUILD_DIR)/"
 
 iso: $(BUILD_DIR)/kernel.elf userspace

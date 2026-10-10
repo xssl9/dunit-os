@@ -1,0 +1,16 @@
+{
+  "description": "Dunit musl port (M6) — first static program linked against the ported libc. userspace/ctests/musl_hello.c is built with the host compiler against the x86_64-dunit sysroot (toolchains/dunit-musl, built by build-libc.sh), using musl's real crt1 + __libc_start_main + __init_tls + the native SetThreadPointer, and calls write() over the Dunit syscall. /app/musl_hello is launched from the terminal; its stdout is mirrored to serial. Proves the ported musl starts and runs on the Green Tea Kernel. Run: tools/qemu_test.py --build --markers-file tools/m6_musl_hello_markers.json --post-boot-delay 3 --settle 3 --timeout 140 --boot-timeout 90",
+  "run": {
+    "config": "limine.conf",
+    "cmd": ["exec musl_hello"]
+  },
+  "required": [
+    { "marker": "[TERM-007] Starting main loop", "claim": "the system booted to the terminal", "source": "kernel/src/lib.rs" },
+    { "marker": "[MUSL-HELLO] start", "claim": "musl's crt1 + __libc_start_main + __init_tls + __set_thread_area (native SetThreadPointer) reached main() — the ported libc starts on the kernel", "source": "userspace/ctests/musl_hello.c" },
+    { "marker": "[MUSL-HELLO] argv0=", "claim": "__libc_start_main derived argc/argv from the Dunit SysV initial stack and passed them to main", "source": "userspace/ctests/musl_hello.c" },
+    { "marker": "[MUSL-HELLO] OK", "claim": "write() went through the ported libc to the native Dunit Write syscall and the program ran to a clean return", "source": "userspace/ctests/musl_hello.c" }
+  ],
+  "forbidden": [
+    { "marker": "[PANIC]", "why": "kernel panic", "source": "kernel/src/lib.rs" }
+  ]
+}
