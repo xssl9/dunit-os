@@ -51,14 +51,47 @@ instead of inferring them from a kernel version. libdunit exposes it as
   build, else `0` (so a cfg-gated syscall like the boot-smoke `SmokeDone` reports
   `0` in a production kernel)
 
+## Process-entry ABI (current)
+
+On entry the kernel ELF loader (`kernel/src/elf/mod.rs`) hands a program a
+SysV-style initial stack plus register args:
+
+```
+rsp -> argc            (u64)
+       argv[0..argc]   (*const u8), then NULL
+       envp[0..]       (*const u8), then NULL
+       (padding, then the NUL-terminated argv/env strings)
+```
+
+`%rsp` is `8 mod 16` (the x86-64 SysV *function*-entry shape a no-libc Rust
+`_start` expects after a `call`), and `%rdi=argc`, `%rsi=argv`, `%rdx=envp`.
+There is **no auxv** yet, and no reserved behaviour beyond fds `0/1/2` = stdin/
+stdout/stderr.
+
+To host musl this must become the standard SysV *process*-entry: `%rsp` `0 mod
+16` at `_start`, an auxiliary vector (`AT_PAGESZ`, `AT_RANDOM`, `AT_NULL`, …)
+after the envp NULL, and a Dunit `crt0`/`crt1` that parses it and calls
+`__libc_start_main` (the kernel must not know musl internals). That is a
+coordinated transition touching every app's `_start`, so it is its own step — not
+folded into the generative ABI work above.
+
+## ELF contract (current)
+
+The loader accepts ELF64, little-endian, `EM_X86_64`, **`ET_EXEC` only** (fixed-
+address static executables — matches M6's static-first stance; no PIE/`ET_DYN`).
+Segments honoured: `PT_LOAD` (mapped) and `PT_TLS` (TLS image, Variant II). No
+`PT_INTERP` / dynamic linker, no load bias, no `PT_GNU_RELRO` yet.
+
 ## Status / roadmap
 
 - [x] Syscall-number manifest + Rust/C generation + kernel consistency check.
 - [x] Error-number manifest + Rust/C generation + `error_name()` + kernel check (M6.3).
 - [x] Handle-rights manifest + Rust/C generation + kernel check (M6.3). Reserved fds `0/1/2` + inheritance still to document.
 - [x] Capability/feature query (`sys_abi_query`) + `abi_test` smoke (M6.3).
-- [ ] Scalar widths/alignment for `time_t`/`off_t`/`ino_t`/`pid_t`/pointers (M6.3).
-- [ ] Documented process-entry stack (`argc/argv/envp`/auxv) + crt1 (M6.3).
-- [ ] ELF contract: types, load bias, `PT_TLS`/`PT_GNU_RELRO`/`PT_INTERP` (M6.3).
+- [x] Process-entry ABI + ELF contract documented (current shape above).
+- [ ] **Next:** SysV process-entry transition — `rsp` 0 mod 16 + auxv + Dunit `crt0`/`crt1`, with a crt0 reader test (M6.3). Touches every app's `_start`; a dedicated verified cycle.
+- [ ] Scalar widths/alignment for `time_t`/`off_t`/`ino_t`/`pid_t`/pointers, versioned wire structs (M6.3).
+- [ ] M6.4 cross-toolchain `x86_64-dunit` + sysroot (installs these headers).
+- [ ] M6.2 create the `dunit-musl` fork repo + port (needs the GitHub repo).
 
 See `DUNIT_OS_TECHNICAL_ROADMAP.md` §M6 for the full plan.
